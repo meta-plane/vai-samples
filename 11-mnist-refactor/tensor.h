@@ -4,6 +4,7 @@
 
 #include "jsonParser.h"
 #include "vulkanApp.h"
+#include "error.h"
 #include <memory>
 #include <vector>
 #include <map>

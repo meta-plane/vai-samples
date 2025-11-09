@@ -7,13 +7,14 @@
 #include <cstdio>
 
 
+template<typename T>
 inline void assert_impl(
-    bool condition,
+    const T& condition,
     const char* condition_str,
     const std::source_location location = std::source_location::current()
 ) {
 #ifndef NDEBUG
-    if (!condition) {
+    if (!static_cast<bool>(condition)) {
         fprintf(stderr,
             "[ASSERT FAILED] \"%s\" at %s in %s(%d:%d)\n",
             condition_str,
@@ -28,6 +29,7 @@ inline void assert_impl(
 }
 
 #define ASSERT_(expr) assert_impl((expr), #expr, std::source_location::current())
+#define _ASSERT(expr) ASSERT_(expr)  // Alias for compatibility
 
 
 

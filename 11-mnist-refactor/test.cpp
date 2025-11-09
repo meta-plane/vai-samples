@@ -3,6 +3,7 @@
 #include "jsonParser.h"
 #include "timeChecker.hpp"
 #include <stb/stb_image.h>
+#include <cstring>  // memcpy
 
 
 

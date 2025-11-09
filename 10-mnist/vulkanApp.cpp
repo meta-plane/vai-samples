@@ -6,6 +6,7 @@
 #include <ranges>   // std::views::filter
 #include <algorithm>// std::all_of, std::any_of
 #include <fstream>
+#include <cstring>  // strcmp, memcpy
 #include "error.h"
 #include "templateHelper.h"
 #include "vulkanApp.h"
@@ -60,7 +61,7 @@ static VkInstance createVkInstance()
 
     auto allLayers = arrayFrom(vkEnumerateInstanceLayerProperties);
     bool ok = std::all_of(requiredLayers.begin(), requiredLayers.end(), [&](const char* layer) {
-        return std::any_of(allLayers.begin(), allLayers.end(), [&](const auto& porps) {
+        return std::any_of(allLayers.begin(), allLayers.end(), [&](const VkLayerProperties& porps) {
             return strcmp(layer, porps.layerName) == 0;
         });
     });
@@ -94,7 +95,7 @@ static std::vector<VkPhysicalDevice> getPhysicalDevices(
         auto deviceExtensions = arrayFrom(vkEnumerateDeviceExtensionProperties, physicalDevice, nullptr);
 
         return std::all_of(requiredExtentions.begin(), requiredExtentions.end(), [&](const char* reqExtention) {
-            return std::any_of(deviceExtensions.begin(), deviceExtensions.end(), [&](const auto& props) {
+            return std::any_of(deviceExtensions.begin(), deviceExtensions.end(), [&](const VkExtensionProperties& props) {
                 return strcmp(props.extensionName, reqExtention) == 0;
             });
         });

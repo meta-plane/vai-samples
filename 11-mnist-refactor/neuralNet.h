@@ -2,17 +2,20 @@
 #define NEURAL_NET_H
 
 #include "tensor.h"
+#include "error.h"
 #include <set>
 #include <list>
 #include <queue>
 #include <unordered_set>
 #include <unordered_map>
+#include <cstring>  // memcpy
 
 
 using namespace vk;
 
 class Node;
 class NodeSlot;
+class Edge;
 struct NodeFlow;
 
 
