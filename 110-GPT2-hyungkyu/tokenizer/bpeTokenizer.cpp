@@ -1,5 +1,5 @@
 #include "bpeTokenizer.h"
-#include "../error.h"
+#include "../core/error.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <sstream>

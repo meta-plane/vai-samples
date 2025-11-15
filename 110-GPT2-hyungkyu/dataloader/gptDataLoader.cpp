@@ -1,5 +1,5 @@
 #include "gptDataLoader.h"
-#include "../error.h"
+#include "../core/error.h"
 #include <algorithm>
 #include <random>
 #include <iostream>

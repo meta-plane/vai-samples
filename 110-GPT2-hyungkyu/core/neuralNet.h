@@ -470,13 +470,43 @@ inline void NeuralNet::run()
             }
             else // if (slot.type() != NodeSlot::input)
             {
-                if (!tensor.hasDeviceData())
+                // Handle internal/output slots with host data (e.g., weights)
+                if (tensor.hasHostData())
+                {
+                    _ASSERT(!tensor.hasDeviceData());
+
+                    size_t byteSize = tensor.numElements() * sizeof(float);
+
+                    Buffer buffer = bufferPool.requestBuffer(
+                        device,
+                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                        byteSize,
+                        byteSize * 1.5f
+                    );
+
+                    tensor.bindBuffer(buffer);
+
+                    memcpy(uploadBufferMappedAddress + uploadBufferOffset, tensor.hostData(), byteSize);
+
+                    cmdBuffer
+                        .copyBuffer(buffer, uploadBuffer(uploadBufferOffset, byteSize))
+                        .barrier(
+                            (PIPELINE_STAGE::TRANSFER, ACCESS::TRANSFER_WRITE)
+                            / buffer
+                            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+                        );
+
+                    uploadBufferOffset += byteSize;
+                    tensor.clearHostData();
+                }
+                else if (!tensor.hasDeviceData())
                 {
                     tensor.bindBuffer(bufferPool.requestBuffer(
                         device,
                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                        | VK_BUFFER_USAGE_TRANSFER_SRC_BIT // TODO: only needed for final output tensors, so we should remove for general case. 
-                        , 
+                        | VK_BUFFER_USAGE_TRANSFER_SRC_BIT // TODO: only needed for final output tensors, so we should remove for general case.
+                        ,
                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                         tensor.numElements() * sizeof(float)
                     ));
@@ -489,7 +519,7 @@ inline void NeuralNet::run()
                     - FlattenNode - out0 slot
                     */
                 }
-                    
+
                 if (slot.type() == NodeSlot::output)
                 {
                     for (const Edge* edge : slot.edges)

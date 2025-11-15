@@ -1,5 +1,6 @@
 void tokenizerTest();
 void dataLoaderTest();
+void embeddingNodeTest();
 
 int main()
 {
@@ -8,6 +9,9 @@ int main()
 
     // Run dataloader tests
     dataLoaderTest();
+
+    // Run embedding node tests (Vulkan version)
+    embeddingNodeTest();
 
     return 0;
 }

@@ -1,7 +1,7 @@
 #include "gptDataset.h"
 #include "gptDataLoader.h"
 #include "../tokenizer/bpeTokenizer.h"
-#include "../error.h"
+#include "../core/error.h"
 #include <iostream>
 #include <memory>
 #include <fstream>

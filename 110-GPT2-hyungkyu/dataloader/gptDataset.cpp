@@ -1,6 +1,6 @@
 #include "gptDataset.h"
 #include "../tokenizer/bpeTokenizer.h"
-#include "../error.h"
+#include "../core/error.h"
 #include <iostream>
 
 GPTDataset::GPTDataset(const std::string& text, BPETokenizer& tokenizer,
