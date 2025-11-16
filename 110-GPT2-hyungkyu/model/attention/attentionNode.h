@@ -54,10 +54,10 @@ public:
  * Output: [batch, seq_len, d_out]
  *
  * Internal weights:
- * - W_query: [d_in, d_in] - input projection
- * - W_key: [d_in, d_in] - input projection
- * - W_value: [d_in, d_in] - input projection
- * - W_out: [d_out, d_in] - output projection
+ * - W_query: [d_out, d_in] - project input to attention space
+ * - W_key: [d_out, d_in] - project input to attention space
+ * - W_value: [d_out, d_in] - project input to attention space
+ * - W_out: [d_out, d_out] - final transformation in output space
  */
 class MultiHeadAttentionNode : public Node
 {
@@ -96,7 +96,7 @@ class MultiHeadAttentionNode : public Node
     // Private helper functions for better readability
     IntermediateTensors allocateIntermediateBuffers(uint32_t B, uint32_t S, uint32_t D, uint32_t H, uint32_t HD);
     void computeQKVProjection(CommandBuffer& cmdBuff, const Tensor& input, IntermediateTensors& tensors,
-                              const Tensor& W_q, const Tensor& W_k, const Tensor& W_v, uint32_t B, uint32_t S, uint32_t D);
+                              const Tensor& W_q, const Tensor& W_k, const Tensor& W_v, uint32_t B, uint32_t S, uint32_t D_in, uint32_t D_out);
     void computeAttentionScores(CommandBuffer& cmdBuff, IntermediateTensors& tensors, uint32_t B, uint32_t H, uint32_t S, uint32_t HD);
     void applyCausalMaskToScores(CommandBuffer& cmdBuff, IntermediateTensors& tensors, uint32_t B, uint32_t H, uint32_t S);
     void computeSoftmax(CommandBuffer& cmdBuff, IntermediateTensors& tensors, uint32_t B, uint32_t H, uint32_t S);
