@@ -19,6 +19,8 @@ add_executable(${PROJECT_NAME}
     model/attention/attentionNodeTest.cpp
     model/transformer/transformerNode.cpp
     model/transformer/transformerNodeTest.cpp
+    model/gpt2.cpp
+    model/gpt2Test.cpp
 )
 
 add_definitions(

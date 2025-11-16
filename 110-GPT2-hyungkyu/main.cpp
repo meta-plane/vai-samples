@@ -3,6 +3,7 @@ void dataLoaderTest();
 void embeddingNodeTest();
 void attentionNodeTest();
 void transformerNodeTest();
+void gpt2Test();
 
 int main()
 {
@@ -20,6 +21,9 @@ int main()
 
     // Run transformer node tests (LayerNorm, GELU, FeedForward)
     transformerNodeTest();
+
+    // Run GPT-2 model tests
+    gpt2Test();
 
     return 0;
 }
