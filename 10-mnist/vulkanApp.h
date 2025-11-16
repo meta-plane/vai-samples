@@ -1188,12 +1188,26 @@ public:
 
 inline Submitting operator<<(Queue queue, CommandBuffer cmdBuffer)
 {
-    return Submitting(queue, {{}, {cmdBuffer}, {}});
+    return Submitting(
+        queue,
+        std::make_tuple(
+            std::vector<vk::SemaphoreStage>{},          // no wait semaphores
+            std::vector<CommandBuffer>{cmdBuffer},      // single command
+            std::vector<vk::SemaphoreStage>{}           // no signal semaphores
+        )
+    );
 }
 
 inline Submitting operator<<(Queue queue, std::vector<CommandBuffer>&& cmdBuffers)
 {
-    return Submitting(queue, {{}, std::move(cmdBuffers), {}});
+    return Submitting(
+        queue,
+        std::make_tuple(
+            std::vector<vk::SemaphoreStage>{},
+            std::move(cmdBuffers),
+            std::vector<vk::SemaphoreStage>{}
+        )
+    );
 }
 
 inline Submitting operator<<(Queue queue, SubmissionBatchInfo&& batch)
