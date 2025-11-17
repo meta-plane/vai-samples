@@ -18,7 +18,7 @@ void testLayerNorm()
 {
     std::cout << "\n========== Test: LayerNorm ===========" << std::endl;
 
-    std::string testDataPath = std::string(PROJECT_CURRENT_DIR) + "/model/transformer/layer_norm_test_data.json";
+    std::string testDataPath = std::string(PROJECT_CURRENT_DIR) + "/model/transformerBlock/layer_norm_test_data.json";
     json testData = loadTestData(testDataPath);
 
     uint32_t batch_size = testData["config"]["batch_size"];
@@ -102,7 +102,7 @@ void testGELU()
 {
     std::cout << "\n========== Test: GELU ===========" << std::endl;
 
-    std::string testDataPath = std::string(PROJECT_CURRENT_DIR) + "/model/transformer/gelu_test_data.json";
+    std::string testDataPath = std::string(PROJECT_CURRENT_DIR) + "/model/transformerBlock/gelu_test_data.json";
     json testData = loadTestData(testDataPath);
 
     uint32_t batch_size = testData["config"]["batch_size"];
@@ -234,7 +234,7 @@ void testLinear1FromFeedForward()
 {
     std::cout << "\n========== Test: Linear1 (from FeedForward data) ===========" << std::endl;
 
-    std::string testDataPath = std::string(PROJECT_CURRENT_DIR) + "/model/transformer/feedforward_test_data.json";
+    std::string testDataPath = std::string(PROJECT_CURRENT_DIR) + "/model/transformerBlock/feedforward_test_data.json";
     json testData = loadTestData(testDataPath);
 
     uint32_t batch_size = testData["config"]["batch_size"];
@@ -343,7 +343,7 @@ void testFeedForward()
 {
     std::cout << "\n========== Test: FeedForward ===========" << std::endl;
 
-    std::string testDataPath = std::string(PROJECT_CURRENT_DIR) + "/model/transformer/feedforward_test_data.json";
+    std::string testDataPath = std::string(PROJECT_CURRENT_DIR) + "/model/transformerBlock/feedforward_test_data.json";
     json testData = loadTestData(testDataPath);
 
     uint32_t batch_size = testData["config"]["batch_size"];
@@ -447,7 +447,7 @@ void testTransformerBlock()
 {
     std::cout << "\n========== Test: TransformerBlock ===========" << std::endl;
 
-    std::string testDataPath = std::string(PROJECT_CURRENT_DIR) + "/model/transformer/transformer_block_test_data.json";
+    std::string testDataPath = std::string(PROJECT_CURRENT_DIR) + "/model/transformerBlock/transformer_block_test_data.json";
     json testData = loadTestData(testDataPath);
 
     uint32_t batch_size = testData["config"]["batch_size"];

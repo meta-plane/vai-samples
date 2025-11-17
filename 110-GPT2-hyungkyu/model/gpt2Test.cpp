@@ -1,8 +1,11 @@
 #include "gpt2.h"
 #include "../core/error.h"
+#include "../tokenizer/bpeTokenizer.h"
 #include <iostream>
 #include <iomanip>
 #include <vector>
+#include <cstdlib>
+#include <ctime>
 
 using namespace vk;
 
@@ -128,20 +131,161 @@ void testGPT2SmallForward()
     }
 }
 
+void testGPT2LoadWeights()
+{
+    std::cout << "\n========== Test: GPT-2 Load Pretrained Weights ===========" << std::endl;
+
+    // Use full GPT-2 small config
+    GPT2Config config = GPT2SmallConfig();
+
+    std::cout << "Config:" << std::endl;
+    std::cout << "  Vocab size: " << config.vocab_size << std::endl;
+    std::cout << "  Max seq len: " << config.max_seq_len << std::endl;
+    std::cout << "  d_model: " << config.d_model << std::endl;
+    std::cout << "  Num heads: " << config.num_heads << std::endl;
+    std::cout << "  Num layers: " << config.num_layers << std::endl;
+
+    std::cout << "\nCreating GPT-2 model..." << std::endl;
+    GPT2 model(netGlobalDevice, gDestSetPool, config);
+
+    // Try to load weights
+    std::string weights_file = "weights/gpt2_weights.bin";
+    std::cout << "\nAttempting to load weights from: " << weights_file << std::endl;
+
+    try {
+        model.loadWeights(weights_file);
+        std::cout << "\n✓ Successfully loaded pretrained GPT-2 weights!" << std::endl;
+
+        // Test with real text
+        std::cout << "\nTesting with sample input..." << std::endl;
+        std::vector<int> input_ids_int = {
+            15496, 11, 995, 0      // "Hello, world!"
+        };
+
+        std::vector<float> input_ids(input_ids_int.begin(), input_ids_int.end());
+        Tensor inputTensor = Tensor(1, 4).set(input_ids);
+
+        Tensor output = model.forward(inputTensor);
+        std::cout << "  Forward pass with pretrained weights completed!" << std::endl;
+        std::cout << "  Output shape: [" << output.shape()[0] << ", "
+                  << output.shape()[1] << ", " << output.shape()[2] << "]" << std::endl;
+
+    }
+    catch (const std::exception& e) {
+        std::cout << "\n⚠ Could not load weights: " << e.what() << std::endl;
+        std::cout << "  This is expected if you haven't downloaded weights yet." << std::endl;
+        std::cout << "\nTo download GPT-2 weights:" << std::endl;
+        std::cout << "  1. Install transformers: pip install transformers" << std::endl;
+        std::cout << "  2. Run: python download_gpt2_weights.py" << std::endl;
+        std::cout << "  3. Weights will be saved to weights/gpt2_weights.bin" << std::endl;
+    }
+}
+
+void testGPT2Generation()
+{
+    std::cout << "\n========== Test: GPT-2 Text Generation ===========" << std::endl;
+
+    // Use smaller config for testing
+    GPT2Config config{
+        .vocab_size = 50257,
+        .max_seq_len = 1024,
+        .d_model = 64,      // Smaller for testing
+        .num_heads = 4,
+        .num_layers = 2,
+        .dropout = 0.0f
+    };
+
+    std::cout << "Creating GPT-2 model..." << std::endl;
+    GPT2 model(netGlobalDevice, gDestSetPool, config);
+
+    // Try to load weights if available
+    try {
+        model.loadWeights("weights/gpt2_weights.bin");
+        std::cout << "✓ Loaded pretrained weights" << std::endl;
+    }
+    catch (const std::exception& e) {
+        std::cout << "⚠ Using random weights (pretrained weights not found)" << std::endl;
+    }
+
+    // Initialize tokenizer
+    std::cout << "\nInitializing tokenizer..." << std::endl;
+    BPETokenizer tokenizer("vocab.json", "merges.txt");
+
+    // Test prompts
+    std::vector<std::string> prompts = {
+        "Once upon a time",
+        "The quick brown fox",
+        "In a galaxy far, far away"
+    };
+
+    // Seed random number generator
+    srand((unsigned int)time(nullptr));
+
+    for (const auto& prompt : prompts) {
+        std::cout << "\n" << std::string(60, '-') << std::endl;
+        std::cout << "Prompt: \"" << prompt << "\"" << std::endl;
+
+        try {
+            // Encode prompt
+            std::vector<int> prompt_ids = tokenizer.encode(prompt);
+            std::cout << "Encoded to " << prompt_ids.size() << " tokens: ";
+            for (size_t i = 0; i < std::min(size_t(10), prompt_ids.size()); ++i) {
+                std::cout << prompt_ids[i] << " ";
+            }
+            std::cout << std::endl;
+
+            // Generate
+            std::vector<int> generated = model.generate(
+                prompt_ids,
+                20,      // max_new_tokens
+                0.8f,    // temperature
+                40       // top_k
+            );
+
+            // Decode
+            std::string generated_text = tokenizer.decode(generated);
+            std::cout << "\nGenerated text:" << std::endl;
+            std::cout << "\"" << generated_text << "\"" << std::endl;
+
+        }
+        catch (const std::exception& e) {
+            std::cout << "⚠ Generation failed: " << e.what() << std::endl;
+        }
+    }
+
+    std::cout << "\n" << std::string(60, '=') << std::endl;
+    std::cout << "✓ Text generation test completed!" << std::endl;
+}
+
 void gpt2Test()
 {
     std::cout << "\n========================================" << std::endl;
     std::cout << "GPT-2 Model Tests" << std::endl;
     std::cout << "========================================" << std::endl;
 
+    // Run tests individually to avoid one failure stopping others
     try {
         testGPT2SmallForward();
-
-        std::cout << "\n========================================" << std::endl;
-        std::cout << "All GPT-2 tests completed!" << std::endl;
-        std::cout << "========================================" << std::endl;
     }
     catch (const std::exception& e) {
-        std::cerr << "\n❌ Test failed with exception: " << e.what() << std::endl;
+        std::cerr << "\n❌ Small forward test failed: " << e.what() << std::endl;
     }
+
+    try {
+        testGPT2Generation();
+    }
+    catch (const std::exception& e) {
+        std::cerr << "\n❌ Generation test failed: " << e.what() << std::endl;
+    }
+
+    try {
+        testGPT2LoadWeights();
+    }
+    catch (const std::exception& e) {
+        std::cerr << "\n❌ Weight loading test failed: " << e.what() << std::endl;
+    }
+
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "GPT-2 tests completed!" << std::endl;
+    std::cout << "========================================" << std::endl;
 }

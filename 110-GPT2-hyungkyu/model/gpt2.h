@@ -4,7 +4,8 @@
 #include "../core/neuralNet.h"
 #include "../core/vulkanApp.h"
 #include "embedding/embeddingNode.h"
-#include "transformer/transformerNode.h"
+#include "transformerBlock/transformerNode.h"
+#include "lmHeadNode.h"
 
 using namespace vk;
 
@@ -42,12 +43,9 @@ private:
 
     // Nodes
     GPTEmbeddingNode* embedding;
-    std::vector<TransformerBlockNode*> transformerBlocks;
+    std::vector<std::unique_ptr<TransformerBlockNode>> transformerBlocks;
     LayerNormNode* finalNorm;
-
-    // LM head pipeline (linear projection to vocabulary)
-    ComputePipeline lmHeadPipeline;
-    DescriptorSet lmHeadDescSet;
+    LMHeadNode* lmHead;
 
     void buildModel();
     void initializeWeights();
@@ -56,8 +54,24 @@ public:
     GPT2(Device& device, DescriptorPool& descPool, const GPT2Config& config);
     ~GPT2();
 
-    // Forward pass
+    // Forward pass - returns logits [batch, seq_len, vocab_size]
     Tensor forward(const Tensor& input_ids);
+
+    // Generate text autoregressively
+    // prompt_ids: [1, prompt_len] - initial tokens
+    // max_new_tokens: number of tokens to generate
+    // temperature: sampling temperature (higher = more random)
+    // top_k: if > 0, only sample from top k tokens
+    // Returns: [1, prompt_len + max_new_tokens] - generated token IDs
+    std::vector<int> generate(
+        const std::vector<int>& prompt_ids,
+        uint32_t max_new_tokens = 50,
+        float temperature = 1.0f,
+        int top_k = 0
+    );
+
+    // Load pretrained weights from HuggingFace format
+    void loadWeights(const std::string& weights_file);
 
     // Access to underlying network (for loading weights, etc.)
     NeuralNet& getNetwork() { return net; }
