@@ -29,7 +29,11 @@ inline void assert_impl(
 }
 
 #define ASSERT_(expr) assert_impl((expr), #expr, std::source_location::current())
+
+// Only define _ASSERT if not already defined by Windows SDK
+#ifndef _ASSERT
 #define _ASSERT(expr) ASSERT_(expr)  // Alias for compatibility
+#endif
 
 
 

@@ -104,7 +104,7 @@ TokenEmbeddingNode::TokenEmbeddingNode(uint32_t vocab_size, uint32_t embedding_d
     : V(vocab_size), E(embedding_dim)
 {
     addSlot("in0", NodeSlot::input);      // token_ids [B, S]
-    addSlot("weight", NodeSlot::internal); // embedding table [V, E]
+    addSlot("weight", NodeSlot::input);    // embedding table [V, E] (learnable parameter)
     addSlot("out0", NodeSlot::output);     // embeddings [B, S, E]
 
     tokenEmbedding = requestPipeline(src_token_embedding);
@@ -152,7 +152,7 @@ void TokenEmbeddingNode::run(CommandBuffer cmdBuff)
         .bindPipeline(tokenEmbedding)
         .setPushConstants(0, sizeof(constants), constants)
         .bindDescSets({tokenEmbeddingDescSet})
-        .dispatch(CEIL_DIV(BS, 64))
+        .dispatch0(CEIL_DIV(BS, 64))
         .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / out.buffer()
@@ -167,7 +167,7 @@ PositionalEmbeddingNode::PositionalEmbeddingNode(uint32_t max_length, uint32_t e
     : M(max_length), E(embedding_dim)
 {
     addSlot("in0", NodeSlot::input);       // dummy input to get shape [B, S]
-    addSlot("weight", NodeSlot::internal);  // pos embedding table [M, E]
+    addSlot("weight", NodeSlot::input);     // pos embedding table [M, E] (learnable parameter)
     addSlot("out0", NodeSlot::output);      // pos embeddings [B, S, E]
 
     positionalEmbedding = requestPipeline(src_positional_embedding);
@@ -214,7 +214,7 @@ void PositionalEmbeddingNode::run(CommandBuffer cmdBuff)
         .bindPipeline(positionalEmbedding)
         .setPushConstants(0, sizeof(constants), constants)
         .bindDescSets({positionalEmbeddingDescSet})
-        .dispatch(CEIL_DIV(BS, 64))
+        .dispatch0(CEIL_DIV(BS, 64))
         .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / out.buffer()
@@ -229,8 +229,8 @@ GPTEmbeddingNode::GPTEmbeddingNode(uint32_t vocab_size, uint32_t max_length, uin
     : V(vocab_size), M(max_length), E(embedding_dim)
 {
     addSlot("in0", NodeSlot::input);               // token_ids [B, S]
-    addSlot("token_weight", NodeSlot::internal);   // token embedding table [V, E]
-    addSlot("pos_weight", NodeSlot::internal);     // pos embedding table [M, E]
+    addSlot("token_weight", NodeSlot::input);      // token embedding table [V, E] (learnable parameter)
+    addSlot("pos_weight", NodeSlot::input);        // pos embedding table [M, E] (learnable parameter)
     addSlot("out0", NodeSlot::output);             // combined embeddings [B, S, E]
 
     tokenEmbedding = requestPipeline(src_token_embedding);
@@ -307,7 +307,7 @@ void GPTEmbeddingNode::run(CommandBuffer cmdBuff)
         .bindPipeline(tokenEmbedding)
         .setPushConstants(0, sizeof(tokenConstants), tokenConstants)
         .bindDescSets({tokenEmbeddingDescSet})
-        .dispatch(CEIL_DIV(BS, 64))
+        .dispatch0(CEIL_DIV(BS, 64))
         .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / tokenEmbBuffer
@@ -326,7 +326,7 @@ void GPTEmbeddingNode::run(CommandBuffer cmdBuff)
         .bindPipeline(positionalEmbedding)
         .setPushConstants(0, sizeof(posConstants), posConstants)
         .bindDescSets({positionalEmbeddingDescSet})
-        .dispatch(CEIL_DIV(BS, 64))
+        .dispatch0(CEIL_DIV(BS, 64))
         .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / posEmbBuffer
@@ -344,7 +344,7 @@ void GPTEmbeddingNode::run(CommandBuffer cmdBuff)
         .bindPipeline(addEmbeddings)
         .setPushConstants(0, sizeof(int), &BSE)
         .bindDescSets({addEmbeddingsDescSet})
-        .dispatch(CEIL_DIV(BSE, 256))
+        .dispatch0(CEIL_DIV(BSE, 256))
         .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / out.buffer()

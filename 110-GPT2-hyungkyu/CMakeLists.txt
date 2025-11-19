@@ -9,7 +9,6 @@ add_executable(${PROJECT_NAME}
     dataloader/test.cpp
     dataloader/gptDataset.cpp
     dataloader/gptDataLoader.cpp
-    model/embedding/embedding.cpp
     core/vulkanApp.cpp
     core/spirvHelpers.cpp
     core/jsonParser.cpp
@@ -17,6 +16,10 @@ add_executable(${PROJECT_NAME}
     model/embedding/embeddingNodeTest.cpp
     model/attention/attentionNode.cpp
     model/attention/attentionNodeTest.cpp
+    model/transformerBlock/transformer.cpp
+    model/transformerBlock/transformerNodeTest.cpp
+    model/lmHeadNode.cpp
+    model/gpt2Test.cpp
 )
 
 add_definitions(

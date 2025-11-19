@@ -54,7 +54,7 @@ static const char* src_maxpool = R"(
 #version 450
 #define FLT_MIN -3.402823466e+38
 #define DISCARD_TAIL
-layout(local_size_x = 64, local_size_y = 4, local_size_z = 4) in;
+layout(local_size_x = 32, local_size_y = 4, local_size_z = 4) in;
 layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };
 layout(set = 0, binding = 1) buffer InBuffer { float in0[]; };
 layout(push_constant) uniform PushConstants {
@@ -105,7 +105,7 @@ static const char* src_maxpool1d = R"(
 layout(local_size_x = 64) in;
 layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };
 layout(set = 0, binding = 1) buffer InBuffer { float in0[]; };
-layout(push_constant) uniform PC {
+layout(push_constant) uniform PushConstants {
     int N; // number of points
     int C; // number of channels
 };

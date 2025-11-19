@@ -10,7 +10,6 @@
 #include <map>
 #include <unordered_map>
 
-
 class BufferPool
 {
     // vk::Device device;
