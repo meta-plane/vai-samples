@@ -171,6 +171,12 @@ public:
         return _isConstant;
     }
 
+    Tensor& setConstant(bool constant = true)
+    {
+        _isConstant = constant;
+        return *this;
+    }
+
     template <typename... Ts>
     bool isShapeOf(Ts... dims) const
     {

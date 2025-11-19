@@ -1,8 +1,9 @@
-#ifndef TRANSFORMER_NODE_H
-#define TRANSFORMER_NODE_H
+#ifndef TRANSFORMER_H
+#define TRANSFORMER_H
 
 #include "../../core/neuralNet.h"
 #include "../../core/vulkanApp.h"
+#include "../attention/attentionNode.h"
 
 using namespace vk;
 
@@ -85,7 +86,39 @@ public:
 };
 
 /**
- * Transformer Block
+ * Identity Node (for fan-out/routing)
+ * Input: in0
+ * Output: out0 (same as input)
+ * Allows one input to connect to multiple downstream nodes
+ */
+class IdentityNode : public Node
+{
+public:
+    IdentityNode();
+
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+/**
+ * Add Node (for residual connections)
+ * Inputs: in0 (residual), in1 (main path)
+ * Output: out0 = in0 + in1
+ */
+class AddNode : public Node
+{
+    ComputePipeline addPipeline;
+    DescriptorSet addDescSet;
+
+public:
+    AddNode();
+
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+/**
+ * Transformer Block (NodeGroup)
  * Input: [batch, seq_len, d_model]
  * Output: [batch, seq_len, d_model]
  *
@@ -93,30 +126,25 @@ public:
  * - x = x + MultiHeadAttention(LayerNorm(x))
  * - x = x + FeedForward(LayerNorm(x))
  */
-class TransformerBlockNode : public Node
+class TransformerBlock : public NodeGroup
 {
     uint32_t d_model;
     uint32_t num_heads;
 
-    // Pipelines for LayerNorm and ResidualAdd
-    ComputePipeline norm1Pipeline;
-    ComputePipeline residualAdd1Pipeline;
-    ComputePipeline norm2Pipeline;
-    ComputePipeline residualAdd2Pipeline;
-
-    DescriptorSet norm1DescSet;
-    DescriptorSet residualAdd1DescSet;
-    DescriptorSet norm2DescSet;
-    DescriptorSet residualAdd2DescSet;
-
-    // We'll use the same shaders as LayerNormNode, FeedForwardNode, and MultiHeadAttentionNode
-    // by including their implementations inline
+    // Internal nodes (direct objects like ConvBlock pattern)
+    IdentityNode inputRouter;  // Routes input to both main path and residual
+    LayerNormNode norm1;
+    MultiHeadAttentionNode attention;
+    AddNode add1;
+    LayerNormNode norm2;
+    FeedForwardNode feedforward;
+    AddNode add2;
 
 public:
-    TransformerBlockNode(uint32_t d_model, uint32_t num_heads);
+    TransformerBlock(uint32_t d_model, uint32_t num_heads);
 
-    void prepare() override;
-    void run(CommandBuffer cmdBuff) override;
+    // Provide weight access
+    Tensor& operator[](const std::string& name);
 };
 
-#endif // TRANSFORMER_NODE_H
+#endif // TRANSFORMER_H

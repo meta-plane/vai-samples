@@ -56,7 +56,7 @@ LinearNode::LinearNode(uint32_t in_features, uint32_t out_features)
     : in_features(in_features), out_features(out_features)
 {
     addSlot("in0", NodeSlot::input);
-    addSlot("weight", NodeSlot::internal);
+    addSlot("weight", NodeSlot::input);  // learnable parameter
     addSlot("out0", NodeSlot::output);
 
     linearPipeline = requestPipeline(src_linear);
@@ -406,10 +406,10 @@ MultiHeadAttentionNode::MultiHeadAttentionNode(uint32_t d_in, uint32_t d_out, ui
     head_dim = d_out / num_heads;
 
     addSlot("in0", NodeSlot::input);
-    addSlot("W_query", NodeSlot::internal);
-    addSlot("W_key", NodeSlot::internal);
-    addSlot("W_value", NodeSlot::internal);
-    addSlot("W_out", NodeSlot::internal);
+    addSlot("W_query", NodeSlot::input);  // learnable parameter
+    addSlot("W_key", NodeSlot::input);    // learnable parameter
+    addSlot("W_value", NodeSlot::input);  // learnable parameter
+    addSlot("W_out", NodeSlot::input);    // learnable parameter
     addSlot("out0", NodeSlot::output);
 
     // Create pipelines

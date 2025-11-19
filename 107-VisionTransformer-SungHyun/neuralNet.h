@@ -9,7 +9,6 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <cstring>  // memcpy
-#include <stdexcept>
 
 
 using namespace vk;
@@ -475,8 +474,8 @@ inline void NeuralNet::run()
                     tensor.bindBuffer(bufferPool.requestBuffer(
                         device,
                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                        | VK_BUFFER_USAGE_TRANSFER_SRC_BIT // TODO: only needed for final output tensors, so we should remove for general case.
-                        ,
+                        | VK_BUFFER_USAGE_TRANSFER_SRC_BIT // TODO: only needed for final output tensors, so we should remove for general case. 
+                        , 
                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                         tensor.numElements() * sizeof(float)
                     ));
@@ -489,7 +488,7 @@ inline void NeuralNet::run()
                     - FlattenNode - out0 slot
                     */
                 }
-
+                    
                 if (slot.type() == NodeSlot::output)
                 {
                     for (const Edge* edge : slot.edges)

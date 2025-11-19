@@ -104,7 +104,7 @@ TokenEmbeddingNode::TokenEmbeddingNode(uint32_t vocab_size, uint32_t embedding_d
     : V(vocab_size), E(embedding_dim)
 {
     addSlot("in0", NodeSlot::input);      // token_ids [B, S]
-    addSlot("weight", NodeSlot::internal); // embedding table [V, E]
+    addSlot("weight", NodeSlot::input);    // embedding table [V, E] (learnable parameter)
     addSlot("out0", NodeSlot::output);     // embeddings [B, S, E]
 
     tokenEmbedding = requestPipeline(src_token_embedding);
@@ -167,7 +167,7 @@ PositionalEmbeddingNode::PositionalEmbeddingNode(uint32_t max_length, uint32_t e
     : M(max_length), E(embedding_dim)
 {
     addSlot("in0", NodeSlot::input);       // dummy input to get shape [B, S]
-    addSlot("weight", NodeSlot::internal);  // pos embedding table [M, E]
+    addSlot("weight", NodeSlot::input);     // pos embedding table [M, E] (learnable parameter)
     addSlot("out0", NodeSlot::output);      // pos embeddings [B, S, E]
 
     positionalEmbedding = requestPipeline(src_positional_embedding);
@@ -229,8 +229,8 @@ GPTEmbeddingNode::GPTEmbeddingNode(uint32_t vocab_size, uint32_t max_length, uin
     : V(vocab_size), M(max_length), E(embedding_dim)
 {
     addSlot("in0", NodeSlot::input);               // token_ids [B, S]
-    addSlot("token_weight", NodeSlot::internal);   // token embedding table [V, E]
-    addSlot("pos_weight", NodeSlot::internal);     // pos embedding table [M, E]
+    addSlot("token_weight", NodeSlot::input);      // token embedding table [V, E] (learnable parameter)
+    addSlot("pos_weight", NodeSlot::input);        // pos embedding table [M, E] (learnable parameter)
     addSlot("out0", NodeSlot::output);             // combined embeddings [B, S, E]
 
     tokenEmbedding = requestPipeline(src_token_embedding);

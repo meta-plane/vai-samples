@@ -10,11 +10,20 @@
 #include <map>
 #include <unordered_map>
 
+// Vulkan vx::Buffer들을 재사용하기 위한 버퍼 풀
+// 여기서 Buffer는 Vulkan GPU 메모리에 있는 "버퍼 데이터 저장소!"
+// C++에는 Tensor에 2종류의 데이터가 존재(1.hostData(CPU), 2. device buffer(GPU VRAM)
+// 이 중 GPU 쪽 buffer가 vk::Buffer!!
+// 근데 Bufferpool이 왜 필요??
+// -> Vulkan에서는 버퍼를 만드는 것이 매우 비쌈(시간,메모리등등) 또, 매 연산마다 새로운 버퍼를 만들고 지우고하면
+// 성능저하, GPU 메모리 파편화, 실전 속도 다운 현상이 발생!
+
+// 결국, BufferPool은 "GPU 버퍼 재사용 시스템"
 class BufferPool
 {
     // vk::Device device;
     std::unordered_map<
-        VkBufferUsageFlags, 
+        VkBufferUsageFlags,  
         std::multimap<size_t, std::pair<vk::Buffer, VkMemoryPropertyFlags>> > bufferPool;
 
 public:
@@ -23,7 +32,10 @@ public:
         static BufferPool instance;
         return instance;
     }
-
+    // requestBuffer를 통해 필요한 크기의 버퍼를 요청
+    // 재사용 가능한 버퍼가 있으면 곧바로 반환
+    // 없으면 새로 만들고 Pool에 집어넣음
+    // 사용이 끝난 버퍼는 다시 returnBuffer를 통해 다시 pool에 돌려놓음
     vk::Buffer requestBuffer(
         vk::Device& device,
         uint32_t usageFlags, 
@@ -67,10 +79,13 @@ public:
     }
 };
 
+// 텐서의 실제 데이터를 들고있는 클래스
+// Tensor는 이걸 std::shared_ptr로 감싸서 쓰는 껍데기 역할을 수행
 
 class TensorData
 {
     friend class Tensor;
+    // Tensor 클래스가 TensorData의 private 멤버에 직접 접근이 가능하도록!
     // std::vector<uint32_t> shape;
     std::vector<float> hostData; 
     vk::Buffer _buffer; 

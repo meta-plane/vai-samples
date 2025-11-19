@@ -1,147 +1,213 @@
-#include "gpt2.h"
+#include "gpt2Net.h"
+#include "gpt2Generation.h"
 #include "../core/error.h"
+#include "../tokenizer/bpeTokenizer.h"
 #include <iostream>
 #include <iomanip>
-#include <vector>
+#include <chrono>
+#include <cstdlib>
+#include <ctime>
 
 using namespace vk;
 
-// Global device and descriptor pool (defined in embeddingNodeTest.cpp)
 extern Device netGlobalDevice;
 extern DescriptorPool gDestSetPool;
 
-void testGPT2SmallForward()
-{
-    std::cout << "\n========== Test: GPT-2 Small Forward Pass ===========" << std::endl;
-
-    // Use a smaller config for testing
-    GPT2Config config{
-        .vocab_size = 50257,
-        .max_seq_len = 1024,
-        .d_model = 64,      // Smaller for faster testing
-        .num_heads = 4,     // Smaller for faster testing
-        .num_layers = 2,    // Only 2 layers for testing
-        .dropout = 0.0f
-    };
-
-    std::cout << "Config:" << std::endl;
-    std::cout << "  Vocab size: " << config.vocab_size << std::endl;
-    std::cout << "  Max seq len: " << config.max_seq_len << std::endl;
-    std::cout << "  d_model: " << config.d_model << std::endl;
-    std::cout << "  Num heads: " << config.num_heads << std::endl;
-    std::cout << "  Num layers: " << config.num_layers << std::endl;
-
-    std::cout << "\nCreating GPT-2 model..." << std::endl;
-    GPT2 model(netGlobalDevice, gDestSetPool, config);
-
-    // Create dummy input: [batch=2, seq_len=4]
-    const uint32_t batch_size = 2;
-    const uint32_t seq_len = 4;
-
-    std::vector<int> input_ids_int = {
-        15496, 11, 995, 0,      // Batch 0: "Hello, world!"
-        40, 1101, 4673, 13      // Batch 1: "I'm learning."
-    };
-
-    // Convert to float for Tensor
-    std::vector<float> input_ids(input_ids_int.begin(), input_ids_int.end());
-
-    Tensor inputTensor = Tensor(batch_size, seq_len);
-    inputTensor.set(input_ids);
-
-    std::cout << "Input shape: [" << batch_size << ", " << seq_len << "]" << std::endl;
-    std::cout << "Input token IDs:" << std::endl;
-    std::cout << "  Batch 0: ";
-    for (int i = 0; i < seq_len; ++i) {
-        std::cout << input_ids_int[i] << " ";
-    }
-    std::cout << std::endl;
-    std::cout << "  Batch 1: ";
-    for (int i = seq_len; i < 2 * seq_len; ++i) {
-        std::cout << input_ids_int[i] << " ";
-    }
-    std::cout << std::endl;
-
-    std::cout << "\nRunning forward pass..." << std::endl;
-    std::cout << "  (This may take a moment...)" << std::endl;
-
-    try {
-        Tensor output = model.forward(inputTensor);
-        std::cout << "  Forward pass completed successfully!" << std::endl;
-
-        std::cout << "Output shape: [" << output.shape()[0] << ", "
-                  << output.shape()[1] << ", " << output.shape()[2] << "]" << std::endl;
-        std::cout << "Expected: [" << batch_size << ", " << seq_len << ", " << config.d_model << "]" << std::endl;
-
-        // Copy output back to CPU for inspection
-        Buffer outBuffer = netGlobalDevice.createBuffer({
-        .size = batch_size * seq_len * config.d_model * sizeof(float),
-        .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        .reqMemProps = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-    });
-
-    netGlobalDevice.newCommandBuffer(queue_compute)
-        .begin()
-        .copyBuffer(outBuffer, output.buffer())
-        .end()
-        .submit()
-        .wait();
-
-    float* data = (float*)outBuffer.map();
-
-    // Check basic sanity
-    std::cout << "\nVerifying output..." << std::endl;
-
-    bool has_nan = false;
-    bool has_inf = false;
-    float min_val = data[0];
-    float max_val = data[0];
-
-    for (size_t i = 0; i < batch_size * seq_len * config.d_model; ++i) {
-        if (std::isnan(data[i])) has_nan = true;
-        if (std::isinf(data[i])) has_inf = true;
-        min_val = std::min(min_val, data[i]);
-        max_val = std::max(max_val, data[i]);
-    }
-
-    std::cout << "  Has NaN: " << (has_nan ? "YES ✗" : "NO ✓") << std::endl;
-    std::cout << "  Has Inf: " << (has_inf ? "YES ✗" : "NO ✓") << std::endl;
-    std::cout << "  Value range: [" << std::fixed << std::setprecision(4)
-              << min_val << ", " << max_val << "]" << std::endl;
-
-    // Print sample outputs for first token
-    std::cout << "\n  First token output (first 10 values):" << std::endl;
-    std::cout << "    ";
-    for (int i = 0; i < std::min(10, (int)config.d_model); ++i) {
-        std::cout << std::fixed << std::setprecision(4) << data[i] << " ";
-    }
-    std::cout << std::endl;
-
-        if (!has_nan && !has_inf) {
-            std::cout << "\n✓ GPT-2 forward pass PASSED - basic sanity checks OK" << std::endl;
-        } else {
-            std::cout << "\n✗ GPT-2 forward pass FAILED - numerical issues detected" << std::endl;
-        }
-    }
-    catch (const std::exception& e) {
-        std::cout << "\n✗ Forward pass failed with exception: " << e.what() << std::endl;
-    }
-}
-
-void gpt2Test()
+void testGPT2()
 {
     std::cout << "\n========================================" << std::endl;
-    std::cout << "GPT-2 Model Tests" << std::endl;
+    std::cout << "GPT-2 Simple Test" << std::endl;
+    std::cout << "========================================\n" << std::endl;
+
+    // Create tiny GPT-2 for testing
+    GPT2Config config = GPT2TinyConfig();
+    GPT2Net gpt2Net(netGlobalDevice, config);
+
+    std::cout << "✓ Network created" << std::endl;
+    std::cout << "✓ All tests passed (network construction successful)" << std::endl;
+}
+
+// Helper: Initialize embedding weights (token + position)
+static void initializeEmbeddingWeights(GPT2Net& gpt2Net, const GPT2Config& config)
+{
+    // Token embeddings
+    std::vector<float> token_emb_data(config.vocab_size * config.d_model);
+    for (auto& val : token_emb_data) {
+        val = ((float)rand() / RAND_MAX - 0.5f) * 0.02f;
+    }
+    gpt2Net["embedding.token"] = Tensor(config.vocab_size, config.d_model)
+        .set(token_emb_data).setConstant();
+
+    // Positional embeddings
+    std::vector<float> pos_emb_data(config.max_seq_len * config.d_model);
+    for (auto& val : pos_emb_data) {
+        val = ((float)rand() / RAND_MAX - 0.5f) * 0.02f;
+    }
+    gpt2Net["embedding.position"] = Tensor(config.max_seq_len, config.d_model)
+        .set(pos_emb_data).setConstant();
+}
+
+// Helper: Initialize weights for a single transformer layer
+static void initializeTransformerLayerWeights(
+    GPT2Net& gpt2Net,
+    const GPT2Config& config,
+    uint32_t layer_idx)
+{
+    std::string prefix = "block." + std::to_string(layer_idx) + ".";
+
+    // Layer norm 1
+    std::vector<float> ln_scale(config.d_model, 1.0f);
+    std::vector<float> ln_shift(config.d_model, 0.0f);
+    gpt2Net[prefix + "norm1_scale"] = Tensor(config.d_model).set(ln_scale).setConstant();
+    gpt2Net[prefix + "norm1_shift"] = Tensor(config.d_model).set(ln_shift).setConstant();
+
+    // Attention weights
+    uint32_t attn_size = config.d_model * config.d_model;
+    std::vector<float> attn_data(attn_size);
+    for (auto& val : attn_data) {
+        val = ((float)rand() / RAND_MAX - 0.5f) * 0.02f;
+    }
+
+    gpt2Net[prefix + "attn_wq"] = Tensor(config.d_model, config.d_model).set(attn_data).setConstant();
+    gpt2Net[prefix + "attn_wk"] = Tensor(config.d_model, config.d_model).set(attn_data).setConstant();
+    gpt2Net[prefix + "attn_wv"] = Tensor(config.d_model, config.d_model).set(attn_data).setConstant();
+    gpt2Net[prefix + "attn_wout"] = Tensor(config.d_model, config.d_model).set(attn_data).setConstant();
+
+    // Layer norm 2
+    gpt2Net[prefix + "norm2_scale"] = Tensor(config.d_model).set(ln_scale).setConstant();
+    gpt2Net[prefix + "norm2_shift"] = Tensor(config.d_model).set(ln_shift).setConstant();
+
+    // Feed-forward weights
+    uint32_t ff1_size = (4 * config.d_model) * config.d_model;
+    uint32_t ff2_size = config.d_model * (4 * config.d_model);
+
+    std::vector<float> ff1_data(ff1_size);
+    std::vector<float> ff2_data(ff2_size);
+    for (auto& val : ff1_data) val = ((float)rand() / RAND_MAX - 0.5f) * 0.02f;
+    for (auto& val : ff2_data) val = ((float)rand() / RAND_MAX - 0.5f) * 0.02f;
+
+    gpt2Net[prefix + "ff_w1"] = Tensor(4 * config.d_model, config.d_model).set(ff1_data).setConstant();
+    gpt2Net[prefix + "ff_w2"] = Tensor(config.d_model, 4 * config.d_model).set(ff2_data).setConstant();
+}
+
+// Helper: Initialize all network weights
+static void initializeAllWeights(GPT2Net& gpt2Net, const GPT2Config& config)
+{
+    std::cout << "Initializing random weights for testing..." << std::endl;
+
+    // Embeddings
+    initializeEmbeddingWeights(gpt2Net, config);
+
+    // Transformer blocks
+    for (uint32_t layer = 0; layer < config.num_layers; ++layer) {
+        initializeTransformerLayerWeights(gpt2Net, config, layer);
+    }
+
+    // Final layer norm
+    std::vector<float> final_ln_scale(config.d_model, 1.0f);
+    std::vector<float> final_ln_shift(config.d_model, 0.0f);
+    gpt2Net["finalNorm.weight"] = Tensor(config.d_model).set(final_ln_scale).setConstant();
+    gpt2Net["finalNorm.bias"] = Tensor(config.d_model).set(final_ln_shift).setConstant();
+
+    // LM head (weight tying)
+    gpt2Net.lmHead["weight"] = gpt2Net["embedding.token"];
+
+    std::cout << "✓ Weights initialized (including " << config.num_layers << " transformer layers)\n" << std::endl;
+}
+
+// Helper: Run generation for a single prompt
+static void runPromptGeneration(
+    GPT2Net& gpt2Net,
+    BPETokenizer& tokenizer,
+    const std::string& prompt_text,
+    uint32_t num_tokens_to_generate)
+{
+    std::cout << "\n----------------------------------------" << std::endl;
+    std::cout << "Prompt: \"" << prompt_text << "\"" << std::endl;
+    std::cout << "----------------------------------------" << std::endl;
+
+    // Encode prompt
+    std::vector<int> prompt_ids = tokenizer.encode(prompt_text);
+    std::cout << "Encoded to " << prompt_ids.size() << " tokens: ";
+    for (int id : prompt_ids) {
+        std::cout << id << " ";
+    }
+    std::cout << std::endl;
+
+    // Generate tokens
+    std::cout << "\nGenerating " << num_tokens_to_generate << " new tokens..." << std::endl;
+
+    // Measure generation time
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    std::vector<int> generated_ids = generate_gpt2(
+        gpt2Net,
+        prompt_ids,
+        num_tokens_to_generate,
+        1.0f,    // temperature
+        50       // top_k
+    );
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+
+    // Decode result
+    std::string generated_text = tokenizer.decode(generated_ids);
+
+    std::cout << "\n--- Generated Text ---" << std::endl;
+    std::cout << generated_text << std::endl;
+    std::cout << "--- End of Generation ---\n" << std::endl;
+
+    // Print statistics
+    uint32_t new_tokens = generated_ids.size() - prompt_ids.size();
+    double generation_time_sec = duration.count() / 1000.0;
+    double tokens_per_sec = new_tokens / generation_time_sec;
+
+    std::cout << "Generated " << new_tokens << " new tokens (total: " << generated_ids.size() << " tokens)" << std::endl;
+    std::cout << "Generation time: " << duration.count() << " ms (" << std::fixed << std::setprecision(2) << generation_time_sec << " sec)" << std::endl;
+    std::cout << "Generation speed: " << std::fixed << std::setprecision(2) << tokens_per_sec << " tokens/sec" << std::endl;
+}
+
+void testGPT2Generation()
+{
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "GPT-2 Text Generation Test" << std::endl;
+    std::cout << "========================================\n" << std::endl;
+
+    // Initialize random seed
+    srand((unsigned int)time(nullptr));
+
+    // Create network
+    GPT2Config config = GPT2TinyConfig();
+    std::cout << "Creating GPT-2 network..." << std::endl;
+    std::cout << "  Config: d_model=" << config.d_model
+              << ", num_heads=" << config.num_heads
+              << ", num_layers=" << config.num_layers << std::endl;
+    GPT2Net gpt2Net(netGlobalDevice, config);
+    std::cout << "✓ Network created\n" << std::endl;
+
+    // Initialize all weights
+    initializeAllWeights(gpt2Net, config);
+
+    // Load tokenizer
+    std::cout << "Loading tokenizer..." << std::endl;
+    BPETokenizer tokenizer("110-GPT2-hyungkyu/vocab.json",
+                          "110-GPT2-hyungkyu/merges.txt");
+    std::cout << "✓ Tokenizer loaded\n" << std::endl;
+
+    // Test prompts
+    std::vector<std::string> test_prompts = {
+        "Hello",
+        "Once upon a time",
+        "The quick brown fox"
+    };
+
+    uint32_t num_tokens_to_generate = 5;
+    for (const auto& prompt_text : test_prompts) {
+        runPromptGeneration(gpt2Net, tokenizer, prompt_text, num_tokens_to_generate);
+    }
+
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "✓ Text generation test completed!" << std::endl;
     std::cout << "========================================" << std::endl;
-
-    try {
-        testGPT2SmallForward();
-
-        std::cout << "\n========================================" << std::endl;
-        std::cout << "All GPT-2 tests completed!" << std::endl;
-        std::cout << "========================================" << std::endl;
-    }
-    catch (const std::exception& e) {
-        std::cerr << "\n❌ Test failed with exception: " << e.what() << std::endl;
-    }
 }

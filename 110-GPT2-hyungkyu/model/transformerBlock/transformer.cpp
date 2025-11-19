@@ -1,4 +1,4 @@
-#include "transformerNode.h"
+#include "transformer.h"
 #include "../attention/attentionNode.h"
 #include "../../core/error.h"
 #include <cmath>
@@ -71,8 +71,8 @@ LayerNormNode::LayerNormNode(uint32_t normalized_shape, float eps)
     : normalized_shape(normalized_shape), eps(eps)
 {
     addSlot("in0", NodeSlot::input);
-    addSlot("scale", NodeSlot::internal);  // Learnable parameter
-    addSlot("shift", NodeSlot::internal);  // Learnable parameter
+    addSlot("scale", NodeSlot::input);  // Learnable parameter
+    addSlot("shift", NodeSlot::input);  // Learnable parameter
     addSlot("out0", NodeSlot::output);
 
     layerNormPipeline = requestPipeline(src_layer_norm);
@@ -260,8 +260,8 @@ FeedForwardNode::FeedForwardNode(uint32_t d_model)
     : d_model(d_model), hidden_dim(4 * d_model)
 {
     addSlot("in0", NodeSlot::input);
-    addSlot("weight1", NodeSlot::internal);  // [4*d_model, d_model]
-    addSlot("weight2", NodeSlot::internal);  // [d_model, 4*d_model]
+    addSlot("weight1", NodeSlot::input);  // [4*d_model, d_model] (learnable parameter)
+    addSlot("weight2", NodeSlot::input);  // [d_model, 4*d_model] (learnable parameter)
     addSlot("out0", NodeSlot::output);
 
     linear1Pipeline = requestPipeline(src_linear_ff);
@@ -387,16 +387,39 @@ void FeedForwardNode::run(CommandBuffer cmdBuff)
 }
 
 // ============================================================================
-// TransformerBlockNode: Pre-norm architecture with residual connections
+// IdentityNode: Pass-through node for fan-out
 // ============================================================================
 
-static const char* src_residual_add = R"(
+IdentityNode::IdentityNode()
+{
+    addSlot("in0", NodeSlot::input);
+    addSlot("out0", NodeSlot::output);
+}
+
+void IdentityNode::prepare()
+{
+    // Output tensor is the same as input tensor (no computation needed)
+    Tensor& input = (*this)["in0"];
+    Tensor& output = (*this)["out0"];
+    output = input;  // Share the same tensor
+}
+
+void IdentityNode::run(CommandBuffer cmdBuff)
+{
+    // No computation needed - input and output share the same buffer
+}
+
+// ============================================================================
+// AddNode: Element-wise addition for residual connections
+// ============================================================================
+
+static const char* src_add = R"(
 #version 450
 layout(local_size_x = 256) in;
 
-layout(set = 0, binding = 0) buffer Output { float y[]; };      // output
-layout(set = 0, binding = 1) buffer Residual { float res[]; };  // residual
-layout(set = 0, binding = 2) buffer Input { float x[]; };       // input
+layout(set = 0, binding = 0) buffer Output { float y[]; };   // output
+layout(set = 0, binding = 1) buffer Input0 { float a[]; };   // in0 (residual)
+layout(set = 0, binding = 2) buffer Input1 { float b[]; };   // in1 (main path)
 
 layout(push_constant) uniform PushConstants {
     int N;  // Total number of elements
@@ -406,275 +429,112 @@ void main() {
     int idx = int(gl_GlobalInvocationID.x);
     if (idx >= N) return;
 
-    y[idx] = res[idx] + x[idx];
+    y[idx] = a[idx] + b[idx];
 }
 )";
 
-TransformerBlockNode::TransformerBlockNode(uint32_t d_model, uint32_t num_heads)
-    : d_model(d_model), num_heads(num_heads)
+AddNode::AddNode()
 {
-    addSlot("in0", NodeSlot::input);
+    addSlot("in0", NodeSlot::input);   // Residual connection
+    addSlot("in1", NodeSlot::input);   // Main path
     addSlot("out0", NodeSlot::output);
 
-    // Weights for LayerNorm1
-    addSlot("norm1_scale", NodeSlot::internal);
-    addSlot("norm1_shift", NodeSlot::internal);
-
-    // Weights for MultiHeadAttention
-    addSlot("attn_wq", NodeSlot::internal);
-    addSlot("attn_wk", NodeSlot::internal);
-    addSlot("attn_wv", NodeSlot::internal);
-    addSlot("attn_wout", NodeSlot::internal);
-
-    // Weights for LayerNorm2
-    addSlot("norm2_scale", NodeSlot::internal);
-    addSlot("norm2_shift", NodeSlot::internal);
-
-    // Weights for FeedForward
-    addSlot("ff_w1", NodeSlot::internal);
-    addSlot("ff_w2", NodeSlot::internal);
-
-    norm1Pipeline = requestPipeline(src_layer_norm);
-    norm2Pipeline = requestPipeline(src_layer_norm);
-    residualAdd1Pipeline = requestPipeline(src_residual_add);
-    residualAdd2Pipeline = requestPipeline(src_residual_add);
-
-    norm1DescSet = norm1Pipeline.descSetLayout(0).newDescSet(gDestSetPool);
-    norm2DescSet = norm2Pipeline.descSetLayout(0).newDescSet(gDestSetPool);
-    residualAdd1DescSet = residualAdd1Pipeline.descSetLayout(0).newDescSet(gDestSetPool);
-    residualAdd2DescSet = residualAdd2Pipeline.descSetLayout(0).newDescSet(gDestSetPool);
+    addPipeline = requestPipeline(src_add);
+    addDescSet = addPipeline.descSetLayout(0).newDescSet(gDestSetPool);
 }
 
-void TransformerBlockNode::prepare()
+void AddNode::prepare()
 {
-    Tensor& input = (*this)["in0"];
-    _ASSERT(input.validShape());
-    _ASSERT(input.shape().size() == 3);  // [B, S, D]
+    Tensor& in0 = (*this)["in0"];
+    Tensor& in1 = (*this)["in1"];
+    _ASSERT(in0.validShape());
+    _ASSERT(in1.validShape());
+    _ASSERT(in0.shape() == in1.shape());
 
-    uint32_t B = input.shape()[0];
-    uint32_t S = input.shape()[1];
-    uint32_t D = input.shape()[2];
-    _ASSERT(D == d_model);
-
-    // Initialize LayerNorm1 weights if not set
-    Tensor& norm1_scale = (*this)["norm1_scale"];
-    Tensor& norm1_shift = (*this)["norm1_shift"];
-    if (!norm1_scale.validShape()) {
-        norm1_scale = Tensor(d_model);
-        std::vector<float> scale_data(d_model, 1.0f);
-        norm1_scale.set(scale_data);
-    }
-    if (!norm1_shift.validShape()) {
-        norm1_shift = Tensor(d_model);
-        std::vector<float> shift_data(d_model, 0.0f);
-        norm1_shift.set(shift_data);
-    }
-
-    // Initialize Attention weights if not set
-    Tensor& attn_wq = (*this)["attn_wq"];
-    Tensor& attn_wk = (*this)["attn_wk"];
-    Tensor& attn_wv = (*this)["attn_wv"];
-    Tensor& attn_wout = (*this)["attn_wout"];
-    if (!attn_wq.validShape()) attn_wq = Tensor(d_model, d_model);
-    if (!attn_wk.validShape()) attn_wk = Tensor(d_model, d_model);
-    if (!attn_wv.validShape()) attn_wv = Tensor(d_model, d_model);
-    if (!attn_wout.validShape()) attn_wout = Tensor(d_model, d_model);
-
-    // Initialize LayerNorm2 weights if not set
-    Tensor& norm2_scale = (*this)["norm2_scale"];
-    Tensor& norm2_shift = (*this)["norm2_shift"];
-    if (!norm2_scale.validShape()) {
-        norm2_scale = Tensor(d_model);
-        std::vector<float> scale_data(d_model, 1.0f);
-        norm2_scale.set(scale_data);
-    }
-    if (!norm2_shift.validShape()) {
-        norm2_shift = Tensor(d_model);
-        std::vector<float> shift_data(d_model, 0.0f);
-        norm2_shift.set(shift_data);
-    }
-
-    // Initialize FeedForward weights if not set
-    Tensor& ff_w1 = (*this)["ff_w1"];
-    Tensor& ff_w2 = (*this)["ff_w2"];
-    if (!ff_w1.validShape()) ff_w1 = Tensor(4 * d_model, d_model);
-    if (!ff_w2.validShape()) ff_w2 = Tensor(d_model, 4 * d_model);
-
-    (*this)["out0"] = Tensor(B, S, D);
+    (*this)["out0"] = Tensor(in0.shape());
 }
 
-void TransformerBlockNode::run(CommandBuffer cmdBuff)
+void AddNode::run(CommandBuffer cmdBuff)
 {
-    Tensor& input = (*this)["in0"];
+    Tensor& in0 = (*this)["in0"];
+    Tensor& in1 = (*this)["in1"];
     Tensor& output = (*this)["out0"];
 
-    uint32_t B = input.shape()[0];
-    uint32_t S = input.shape()[1];
-    uint32_t D = d_model;
-    uint32_t num_rows = B * S;
+    uint32_t N = in0.numElements();
 
-    // Get weights
-    Tensor& norm1_scale = (*this)["norm1_scale"];
-    Tensor& norm1_shift = (*this)["norm1_shift"];
-    Tensor& attn_wq = (*this)["attn_wq"];
-    Tensor& attn_wk = (*this)["attn_wk"];
-    Tensor& attn_wv = (*this)["attn_wv"];
-    Tensor& attn_wout = (*this)["attn_wout"];
-    Tensor& norm2_scale = (*this)["norm2_scale"];
-    Tensor& norm2_shift = (*this)["norm2_shift"];
-    Tensor& ff_w1 = (*this)["ff_w1"];
-    Tensor& ff_w2 = (*this)["ff_w2"];
+    addDescSet.write({
+        output.buffer(),
+        in0.buffer(),
+        in1.buffer()
+    });
 
-    // Allocate temporary buffers
-    Tensor norm1_out = Tensor(B, S, D);
-    norm1_out.bindBuffer(netGlobalDevice.createBuffer({
-        .size = B * S * D * sizeof(float),
-        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        .reqMemProps = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-    }));
+    int constants[] = {(int)N};
 
-    Tensor attn_out = Tensor(B, S, D);
-    attn_out.bindBuffer(netGlobalDevice.createBuffer({
-        .size = B * S * D * sizeof(float),
-        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        .reqMemProps = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-    }));
-
-    Tensor residual1 = Tensor(B, S, D);
-    residual1.bindBuffer(netGlobalDevice.createBuffer({
-        .size = B * S * D * sizeof(float),
-        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        .reqMemProps = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-    }));
-
-    Tensor norm2_out = Tensor(B, S, D);
-    norm2_out.bindBuffer(netGlobalDevice.createBuffer({
-        .size = B * S * D * sizeof(float),
-        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        .reqMemProps = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-    }));
-
-    Tensor ff_out = Tensor(B, S, D);
-    ff_out.bindBuffer(netGlobalDevice.createBuffer({
-        .size = B * S * D * sizeof(float),
-        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        .reqMemProps = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-    }));
-
-    // Step 1: LayerNorm1(input) -> norm1_out
-    {
-        norm1DescSet.write({
-            norm1_out.buffer(),
-            input.buffer(),
-            norm1_scale.buffer(),
-            norm1_shift.buffer()
-        });
-
-        struct { int num_rows, D; float eps; } constants = {(int)num_rows, (int)D, 1e-5f};
-
-        cmdBuff
-            .bindPipeline(norm1Pipeline)
-            .setPushConstants(0, sizeof(constants), &constants)
-            .bindDescSets({norm1DescSet})
-            .dispatch0(CEIL_DIV(num_rows, 256))
-            .barrier(
-                (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
-                / norm1_out.buffer()
-                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
-            );
-    }
-
-    // Step 2: MultiHeadAttention(norm1_out) -> attn_out
-    {
-        // Create temporary attention node
-        MultiHeadAttentionNode attn(d_model, d_model, num_heads);
-        attn["in0"] = norm1_out;
-        attn["W_query"] = attn_wq;
-        attn["W_key"] = attn_wk;
-        attn["W_value"] = attn_wv;
-        attn["W_out"] = attn_wout;
-        attn.prepare();
-        attn["out0"] = attn_out;  // Assign our pre-allocated buffer AFTER prepare()
-        attn.run(cmdBuff);
-    }
-
-    // Step 3: residual1 = input + attn_out
-    {
-        residualAdd1DescSet.write({
-            residual1.buffer(),
-            input.buffer(),
-            attn_out.buffer()
-        });
-
-        int constants[] = {(int)(B * S * D)};
-
-        cmdBuff
-            .bindPipeline(residualAdd1Pipeline)
-            .setPushConstants(0, sizeof(constants), constants)
-            .bindDescSets({residualAdd1DescSet})
-            .dispatch0(CEIL_DIV(B * S * D, 256))
-            .barrier(
-                (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
-                / residual1.buffer()
-                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
-            );
-    }
-
-    // Step 4: LayerNorm2(residual1) -> norm2_out
-    {
-        norm2DescSet.write({
-            norm2_out.buffer(),
-            residual1.buffer(),
-            norm2_scale.buffer(),
-            norm2_shift.buffer()
-        });
-
-        struct { int num_rows, D; float eps; } constants = {(int)num_rows, (int)D, 1e-5f};
-
-        cmdBuff
-            .bindPipeline(norm2Pipeline)
-            .setPushConstants(0, sizeof(constants), &constants)
-            .bindDescSets({norm2DescSet})
-            .dispatch0(CEIL_DIV(num_rows, 256))
-            .barrier(
-                (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
-                / norm2_out.buffer()
-                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
-            );
-    }
-
-    // Step 5: FeedForward(norm2_out) -> ff_out
-    {
-        // Create temporary feedforward node
-        FeedForwardNode ff(d_model);
-        ff["in0"] = norm2_out;
-        ff["weight1"] = ff_w1;
-        ff["weight2"] = ff_w2;
-        ff.prepare();
-        ff["out0"] = ff_out;  // Assign our pre-allocated buffer AFTER prepare()
-        ff.run(cmdBuff);
-    }
-
-    // Step 6: output = residual1 + ff_out
-    {
-        residualAdd2DescSet.write({
-            output.buffer(),
-            residual1.buffer(),
-            ff_out.buffer()
-        });
-
-        int constants[] = {(int)(B * S * D)};
-
-        cmdBuff
-            .bindPipeline(residualAdd2Pipeline)
-            .setPushConstants(0, sizeof(constants), constants)
-            .bindDescSets({residualAdd2DescSet})
-            .dispatch0(CEIL_DIV(B * S * D, 256))
-            .barrier(
-                (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
-                / output.buffer()
-                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
-            );
-    }
+    cmdBuff
+        .bindPipeline(addPipeline)
+        .setPushConstants(0, sizeof(constants), constants)
+        .bindDescSets({addDescSet})
+        .dispatch0(CEIL_DIV(N, 256))
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / output.buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
 }
 
+// ============================================================================
+// TransformerBlock: NodeGroup with residual connections
+// ============================================================================
+
+TransformerBlock::TransformerBlock(uint32_t d_model, uint32_t num_heads)
+    : NodeGroup(),
+      d_model(d_model),
+      num_heads(num_heads),
+      norm1(d_model),
+      attention(d_model, d_model, num_heads),
+      norm2(d_model),
+      feedforward(d_model)
+{
+    // Build graph: x = x + Attention(LayerNorm(x))
+    //              x = x + FeedForward(LayerNorm(x))
+    //
+    // Graph structure:
+    // input --> inputRouter --> norm1 --> attention --> add1 --> norm2 --> feedforward --> add2 --> output
+    //              |                                     ^         |                        ^
+    //              +-------------------------------------+         +------------------------+
+    //                   (first residual skip)                    (second residual skip)
+
+    // Fan out input to main path and first residual
+    inputRouter - norm1;            // Main path: input -> norm1
+    inputRouter - "in0" / add1;     // First residual: input -> add1.in0
+
+    // First sub-path: norm1 -> attention -> add1.in1 (main path)
+    norm1 - attention - "in1" / add1;
+
+    // Second sub-path: add1 -> norm2 -> feedforward -> add2.in1 (main path)
+    add1 - norm2 - feedforward - "in1" / add2;
+
+    // Second residual connection: add1.out0 -> add2.in0
+    add1 - "in0" / add2;
+
+    // Define external slots
+    defineSlot("in0", inputRouter.slot("in0"));  // External input goes to inputRouter
+    defineSlot("out0", add2.slot("out0"));       // Final output comes from add2
+}
+
+Tensor& TransformerBlock::operator[](const std::string& name)
+{
+    // Provide access to internal weights
+    if (name == "norm1_scale") return norm1["scale"];
+    if (name == "norm1_shift") return norm1["shift"];
+    if (name == "attn_wq") return attention["W_query"];
+    if (name == "attn_wk") return attention["W_key"];
+    if (name == "attn_wv") return attention["W_value"];
+    if (name == "attn_wout") return attention["W_out"];
+    if (name == "norm2_scale") return norm2["scale"];
+    if (name == "norm2_shift") return norm2["shift"];
+    if (name == "ff_w1") return feedforward["weight1"];
+    if (name == "ff_w2") return feedforward["weight2"];
+
+    throw std::runtime_error("No such weight in TransformerBlock: " + name);
+}
