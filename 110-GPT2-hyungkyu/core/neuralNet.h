@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <cstring>  // memcpy
 #include <stdexcept>
+#include <iostream>
 
 
 using namespace vk;
@@ -216,10 +217,10 @@ class NeuralNet
     std::vector<std::vector<Node*>> linearChains;
 
     BufferPool& bufferPool = BufferPool::get();
-    Buffer uploadBuffer; 
+    Buffer uploadBuffer;
     uint8_t* uploadBufferMappedAddress = nullptr;
-    size_t uploadBufferOffset = 0; 
-    const size_t uploadBufferSize = 1024 * 1024 * 64; // 64 MB
+    size_t uploadBufferOffset = 0;
+    const size_t uploadBufferSize = 1024 * 1024 * 512; // 512 MB (increased for full GPT-2 12 layers)
 
     std::vector<InputNode> _inputs;
     std::vector<OutputNode> _outputs;
@@ -441,18 +442,26 @@ inline void NeuralNet::run()
                         _ASSERT(!tensor.hasDeviceData());
 
                         size_t byteSize = tensor.numElements() * sizeof(float);
-                        
+
+                        // Validate buffer size to prevent overflow
+                        if (uploadBufferOffset + byteSize > uploadBufferSize) {
+                            throw std::runtime_error("Upload buffer overflow! Tensor size (" +
+                                std::to_string(byteSize / 1024.0 / 1024.0) + " MB) + offset (" +
+                                std::to_string(uploadBufferOffset / 1024.0 / 1024.0) + " MB) exceeds buffer size (" +
+                                std::to_string(uploadBufferSize / 1024.0 / 1024.0) + " MB)");
+                        }
+
                         Buffer buffer = bufferPool.requestBuffer(
                             device,
-                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, 
+                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                             byteSize,
                             // tensor.isConstant() ? byteSize * 1.5f : byteSize * 4.0f
                             byteSize * 1.5f
                         );
-                        
+
                         tensor.bindBuffer(buffer);
-                        
+
                         memcpy(uploadBufferMappedAddress + uploadBufferOffset, tensor.hostData(), byteSize);
     
                         cmdBuffer
@@ -499,7 +508,7 @@ inline void NeuralNet::run()
         }
 
         // Record the command buffer for executing the program of the node
-        node->run(cmdBuffer);        
+        node->run(cmdBuffer);
 
         // invlaidate the tensor to return the bound buffer to the pool
         for (auto& [name, slot] : node->slots)
@@ -515,7 +524,7 @@ inline void NeuralNet::run()
     }
 
     device.queue() << cmdBuffer.end() << waiting;
-    uploadBufferOffset = 0; 
+    uploadBufferOffset = 0;
 }
 
 
