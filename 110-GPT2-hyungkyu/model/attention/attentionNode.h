@@ -96,12 +96,14 @@ class MultiHeadAttentionNode : public Node
     // Private helper functions for better readability
     IntermediateTensors allocateIntermediateBuffers(uint32_t B, uint32_t S, uint32_t D, uint32_t H, uint32_t HD);
     void computeQKVProjection(CommandBuffer& cmdBuff, const Tensor& input, IntermediateTensors& tensors,
-                              const Tensor& W_q, const Tensor& W_k, const Tensor& W_v, uint32_t B, uint32_t S, uint32_t D_in, uint32_t D_out);
+                              const Tensor& W_q, const Tensor& W_k, const Tensor& W_v,
+                              const Tensor& B_q, const Tensor& B_k, const Tensor& B_v,
+                              uint32_t B, uint32_t S, uint32_t D_in, uint32_t D_out);
     void computeAttentionScores(CommandBuffer& cmdBuff, IntermediateTensors& tensors, uint32_t B, uint32_t H, uint32_t S, uint32_t HD);
     void applyCausalMaskToScores(CommandBuffer& cmdBuff, IntermediateTensors& tensors, uint32_t B, uint32_t H, uint32_t S);
     void computeSoftmax(CommandBuffer& cmdBuff, IntermediateTensors& tensors, uint32_t B, uint32_t H, uint32_t S);
     void computeWeightedSum(CommandBuffer& cmdBuff, IntermediateTensors& tensors, uint32_t B, uint32_t H, uint32_t S, uint32_t HD);
-    void combineHeadsAndProject(CommandBuffer& cmdBuff, IntermediateTensors& tensors, const Tensor& W_out, Tensor& output,
+    void combineHeadsAndProject(CommandBuffer& cmdBuff, IntermediateTensors& tensors, const Tensor& W_out, const Tensor& B_out, Tensor& output,
                                 uint32_t B, uint32_t S, uint32_t D, uint32_t H, uint32_t HD);
 
 public:

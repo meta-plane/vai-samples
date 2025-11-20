@@ -121,7 +121,10 @@ static void runPromptGeneration(
     GPT2Net& gpt2Net,
     BPETokenizer& tokenizer,
     const std::string& prompt_text,
-    uint32_t num_tokens_to_generate)
+    uint32_t num_tokens_to_generate,
+    float temperature = 1.0f,
+    int top_k = 50,
+    int seed = -1)
 {
     std::cout << "\n----------------------------------------" << std::endl;
     std::cout << "Prompt: \"" << prompt_text << "\"" << std::endl;
@@ -145,8 +148,9 @@ static void runPromptGeneration(
         gpt2Net,
         prompt_ids,
         num_tokens_to_generate,
-        1.0f,    // temperature
-        50       // top_k
+        temperature,
+        top_k,
+        seed
     );
 
     auto end_time = std::chrono::high_resolution_clock::now();
@@ -273,7 +277,7 @@ void testGPT2Generation()
     runGPT2TextGenerationTest(gpt2Net, test_prompts, 5);
 }
 
-void testGPT2Pretrained()
+void testGPT2Pretrained(const std::string& prompt, uint32_t max_tokens)
 {
     std::cout << "\n========================================" << std::endl;
     std::cout << "GPT-2 Text Generation Test (Pretrained Weights)" << std::endl;
@@ -309,13 +313,36 @@ void testGPT2Pretrained()
         // Create network with pretrained weights
         GPT2Net gpt2Net = createNetworkWithPretrainedWeights(config, weights_file);
 
-        // Test with full GPT-2 12 layers (single prompt due to GPU buffer accumulation)
-        std::vector<std::string> test_prompts = {
-            "The future of artificial intelligence is"
-        };
+        // Test with full GPT-2 12 layers
+        std::cout << "\n=== Greedy Decoding (Deterministic) ===" << std::endl;
+        std::cout << "Prompt: \"" << prompt << "\"" << std::endl;
+        std::cout << "Max tokens: " << max_tokens << std::endl;
+        {
+            BPETokenizer tokenizer = loadTokenizer();
+            runPromptGeneration(gpt2Net, tokenizer,
+                prompt,
+                max_tokens,
+                0.0f,  // temperature=0 for greedy decoding (deterministic)
+                0,     // top_k not used in greedy mode
+                42     // seed (not used in greedy mode, but set for consistency)
+            );
+        }
 
-        // Run generation test
-        runGPT2TextGenerationTest(gpt2Net, test_prompts, 25);
+        // Second test disabled due to GPU memory constraints (BufferPool accumulation)
+        // TODO: Fix BufferPool to release memory between generations
+        /*
+        std::cout << "\n=== Sampling with Random Seed (Reproducible) ===" << std::endl;
+        {
+            BPETokenizer tokenizer = loadTokenizer();
+            runPromptGeneration(gpt2Net, tokenizer,
+                "Hello, I'm a language model,",
+                20,
+                1.0f,  // temperature
+                50,    // top_k
+                42     // seed for reproducibility
+            );
+        }
+        */
 
     } catch (const std::exception& e) {
         std::cout << "\n✗ Error during pretrained weights test: " << e.what() << std::endl;

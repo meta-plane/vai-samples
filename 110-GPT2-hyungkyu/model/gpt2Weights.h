@@ -134,6 +134,25 @@ inline void loadGPT2Weights(GPT2Net& model, const std::string& weights_file)
             loadAttnWeight("attn.out_proj.weight", "attn_wout");
         }
 
+        // Load attention biases (NEW)
+        {
+            auto loadAttnBias = [&](const std::string& name, const std::string& targetKey) {
+                const auto& data = reader.getTensor(filePrefix + name);
+                const auto& shape = reader.getShape(filePrefix + name);
+
+                if (shape.size() != 1 || shape[0] != config.d_model) {
+                    throw std::runtime_error("Unexpected shape for " + filePrefix + name);
+                }
+
+                model["block." + std::to_string(i) + "." + targetKey] = Tensor(shape[0]).set(data).setConstant();
+            };
+
+            loadAttnBias("attn.W_query.bias", "attn_bq");
+            loadAttnBias("attn.W_key.bias", "attn_bk");
+            loadAttnBias("attn.W_value.bias", "attn_bv");
+            loadAttnBias("attn.out_proj.bias", "attn_bout");
+        }
+
         // Load feedforward weights
         {
             // First layer: d_model → 4*d_model
@@ -158,6 +177,33 @@ inline void loadGPT2Weights(GPT2Net& model, const std::string& weights_file)
                 }
 
                 model["block." + std::to_string(i) + ".ff_w2"] = Tensor(shape[0], shape[1]).set(data).setConstant();
+            }
+        }
+
+        // Load feedforward biases (NEW)
+        {
+            // First layer bias: 4*d_model
+            {
+                const auto& data = reader.getTensor(filePrefix + "ff.layers.0.bias");
+                const auto& shape = reader.getShape(filePrefix + "ff.layers.0.bias");
+
+                if (shape.size() != 1 || shape[0] != 4 * config.d_model) {
+                    throw std::runtime_error("Unexpected shape for " + filePrefix + "ff.layers.0.bias");
+                }
+
+                model["block." + std::to_string(i) + ".ff_b1"] = Tensor(shape[0]).set(data).setConstant();
+            }
+
+            // Second layer bias: d_model
+            {
+                const auto& data = reader.getTensor(filePrefix + "ff.layers.2.bias");
+                const auto& shape = reader.getShape(filePrefix + "ff.layers.2.bias");
+
+                if (shape.size() != 1 || shape[0] != config.d_model) {
+                    throw std::runtime_error("Unexpected shape for " + filePrefix + "ff.layers.2.bias");
+                }
+
+                model["block." + std::to_string(i) + ".ff_b2"] = Tensor(shape[0]).set(data).setConstant();
             }
         }
 

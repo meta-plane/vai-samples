@@ -28,6 +28,7 @@ layout(local_size_x = 16, local_size_y = 16) in;
 layout(set = 0, binding = 0) buffer Output { float y[]; };      // [B*S*O]
 layout(set = 0, binding = 1) buffer Input { float x[]; };       // [B*S*I]
 layout(set = 0, binding = 2) buffer Weight { float w[]; };      // [O*I]
+layout(set = 0, binding = 3) buffer Bias { float b[]; };        // [O] - NEW: bias
 
 layout(push_constant) uniform PushConstants {
     int B;   // batch size
@@ -48,7 +49,7 @@ void main() {
         sum += x[bs * I + i] * w[o * I + i];
     }
 
-    y[bs * O + o] = sum;
+    y[bs * O + o] = sum + b[o];
 }
 )";
 
@@ -218,6 +219,9 @@ layout(set = 0, binding = 3) buffer Input { float x[]; };    // [B*S*D_in]
 layout(set = 0, binding = 4) buffer Wq { float wq[]; };      // [D_out*D_in]
 layout(set = 0, binding = 5) buffer Wk { float wk[]; };      // [D_out*D_in]
 layout(set = 0, binding = 6) buffer Wv { float wv[]; };      // [D_out*D_in]
+layout(set = 0, binding = 7) buffer Bq { float bq[]; };      // [D_out] - NEW: Q bias
+layout(set = 0, binding = 8) buffer Bk { float bk[]; };      // [D_out] - NEW: K bias
+layout(set = 0, binding = 9) buffer Bv { float bv[]; };      // [D_out] - NEW: V bias
 
 layout(push_constant) uniform PushConstants {
     int B, S, D_in, D_out;
@@ -230,27 +234,27 @@ void main() {
     int BS = B * S;
     if (bs >= BS || d_out >= D_out) return;
 
-    // Q = X @ Wq^T
+    // Q = X @ Wq^T + Bq
     // X: [bs, D_in], Wq: [D_out, D_in] -> Q: [bs, D_out]
     float q_val = 0.0;
     for (int i = 0; i < D_in; ++i) {
         q_val += x[bs * D_in + i] * wq[d_out * D_in + i];
     }
-    q[bs * D_out + d_out] = q_val;
+    q[bs * D_out + d_out] = q_val + bq[d_out];
 
-    // K = X @ Wk^T
+    // K = X @ Wk^T + Bk
     float k_val = 0.0;
     for (int i = 0; i < D_in; ++i) {
         k_val += x[bs * D_in + i] * wk[d_out * D_in + i];
     }
-    k[bs * D_out + d_out] = k_val;
+    k[bs * D_out + d_out] = k_val + bk[d_out];
 
-    // V = X @ Wv^T
+    // V = X @ Wv^T + Bv
     float v_val = 0.0;
     for (int i = 0; i < D_in; ++i) {
         v_val += x[bs * D_in + i] * wv[d_out * D_in + i];
     }
-    v[bs * D_out + d_out] = v_val;
+    v[bs * D_out + d_out] = v_val + bv[d_out];
 }
 )";
 
@@ -410,6 +414,10 @@ MultiHeadAttentionNode::MultiHeadAttentionNode(uint32_t d_in, uint32_t d_out, ui
     addSlot("W_key", NodeSlot::input);    // learnable parameter
     addSlot("W_value", NodeSlot::input);  // learnable parameter
     addSlot("W_out", NodeSlot::input);    // learnable parameter
+    addSlot("B_query", NodeSlot::input);  // NEW: bias parameter
+    addSlot("B_key", NodeSlot::input);    // NEW: bias parameter
+    addSlot("B_value", NodeSlot::input);  // NEW: bias parameter
+    addSlot("B_out", NodeSlot::input);    // NEW: bias parameter
     addSlot("out0", NodeSlot::output);
 
     // Create pipelines
@@ -453,6 +461,17 @@ void MultiHeadAttentionNode::prepare()
     // Output projection: (d_out, d_out) - final transformation in output space
     if (!W_out.validShape()) W_out = Tensor(d_out, d_out);
 
+    // Initialize biases if not set
+    Tensor& B_q = (*this)["B_query"];
+    Tensor& B_k = (*this)["B_key"];
+    Tensor& B_v = (*this)["B_value"];
+    Tensor& B_out = (*this)["B_out"];
+
+    if (!B_q.validShape()) B_q = Tensor(d_out);
+    if (!B_k.validShape()) B_k = Tensor(d_out);
+    if (!B_v.validShape()) B_v = Tensor(d_out);
+    if (!B_out.validShape()) B_out = Tensor(d_out);
+
     (*this)["out0"] = Tensor(B, S, d_out);
 }
 
@@ -463,6 +482,10 @@ void MultiHeadAttentionNode::run(CommandBuffer cmdBuff)
     Tensor& W_k = (*this)["W_key"];
     Tensor& W_v = (*this)["W_value"];
     Tensor& W_out = (*this)["W_out"];
+    Tensor& B_q = (*this)["B_query"];
+    Tensor& B_k = (*this)["B_key"];
+    Tensor& B_v = (*this)["B_value"];
+    Tensor& B_out = (*this)["B_out"];
     Tensor& output = (*this)["out0"];
 
     uint32_t B = input.shape()[0];
@@ -476,12 +499,12 @@ void MultiHeadAttentionNode::run(CommandBuffer cmdBuff)
     IntermediateTensors tensors = allocateIntermediateBuffers(B, S, D_out, H, HD);
 
     // Execute attention mechanism in stages
-    computeQKVProjection(cmdBuff, input, tensors, W_q, W_k, W_v, B, S, D_in, D_out);
+    computeQKVProjection(cmdBuff, input, tensors, W_q, W_k, W_v, B_q, B_k, B_v, B, S, D_in, D_out);
     computeAttentionScores(cmdBuff, tensors, B, H, S, HD);
     applyCausalMaskToScores(cmdBuff, tensors, B, H, S);
     computeSoftmax(cmdBuff, tensors, B, H, S);
     computeWeightedSum(cmdBuff, tensors, B, H, S, HD);
-    combineHeadsAndProject(cmdBuff, tensors, W_out, output, B, S, D_out, H, HD);
+    combineHeadsAndProject(cmdBuff, tensors, W_out, B_out, output, B, S, D_out, H, HD);
 }
 
 // ============================================================================
@@ -518,12 +541,14 @@ MultiHeadAttentionNode::allocateIntermediateBuffers(uint32_t B, uint32_t S, uint
 
 void MultiHeadAttentionNode::computeQKVProjection(CommandBuffer& cmdBuff, const Tensor& input, IntermediateTensors& tensors,
                                                    const Tensor& W_q, const Tensor& W_k, const Tensor& W_v,
+                                                   const Tensor& B_q, const Tensor& B_k, const Tensor& B_v,
                                                    uint32_t B, uint32_t S, uint32_t D_in, uint32_t D_out)
 {
     qkvProjDescSet.write({
         tensors.Q_flat.buffer(), tensors.K_flat.buffer(), tensors.V_flat.buffer(),
         input.buffer(),
-        W_q.buffer(), W_k.buffer(), W_v.buffer()
+        W_q.buffer(), W_k.buffer(), W_v.buffer(),
+        B_q.buffer(), B_k.buffer(), B_v.buffer()
     });
 
     int constants[] = {(int)B, (int)S, (int)D_in, (int)D_out};
@@ -611,7 +636,7 @@ void MultiHeadAttentionNode::computeWeightedSum(CommandBuffer& cmdBuff, Intermed
 }
 
 void MultiHeadAttentionNode::combineHeadsAndProject(CommandBuffer& cmdBuff, IntermediateTensors& tensors,
-                                                      const Tensor& W_out, Tensor& output,
+                                                      const Tensor& W_out, const Tensor& B_out, Tensor& output,
                                                       uint32_t B, uint32_t S, uint32_t D, uint32_t H, uint32_t HD)
 {
     // Combine heads
@@ -636,7 +661,8 @@ void MultiHeadAttentionNode::combineHeadsAndProject(CommandBuffer& cmdBuff, Inte
     outProjDescSet.write({
         output.buffer(),
         tensors.context_combined.buffer(),
-        W_out.buffer()
+        W_out.buffer(),
+        B_out.buffer()
     });
 
     int constants2[] = {(int)B, (int)S, (int)D, (int)d_out};

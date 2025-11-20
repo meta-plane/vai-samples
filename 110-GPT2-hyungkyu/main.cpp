@@ -1,3 +1,5 @@
+#include <string>
+
 void tokenizerTest();
 void dataLoaderTest();
 void embeddingNodeTest();
@@ -5,7 +7,7 @@ void attentionNodeTest();
 void transformerNodeTest();
 void testGPT2();
 void testGPT2Generation();
-void testGPT2Pretrained();
+void testGPT2Pretrained(const std::string& prompt = "The future of artificial intelligence is", uint32_t max_tokens = 25);
 
 // Run all basic component tests
 void runBasicTests()
@@ -41,7 +43,13 @@ int main()
     // testGPT2Generation();
 
     // Option 3: Run pretrained weights test (requires more GPU memory)
-    testGPT2Pretrained();
+    std::string prompt = "The future of artificial intelligence is";
+    uint32_t max_tokens = 28;
+    testGPT2Pretrained(prompt, max_tokens);  // Uses default parameters: prompt="The future of artificial intelligence is", max_tokens=25
+
+    // Examples of custom usage:
+    // testGPT2Pretrained("Once upon a time", 15);  // Custom prompt and token count
+    // testGPT2Pretrained("Hello world");  // Custom prompt, default max_tokens=25
 
     // Note: Running both may cause GPU OOM. Choose one or run separately.
 
