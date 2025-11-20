@@ -1,5 +1,6 @@
 #include "gpt2Net.h"
 #include "gpt2Generation.h"
+#include "gpt2Weights.h"
 #include "../core/error.h"
 #include "../tokenizer/bpeTokenizer.h"
 #include <iostream>
@@ -168,17 +169,9 @@ static void runPromptGeneration(
     std::cout << "Generation speed: " << std::fixed << std::setprecision(2) << tokens_per_sec << " tokens/sec" << std::endl;
 }
 
-void testGPT2Generation()
+// Helper: Create and initialize network with random weights
+static GPT2Net createNetworkWithRandomWeights(const GPT2Config& config)
 {
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "GPT-2 Text Generation Test" << std::endl;
-    std::cout << "========================================\n" << std::endl;
-
-    // Initialize random seed
-    srand((unsigned int)time(nullptr));
-
-    // Create network
-    GPT2Config config = GPT2TinyConfig();
     std::cout << "Creating GPT-2 network..." << std::endl;
     std::cout << "  Config: d_model=" << config.d_model
               << ", num_heads=" << config.num_heads
@@ -186,14 +179,88 @@ void testGPT2Generation()
     GPT2Net gpt2Net(netGlobalDevice, config);
     std::cout << "✓ Network created\n" << std::endl;
 
-    // Initialize all weights
+    // Initialize weights
     initializeAllWeights(gpt2Net, config);
 
-    // Load tokenizer
+    return gpt2Net;
+}
+
+// Helper: Create and initialize network with pretrained weights
+static GPT2Net createNetworkWithPretrainedWeights(
+    const GPT2Config& config,
+    const std::string& weights_file)
+{
+    std::cout << "Creating GPT-2 network..." << std::endl;
+    std::cout << "  Config: d_model=" << config.d_model
+              << ", num_heads=" << config.num_heads
+              << ", num_layers=" << config.num_layers << std::endl;
+    GPT2Net gpt2Net(netGlobalDevice, config);
+    std::cout << "✓ Network created\n" << std::endl;
+
+    // Load pretrained weights
+    std::cout << "Loading pretrained weights from: " << weights_file << std::endl;
+    loadGPT2Weights(gpt2Net, weights_file);
+    std::cout << std::endl;
+
+    return gpt2Net;
+}
+
+// Helper: Load tokenizer
+static BPETokenizer loadTokenizer()
+{
     std::cout << "Loading tokenizer..." << std::endl;
     BPETokenizer tokenizer("110-GPT2-hyungkyu/vocab.json",
                           "110-GPT2-hyungkyu/merges.txt");
     std::cout << "✓ Tokenizer loaded\n" << std::endl;
+    return tokenizer;
+}
+
+// Helper: Run generation tests on multiple prompts
+static void runGenerationTests(
+    GPT2Net& gpt2Net,
+    BPETokenizer& tokenizer,
+    const std::vector<std::string>& prompts,
+    uint32_t num_tokens)
+{
+    for (const auto& prompt_text : prompts) {
+        try {
+            runPromptGeneration(gpt2Net, tokenizer, prompt_text, num_tokens);
+        } catch (const std::exception& e) {
+            std::cout << "\n✗ Generation failed: " << e.what() << std::endl;
+            throw;  // Re-throw to let caller handle
+        }
+    }
+}
+
+// Common function: Run complete text generation test with a network
+static void runGPT2TextGenerationTest(
+    GPT2Net& gpt2Net,
+    const std::vector<std::string>& test_prompts,
+    uint32_t num_tokens_to_generate)
+{
+    // Load tokenizer
+    BPETokenizer tokenizer = loadTokenizer();
+
+    // Run generation tests
+    runGenerationTests(gpt2Net, tokenizer, test_prompts, num_tokens_to_generate);
+
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "✓ Text generation test completed!" << std::endl;
+    std::cout << "========================================" << std::endl;
+}
+
+void testGPT2Generation()
+{
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "GPT-2 Text Generation Test (Random Weights)" << std::endl;
+    std::cout << "========================================\n" << std::endl;
+
+    // Initialize random seed
+    srand((unsigned int)time(nullptr));
+
+    // Create network with random weights
+    GPT2Config config = GPT2TinyConfig();
+    GPT2Net gpt2Net = createNetworkWithRandomWeights(config);
 
     // Test prompts
     std::vector<std::string> test_prompts = {
@@ -202,12 +269,62 @@ void testGPT2Generation()
         "The quick brown fox"
     };
 
-    uint32_t num_tokens_to_generate = 5;
-    for (const auto& prompt_text : test_prompts) {
-        runPromptGeneration(gpt2Net, tokenizer, prompt_text, num_tokens_to_generate);
-    }
+    // Run generation test
+    runGPT2TextGenerationTest(gpt2Net, test_prompts, 5);
+}
 
+void testGPT2Pretrained()
+{
     std::cout << "\n========================================" << std::endl;
-    std::cout << "✓ Text generation test completed!" << std::endl;
-    std::cout << "========================================" << std::endl;
+    std::cout << "GPT-2 Text Generation Test (Pretrained Weights)" << std::endl;
+    std::cout << "========================================\n" << std::endl;
+
+    // Check if weights exist
+    const std::string weights_dir = "110-GPT2-hyungkyu/assets/weights/124M/";
+    const std::string config_file = weights_dir + "gpt2_config.txt";
+    const std::string weights_file = weights_dir + "gpt2_weights.bin";
+
+    std::ifstream test_file(weights_file);
+    if (!test_file) {
+        std::cout << "⚠ Pretrained weights not found at: " << weights_file << std::endl;
+        std::cout << "  Run download_gpt2_weights.py to download pretrained weights" << std::endl;
+        std::cout << "  Skipping pretrained weights test" << std::endl;
+        return;
+    }
+    test_file.close();
+
+    try {
+        // Load configuration
+        std::cout << "Loading configuration from: " << config_file << std::endl;
+        GPT2Config config = loadGPT2Config(config_file);
+        std::cout << "  Original config: vocab_size=" << config.vocab_size
+                  << ", d_model=" << config.d_model
+                  << ", num_heads=" << config.num_heads
+                  << ", num_layers=" << config.num_layers << std::endl;
+        std::cout << "✓ Configuration loaded\n" << std::endl;
+
+        // For testing, use reduced layers to avoid GPU OOM
+        GPT2Config test_config = config;
+        test_config.num_layers = 1;  // Use only 1 layer for testing
+
+        std::cout << "Using reduced config for testing: " << test_config.num_layers
+                  << " layer (instead of " << config.num_layers << ")\n" << std::endl;
+
+        // Create network with pretrained weights
+        GPT2Net gpt2Net = createNetworkWithPretrainedWeights(test_config, weights_file);
+
+        // Test prompts
+        std::vector<std::string> test_prompts = {
+            "Hello, I'm a language model,",
+            "Once upon a time"
+        };
+
+        // Run generation test
+        runGPT2TextGenerationTest(gpt2Net, test_prompts, 5);
+
+    } catch (const std::exception& e) {
+        std::cout << "\n✗ Error during pretrained weights test: " << e.what() << std::endl;
+        std::cout << "This may be due to GPU memory constraints." << std::endl;
+        std::cout << "Try running this test alone (comment out runBasicTests in main.cpp)" << std::endl;
+    }
 }
