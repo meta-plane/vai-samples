@@ -124,16 +124,10 @@ inline std::vector<int> generate_gpt2(
 
         Tensor inputTensor = Tensor(1, seq_len).set(input_data);
 
-        std::cout << "  [Debug] Starting forward pass (seq_len=" << seq_len << ")..." << std::endl;
-
         // Forward pass (like eval_mnist)
         std::vector<Tensor> outputs = gpt2Net(inputTensor);
 
-        std::cout << "  [Debug] Forward pass completed, extracting logits..." << std::endl;
-
         Tensor logits = outputs[0];  // Returns GPU tensor
-
-        std::cout << "  [Debug] Logits extracted, preparing to copy to CPU..." << std::endl;
 
         // Copy logits to CPU (reusing pre-allocated buffer)
         uint32_t logits_size = seq_len * config.vocab_size * sizeof(float);

@@ -12,10 +12,10 @@ using namespace vk;
 // Global device for neural network operations (defined in neuralNodes.cpp pattern)
 Device netGlobalDevice = VulkanApp::get().device();
 
-// Global descriptor pool
+// Global descriptor pool (increased for large GPT-2 models with 12 layers)
 DescriptorPool gDestSetPool = netGlobalDevice.createDescriptorPool({
-    .maxTypes = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER <= 200},
-    .maxSets = 100
+    .maxTypes = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER <= 1000},
+    .maxSets = 500
 });
 
 void testTokenEmbedding()

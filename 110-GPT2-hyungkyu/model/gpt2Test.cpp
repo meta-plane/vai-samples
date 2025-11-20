@@ -303,24 +303,19 @@ void testGPT2Pretrained()
                   << ", num_layers=" << config.num_layers << std::endl;
         std::cout << "✓ Configuration loaded\n" << std::endl;
 
-        // For testing, use reduced layers to avoid GPU OOM
-        GPT2Config test_config = config;
-        test_config.num_layers = 1;  // Use only 1 layer for testing
-
-        std::cout << "Using reduced config for testing: " << test_config.num_layers
-                  << " layer (instead of " << config.num_layers << ")\n" << std::endl;
+        // Use full configuration (all 12 layers)
+        std::cout << "Using full GPT-2 model: " << config.num_layers << " layers\n" << std::endl;
 
         // Create network with pretrained weights
-        GPT2Net gpt2Net = createNetworkWithPretrainedWeights(test_config, weights_file);
+        GPT2Net gpt2Net = createNetworkWithPretrainedWeights(config, weights_file);
 
-        // Test prompts
+        // Test with full GPT-2 12 layers (single prompt due to GPU buffer accumulation)
         std::vector<std::string> test_prompts = {
-            "Hello, I'm a language model,",
-            "Once upon a time"
+            "The future of artificial intelligence is"
         };
 
         // Run generation test
-        runGPT2TextGenerationTest(gpt2Net, test_prompts, 5);
+        runGPT2TextGenerationTest(gpt2Net, test_prompts, 25);
 
     } catch (const std::exception& e) {
         std::cout << "\n✗ Error during pretrained weights test: " << e.what() << std::endl;
