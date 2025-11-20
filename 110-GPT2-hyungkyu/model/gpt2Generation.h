@@ -97,6 +97,14 @@ inline std::vector<int> generate_gpt2(
     std::cout << "  Prompt length: " << prompt_ids.size() << " tokens" << std::endl;
     std::cout << "  Max new tokens: " << max_new_tokens << std::endl;
 
+    // Pre-allocate CPU buffer for logits (reuse across iterations)
+    uint32_t max_logits_size = config.max_seq_len * config.vocab_size * sizeof(float);
+    Buffer cpu_buffer = device.createBuffer({
+        .size = max_logits_size,
+        .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .reqMemProps = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+    });
+
     // Generate tokens one by one (like eval_mnist loop)
     for (uint32_t i = 0; i < max_new_tokens; ++i) {
         // Prepare input
@@ -116,18 +124,19 @@ inline std::vector<int> generate_gpt2(
 
         Tensor inputTensor = Tensor(1, seq_len).set(input_data);
 
+        std::cout << "  [Debug] Starting forward pass (seq_len=" << seq_len << ")..." << std::endl;
+
         // Forward pass (like eval_mnist)
         std::vector<Tensor> outputs = gpt2Net(inputTensor);
 
+        std::cout << "  [Debug] Forward pass completed, extracting logits..." << std::endl;
+
         Tensor logits = outputs[0];  // Returns GPU tensor
 
-        // Copy logits to CPU (following 10-mnist pattern)
+        std::cout << "  [Debug] Logits extracted, preparing to copy to CPU..." << std::endl;
+
+        // Copy logits to CPU (reusing pre-allocated buffer)
         uint32_t logits_size = seq_len * config.vocab_size * sizeof(float);
-        Buffer cpu_buffer = device.createBuffer({
-            .size = logits_size,
-            .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            .reqMemProps = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-        });
 
         // Get GPU buffer BEFORE any other operations
         Buffer gpu_buffer = logits.buffer();

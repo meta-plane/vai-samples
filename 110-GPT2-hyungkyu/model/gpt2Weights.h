@@ -5,6 +5,52 @@
 #include "../core/binaryWeightsReader.h"
 #include <iostream>
 #include <stdexcept>
+#include <fstream>
+#include <sstream>
+
+/**
+ * Load GPT-2 configuration from text file
+ */
+inline GPT2Config loadGPT2Config(const std::string& config_file)
+{
+    std::ifstream file(config_file);
+    if (!file) {
+        throw std::runtime_error("Failed to open config file: " + config_file);
+    }
+
+    GPT2Config config = {};
+    std::string line;
+
+    while (std::getline(file, line)) {
+        size_t pos = line.find('=');
+        if (pos == std::string::npos) continue;
+
+        std::string key = line.substr(0, pos);
+        std::string value = line.substr(pos + 1);
+
+        if (key == "vocab_size") {
+            config.vocab_size = std::stoi(value);
+        } else if (key == "max_seq_len") {
+            config.max_seq_len = std::stoi(value);
+        } else if (key == "d_model") {
+            config.d_model = std::stoi(value);
+        } else if (key == "num_layers") {
+            config.num_layers = std::stoi(value);
+        } else if (key == "num_heads") {
+            config.num_heads = std::stoi(value);
+        }
+    }
+
+    config.dropout = 0.0f;  // Not used in inference
+
+    // Validate config
+    if (config.vocab_size == 0 || config.max_seq_len == 0 ||
+        config.d_model == 0 || config.num_layers == 0 || config.num_heads == 0) {
+        throw std::runtime_error("Invalid config: missing required fields");
+    }
+
+    return config;
+}
 
 /**
  * Load pretrained GPT-2 weights into GPT2Net
@@ -82,10 +128,10 @@ inline void loadGPT2Weights(GPT2Net& model, const std::string& weights_file)
                 model["block." + std::to_string(i) + "." + targetKey] = Tensor(shape[0], shape[1]).set(data).setConstant();
             };
 
-            loadAttnWeight("attn.W_query.weight", "attn.wq");
-            loadAttnWeight("attn.W_key.weight", "attn.wk");
-            loadAttnWeight("attn.W_value.weight", "attn.wv");
-            loadAttnWeight("attn.out_proj.weight", "attn.wout");
+            loadAttnWeight("attn.W_query.weight", "attn_wq");
+            loadAttnWeight("attn.W_key.weight", "attn_wk");
+            loadAttnWeight("attn.W_value.weight", "attn_wv");
+            loadAttnWeight("attn.out_proj.weight", "attn_wout");
         }
 
         // Load feedforward weights
@@ -99,7 +145,7 @@ inline void loadGPT2Weights(GPT2Net& model, const std::string& weights_file)
                     throw std::runtime_error("Unexpected shape for " + filePrefix + "ff.layers.0.weight");
                 }
 
-                model["block." + std::to_string(i) + ".ff.w1"] = Tensor(shape[0], shape[1]).set(data).setConstant();
+                model["block." + std::to_string(i) + ".ff_w1"] = Tensor(shape[0], shape[1]).set(data).setConstant();
             }
 
             // Second layer: 4*d_model → d_model
@@ -111,7 +157,7 @@ inline void loadGPT2Weights(GPT2Net& model, const std::string& weights_file)
                     throw std::runtime_error("Unexpected shape for " + filePrefix + "ff.layers.2.weight");
                 }
 
-                model["block." + std::to_string(i) + ".ff.w2"] = Tensor(shape[0], shape[1]).set(data).setConstant();
+                model["block." + std::to_string(i) + ".ff_w2"] = Tensor(shape[0], shape[1]).set(data).setConstant();
             }
         }
 
@@ -128,10 +174,10 @@ inline void loadGPT2Weights(GPT2Net& model, const std::string& weights_file)
                 model["block." + std::to_string(i) + "." + targetKey] = Tensor(shape[0]).set(data).setConstant();
             };
 
-            loadNorm("norm1", "scale", "ln1.weight");
-            loadNorm("norm1", "shift", "ln1.bias");
-            loadNorm("norm2", "scale", "ln2.weight");
-            loadNorm("norm2", "shift", "ln2.bias");
+            loadNorm("norm1", "scale", "norm1_scale");
+            loadNorm("norm1", "shift", "norm1_shift");
+            loadNorm("norm2", "scale", "norm2_scale");
+            loadNorm("norm2", "shift", "norm2_shift");
         }
 
         if ((i + 1) % 3 == 0 || i == 0) {
