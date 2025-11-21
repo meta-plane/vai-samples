@@ -64,18 +64,10 @@ public:
     {
         if (buffer)
         {
-            auto& subPool = bufferPool[buffer.usage()];
-
-            // Only return buffer to pool if under the limit
-            // If at or above limit, buffer will be destroyed (preventing memory growth)
-            if (subPool.size() < MAX_POOL_SIZE_PER_USAGE)
-            {
-                subPool.emplace(
-                    buffer.size(),
-                    std::make_pair(std::move(buffer), buffer.memoryProperties())
-                );
-            }
-            // else: buffer goes out of scope and is automatically destroyed
+            bufferPool[buffer.usage()].emplace(
+                buffer.size(),
+                std::make_pair(std::move(buffer), buffer.memoryProperties())
+            );
         }
     }
 };
