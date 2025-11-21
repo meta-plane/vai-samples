@@ -13,6 +13,8 @@ add_executable(${PROJECT_NAME}
     core/spirvHelpers.cpp
     core/jsonParser.cpp
     core/globalContext.cpp
+    model/cache/kvCache.cpp
+    model/cache/kvCacheTest.cpp
     model/embedding/embeddingNode.cpp
     model/embedding/embeddingNodeTest.cpp
     model/attention/attentionNode.cpp

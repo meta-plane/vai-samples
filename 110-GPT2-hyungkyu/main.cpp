@@ -9,6 +9,7 @@ void transformerNodeTest();
 void testGPT2();
 void testGPT2Generation();
 void testGPT2Pretrained(const std::string& prompt = "The future of artificial intelligence is", uint32_t max_tokens = 25);
+void testKVCache();
 
 void printUsage(const char* program_name) {
     std::cout << "Usage: " << program_name << " [prompt] [max_tokens]" << std::endl;
@@ -62,6 +63,12 @@ int main(int argc, char* argv[])
         // Check for help flag
         if (arg1 == "-h" || arg1 == "--help") {
             printUsage(argv[0]);
+            return 0;
+        }
+
+        // Check for test flag
+        if (arg1 == "--test-kvcache") {
+            testKVCache();
             return 0;
         }
 
