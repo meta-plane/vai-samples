@@ -4,6 +4,7 @@
 #include "../../core/neuralNet.h"
 #include "../../core/globalContext.h"
 #include "../../core/vulkanApp.h"
+#include "../cache/kvCache.h"
 
 using namespace vk;
 
@@ -63,9 +64,14 @@ class MultiHeadAttentionNode : public Node
     uint32_t num_heads;
     uint32_t head_dim;
 
+    // KV Cache support
+    LayerKVCache* kv_cache = nullptr;  // Pointer to external cache (optional)
+    bool use_cache = false;             // Whether to use KV caching
+
     // Pipelines for each stage
     ComputePipeline qkvProjection;        // Project input to Q, K, V
     ComputePipeline reshapeForHeads;      // Reshape to multi-head format
+    ComputePipeline concatenateKV;        // Concatenate cached K,V with new K,V
     ComputePipeline attentionScores;      // Q @ K^T / sqrt(head_dim)
     ComputePipeline applyCausalMask;      // Set upper triangle to -inf
     ComputePipeline softmaxPipeline;      // Softmax on attention scores
@@ -76,6 +82,7 @@ class MultiHeadAttentionNode : public Node
     // Descriptor sets
     DescriptorSet qkvProjDescSet;
     DescriptorSet reshapeDescSet;
+    DescriptorSet concatDescSet;          // For KV concatenation
     DescriptorSet scoresDescSet;
     DescriptorSet maskDescSet;
     DescriptorSet softmaxDescSet;
@@ -85,7 +92,8 @@ class MultiHeadAttentionNode : public Node
 
     // Helper struct for intermediate tensors
     struct IntermediateTensors {
-        Tensor Q_flat, K_flat, V_flat;
+        Tensor Q_flat, K_flat, V_flat;      // Projected Q, K, V
+        Tensor K_full, V_full;               // K, V after concatenating with cache (if using cache)
         Tensor scores, attn_weights;
         Tensor context, context_combined;
     };
@@ -96,6 +104,8 @@ class MultiHeadAttentionNode : public Node
                               const Tensor& W_q, const Tensor& W_k, const Tensor& W_v,
                               const Tensor& B_q, const Tensor& B_k, const Tensor& B_v,
                               uint32_t B, uint32_t S, uint32_t D_in, uint32_t D_out);
+    void concatenateWithCache(CommandBuffer& cmdBuff, IntermediateTensors& tensors,
+                              uint32_t B, uint32_t H, uint32_t new_S, uint32_t cache_len, uint32_t HD);
     void computeAttentionScores(CommandBuffer& cmdBuff, IntermediateTensors& tensors, uint32_t B, uint32_t H, uint32_t S, uint32_t HD);
     void applyCausalMaskToScores(CommandBuffer& cmdBuff, IntermediateTensors& tensors, uint32_t B, uint32_t H, uint32_t S);
     void computeSoftmax(CommandBuffer& cmdBuff, IntermediateTensors& tensors, uint32_t B, uint32_t H, uint32_t S);
@@ -108,6 +118,23 @@ public:
 
     void prepare() override;
     void run(CommandBuffer cmdBuff) override;
+
+    /**
+     * Enable KV caching for this attention layer
+     *
+     * @param cache Pointer to the layer's KV cache (managed externally)
+     */
+    void setCache(LayerKVCache* cache);
+
+    /**
+     * Disable KV caching
+     */
+    void disableCache();
+
+    /**
+     * Check if caching is enabled
+     */
+    bool isCacheEnabled() const { return use_cache; }
 };
 
 #endif // ATTENTION_NODE_H

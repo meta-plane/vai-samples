@@ -674,3 +674,28 @@ void MultiHeadAttentionNode::combineHeadsAndProject(CommandBuffer& cmdBuff, Inte
         .dispatch0(CEIL_DIV(B*S, 16), CEIL_DIV(d_out, 16))
         .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / output.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
 }
+
+// ============================================================================
+// KV Cache Support Methods (TODO: Implement in Phase 2)
+// ============================================================================
+
+void MultiHeadAttentionNode::setCache(LayerKVCache* cache)
+{
+    kv_cache = cache;
+    use_cache = (cache != nullptr);
+}
+
+void MultiHeadAttentionNode::disableCache()
+{
+    kv_cache = nullptr;
+    use_cache = false;
+}
+
+void MultiHeadAttentionNode::concatenateWithCache(CommandBuffer& cmdBuff, IntermediateTensors& tensors,
+                                                   uint32_t B, uint32_t H, uint32_t new_S, uint32_t cache_len, uint32_t HD)
+{
+    // TODO: Implement in Phase 2
+    // This will concatenate cached K,V with new K,V
+    // For now, this is a placeholder
+    throw std::runtime_error("KV cache concatenation not yet implemented");
+}
