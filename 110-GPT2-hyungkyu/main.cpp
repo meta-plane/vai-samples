@@ -73,8 +73,8 @@ int main(int argc, char* argv[])
         // Second argument is max_tokens
         try {
             max_tokens = std::stoi(argv[2]);
-            if (max_tokens == 0 || max_tokens > 100) {
-                std::cerr << "Warning: max_tokens should be between 1 and 100. Using default (25)." << std::endl;
+            if (max_tokens == 0 || max_tokens > 500) {
+                std::cerr << "Warning: max_tokens should be between 1 and 500. Using default (25)." << std::endl;
                 max_tokens = 25;
             }
         } catch (const std::exception& e) {
