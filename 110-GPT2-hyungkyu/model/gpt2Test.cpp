@@ -1,6 +1,7 @@
 #include "gpt2Net.h"
 #include "gpt2Generation.h"
 #include "gpt2Weights.h"
+#include "../core/globalContext.h"
 #include "../core/error.h"
 #include "../tokenizer/bpeTokenizer.h"
 #include <iostream>
@@ -10,9 +11,6 @@
 #include <ctime>
 
 using namespace vk;
-
-extern Device netGlobalDevice;
-extern DescriptorPool gDestSetPool;
 
 void testGPT2()
 {
@@ -121,7 +119,10 @@ static void runPromptGeneration(
     GPT2Net& gpt2Net,
     BPETokenizer& tokenizer,
     const std::string& prompt_text,
-    uint32_t num_tokens_to_generate)
+    uint32_t num_tokens_to_generate,
+    float temperature = 1.0f,
+    int top_k = 50,
+    int seed = -1)
 {
     std::cout << "\n----------------------------------------" << std::endl;
     std::cout << "Prompt: \"" << prompt_text << "\"" << std::endl;
@@ -145,8 +146,9 @@ static void runPromptGeneration(
         gpt2Net,
         prompt_ids,
         num_tokens_to_generate,
-        1.0f,    // temperature
-        50       // top_k
+        temperature,
+        top_k,
+        seed
     );
 
     auto end_time = std::chrono::high_resolution_clock::now();
@@ -209,8 +211,8 @@ static GPT2Net createNetworkWithPretrainedWeights(
 static BPETokenizer loadTokenizer()
 {
     std::cout << "Loading tokenizer..." << std::endl;
-    BPETokenizer tokenizer("110-GPT2-hyungkyu/vocab.json",
-                          "110-GPT2-hyungkyu/merges.txt");
+    BPETokenizer tokenizer("110-GPT2-hyungkyu/assets/vocab.json",
+                          "110-GPT2-hyungkyu/assets/merges.txt");
     std::cout << "✓ Tokenizer loaded\n" << std::endl;
     return tokenizer;
 }
@@ -273,7 +275,7 @@ void testGPT2Generation()
     runGPT2TextGenerationTest(gpt2Net, test_prompts, 5);
 }
 
-void testGPT2Pretrained()
+void testGPT2Pretrained(const std::string& prompt, uint32_t max_tokens)
 {
     std::cout << "\n========================================" << std::endl;
     std::cout << "GPT-2 Text Generation Test (Pretrained Weights)" << std::endl;
@@ -303,24 +305,42 @@ void testGPT2Pretrained()
                   << ", num_layers=" << config.num_layers << std::endl;
         std::cout << "✓ Configuration loaded\n" << std::endl;
 
-        // For testing, use reduced layers to avoid GPU OOM
-        GPT2Config test_config = config;
-        test_config.num_layers = 1;  // Use only 1 layer for testing
-
-        std::cout << "Using reduced config for testing: " << test_config.num_layers
-                  << " layer (instead of " << config.num_layers << ")\n" << std::endl;
+        // Use full configuration (all 12 layers)
+        std::cout << "Using full GPT-2 model: " << config.num_layers << " layers\n" << std::endl;
 
         // Create network with pretrained weights
-        GPT2Net gpt2Net = createNetworkWithPretrainedWeights(test_config, weights_file);
+        GPT2Net gpt2Net = createNetworkWithPretrainedWeights(config, weights_file);
 
-        // Test prompts
-        std::vector<std::string> test_prompts = {
-            "Hello, I'm a language model,",
-            "Once upon a time"
-        };
+        // Test with full GPT-2 12 layers
+        std::cout << "\n=== Text Generation (Temperature Sampling) ===" << std::endl;
+        std::cout << "Prompt: \"" << prompt << "\"" << std::endl;
+        std::cout << "Max tokens: " << max_tokens << std::endl;
+        {
+            BPETokenizer tokenizer = loadTokenizer();
+            runPromptGeneration(gpt2Net, tokenizer,
+                prompt,
+                max_tokens,
+                0.8f,  // temperature=0.8 for diverse, coherent generation
+                40,    // top_k=40 to avoid low-quality tokens
+                42     // seed for reproducibility
+            );
+        }
 
-        // Run generation test
-        runGPT2TextGenerationTest(gpt2Net, test_prompts, 5);
+        // Second test disabled due to GPU memory constraints (BufferPool accumulation)
+        // TODO: Fix BufferPool to release memory between generations
+        /*
+        std::cout << "\n=== Sampling with Random Seed (Reproducible) ===" << std::endl;
+        {
+            BPETokenizer tokenizer = loadTokenizer();
+            runPromptGeneration(gpt2Net, tokenizer,
+                "Hello, I'm a language model,",
+                20,
+                1.0f,  // temperature
+                50,    // top_k
+                42     // seed for reproducibility
+            );
+        }
+        */
 
     } catch (const std::exception& e) {
         std::cout << "\n✗ Error during pretrained weights test: " << e.what() << std::endl;

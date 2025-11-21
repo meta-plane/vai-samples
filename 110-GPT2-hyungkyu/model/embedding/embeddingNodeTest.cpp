@@ -1,5 +1,6 @@
 #include "embeddingNode.h"
 #include "../../core/neuralNet.h"
+#include "../../core/globalContext.h"
 #include "../../core/error.h"
 #include <iostream>
 #include <iomanip>
@@ -8,15 +9,6 @@
 #include <cmath>
 
 using namespace vk;
-
-// Global device for neural network operations (defined in neuralNodes.cpp pattern)
-Device netGlobalDevice = VulkanApp::get().device();
-
-// Global descriptor pool
-DescriptorPool gDestSetPool = netGlobalDevice.createDescriptorPool({
-    .maxTypes = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER <= 200},
-    .maxSets = 100
-});
 
 void testTokenEmbedding()
 {

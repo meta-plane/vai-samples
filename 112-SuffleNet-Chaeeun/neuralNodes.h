@@ -80,14 +80,17 @@ public:
 // TODO: Node Implementation
 class AdaptiveAvgPoolingNode : public Node
 {
-    const bool discardTail = true; // If true, discard the tail elements that don't fit into the pooling window
-    uint32_t P;
+    uint32_t outH = 1;
+    uint32_t outW = 1;
 
     ComputePipeline avgpool;
     DescriptorSet avgpoolDescSet;
 
 public:
-    AdaptiveAvgPoolingNode(uint32_t poolSize);
+    // Square output (e.g., 1x1 GAP)
+    AdaptiveAvgPoolingNode(uint32_t outputSize);
+    // Rectangular output
+    AdaptiveAvgPoolingNode(uint32_t outH, uint32_t outW);
     void prepare() override;
     void run(CommandBuffer cmdBuff) override;
 };
@@ -99,6 +102,17 @@ class HSNode : public Node
 
 public:
     HSNode();
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+class MultiplyNode : public Node
+{
+    ComputePipeline multiply;
+    DescriptorSet multiplyDescSet;
+
+public:
+    MultiplyNode();
     void prepare() override;
     void run(CommandBuffer cmdBuff) override;
 };

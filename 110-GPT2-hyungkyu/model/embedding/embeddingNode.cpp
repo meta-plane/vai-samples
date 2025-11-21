@@ -84,8 +84,7 @@ void main()
 
 // ==================== Global Variables ====================
 
-extern Device netGlobalDevice;
-extern DescriptorPool gDestSetPool;
+#include "../../core/globalContext.h"
 
 static ComputePipeline requestPipeline(const char* src)
 {

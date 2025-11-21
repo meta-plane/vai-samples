@@ -2,6 +2,7 @@
 #include "../attention/attentionNode.h"
 #include "../testHelpers.h"
 #include "../../core/neuralNet.h"
+#include "../../core/globalContext.h"
 #include "../../core/error.h"
 #include <iostream>
 #include <iomanip>
@@ -9,10 +10,6 @@
 #include <cmath>
 
 using namespace vk;
-
-// Global device and descriptor pool (defined in embeddingNodeTest.cpp)
-extern Device netGlobalDevice;
-extern DescriptorPool gDestSetPool;
 
 void testLayerNorm()
 {

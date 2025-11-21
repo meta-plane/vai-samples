@@ -172,8 +172,8 @@ def convert_checkpoint(checkpoint_dir, output_dir):
 if __name__ == '__main__':
     import sys
 
-    checkpoint_dir = "assets/weights/124M"
-    output_dir = "assets/weights/124M"
+    checkpoint_dir = "../assets/weights/124M"
+    output_dir = "../assets/weights/124M"
 
     if len(sys.argv) > 1:
         checkpoint_dir = sys.argv[1]

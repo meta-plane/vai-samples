@@ -539,13 +539,145 @@ void main()
 })";
 
 static const char* src_adaptiveavgpool = R"(
+    #version 450
+    layout(local_size_x = 64, local_size_y = 4, local_size_z = 4) in;
+
+    layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };
+    layout(set = 0, binding = 1) buffer InBuffer  { float in0[]; };
+
+    layout(push_constant) uniform PushConstants {
+        int H;      // input height
+        int W;      // input width
+        int C;      // channels
+        int outH;   // output height (adaptive target)
+        int outW;   // output width  (adaptive target)
+    };
+
+    void main()
+    {
+        int h_ = int(gl_GlobalInvocationID.x);  // output row index (0 .. outH-1)
+        int w_ = int(gl_GlobalInvocationID.y);  // output col index (0 .. outW-1)
+        int c  = int(gl_GlobalInvocationID.z);  // channel index   (0 .. C-1)
+
+        if (h_ >= outH || w_ >= outW || c >= C)
+            return;
+
+        // PyTorch adaptive_avg_pool2d 방식:
+        // h_start = floor( h_      * H / outH )
+        // h_end   = ceil( (h_ + 1) * H / outH )
+        // w_start = floor( w_      * W / outW )
+        // w_end   = ceil( (w_ + 1) * W / outW )
+
+        int h_start = (h_ * H) / outH;
+        int h_end   = ((h_ + 1) * H + outH - 1) / outH;  // ceil
+        int w_start = (w_ * W) / outW;
+        int w_end   = ((w_ + 1) * W + outW - 1) / outW;  // ceil
+
+        // 안전하게 클램프
+        if (h_start < 0) h_start = 0;
+        if (h_end   > H) h_end   = H;
+        if (w_start < 0) w_start = 0;
+        if (w_end   > W) w_end   = W;
+
+        float sum   = 0.0;
+        int   count = 0;
+
+        for (int h = h_start; h < h_end; ++h) {
+            for (int w = w_start; w < w_end; ++w) {
+                int idxIn = (h * W + w) * C + c;
+                sum += in0[idxIn];
+                count++;
+            }
+        }
+
+        float avg = (count > 0) ? (sum / float(count)) : 0.0;
+
+        int idxOut = (h_ * outW + w_) * C + c;
+        out0[idxOut] = avg;
+    }
 )";
 
 static const char* src_hs = R"(
-)";
+#version 450
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };
+layout(set = 0, binding = 1) buffer InBuffer { float in0[]; };
+layout(push_constant) uniform PushConstants {
+    int O;
+};
+
+void main() 
+{
+    int o = int(gl_GlobalInvocationID.x);
+    if (o >= O) return;
+    float clip = min(max(in0[o]+3, 0.0f), 6.0f) / 6.0f;
+    out0[o] = in0[o] * clip;
+})";
+
+static const char* src_multiply = R"(
+    #version 450
+    layout(local_size_x = 64) in;
+    
+    layout(set = 0, binding = 0) writeonly buffer OutBuffer { float out0[]; };
+    layout(set = 0, binding = 1) readonly buffer InBuffer { float in0[]; };
+    layout(set = 0, binding = 2) readonly buffer AttenBuffer { float atten[]; };
+    
+    layout(push_constant) uniform PushConstants {
+        int H;
+        int W;
+        int C;
+    };
+    
+    void main()
+    {
+        int idx = int(gl_GlobalInvocationID.x);
+        int total = H * W * C;
+        if (idx >= total)
+            return;
+    
+        int c = idx % C;
+    
+        float x = in0[idx];
+        float s = atten[c];
+        out0[idx] = x * s;
+    }
+)"; 
 
 static const char* src_batchnorm2d = R"(
+    #version 450
+    layout(local_size_x = 64) in;
+    
+    layout(set = 0, binding = 0) writeonly buffer OutBuffer { float out0[]; };
+    layout(set = 0, binding = 1) readonly  buffer InBuffer  { float in0[]; };
+    layout(set = 0, binding = 2) readonly  buffer GammaBuffer  { float gamma[]; };
+    layout(set = 0, binding = 3) readonly  buffer BetaBuffer   { float beta[]; };
+    layout(set = 0, binding = 4) readonly  buffer MeanBuffer   { float running_mean[]; };
+    layout(set = 0, binding = 5) readonly  buffer VarBuffer    { float running_var[]; };
+    
+    layout(push_constant) uniform PushConstants {
+        int H;
+        int W;
+        int C;
+        float eps;
+    };
+    
+    void main()
+    {
+        int idx = int(gl_GlobalInvocationID.x);
+        int total = H * W * C;
+        if (idx >= total) return;
+    
+        int c = idx % C;
+    
+        float x = in0[idx];
+        float mu = running_mean[c];
+        float var = running_var[c];
+    
+        float x_hat = (x - mu) * inversesqrt(var + eps);
+        out0[idx] = gamma[c] * x_hat + beta[c];
+    }
 )";
+    
 
 Device netGlobalDevice = VulkanApp::get().device();
 
@@ -586,6 +718,7 @@ void loadShaders()
     requestPipeline(src_gemm_shared);
     requestPipeline(src_gemm_multiOut1d);
     requestPipeline(src_gemm_multiOut2d);
+    requestPipeline(src_batchnorm2d);
 
     // TODO: impelement shaders
     // requestPipeline(src_adaptiveavgpool);
@@ -869,10 +1002,20 @@ void FullyConnectedNode::run(CommandBuffer cmdBuff)
 }  
 
 /////////////////////////////////////////////////////////////////////////////////////////
-// TODO: AdaptiveAvgPoolingNode
+// AdaptiveAvgPoolingNode
 /////////////////////////////////////////////////////////////////////////////////////////
-AdaptiveAvgPoolingNode::AdaptiveAvgPoolingNode(uint32_t poolSize)
-: P(poolSize)
+AdaptiveAvgPoolingNode::AdaptiveAvgPoolingNode(uint32_t outputSize)
+: outH(outputSize), outW(outputSize)
+{
+    addSlot("in0", NodeSlot::input);
+    addSlot("out0", NodeSlot::output);
+
+    avgpool = requestPipeline(src_adaptiveavgpool);
+    avgpoolDescSet = avgpool.descSetLayout(0).newDescSet(gDestSetPool);
+}
+
+AdaptiveAvgPoolingNode::AdaptiveAvgPoolingNode(uint32_t outH_, uint32_t outW_)
+: outH(outH_), outW(outW_)
 {
     addSlot("in0", NodeSlot::input);
     addSlot("out0", NodeSlot::output);
@@ -885,33 +1028,27 @@ void AdaptiveAvgPoolingNode::prepare()
 {
     const auto& inShape = (*this)["in0"].shape();
     _ASSERT(inShape.size() == 3);
-    uint32_t H = inShape[0], W = inShape[1], C = inShape[2];
-
-    if (discardTail)
-        (*this)["out0"] = Tensor(H / P, W / P, C);
-    else    
-        (*this)["out0"] = Tensor((H + P - 1) / P, (W + P - 1) / P, C);
+    uint32_t C = inShape[2];
+    (*this)["out0"] = Tensor(outH, outW, C);
 }
 
 void AdaptiveAvgPoolingNode::run(CommandBuffer cmdBuff)
 {
     const auto& inShape = (*this)["in0"].shape();
     uint32_t H = inShape[0], W = inShape[1], C = inShape[2];
-    uint32_t H_ = discardTail ? H / P : (H + P - 1) / P;
-    uint32_t W_ = discardTail ? W / P : (W + P - 1) / P;
 
     avgpoolDescSet.write({
         (*this)["out0"].buffer(),
         (*this)["in0"].buffer(),
     });
 
-    uint32_t avgpoolConstants[] = {H, W, C, P};
+    uint32_t avgpoolConstants[] = {H, W, C, outH, outW};
 
     cmdBuff
         .bindPipeline(avgpool)
         .bindDescSets({avgpoolDescSet})
         .setPushConstants(0, sizeof(avgpoolConstants), avgpoolConstants)
-        .dispatch(H_, W_, C)
+        .dispatch(outH, outW, C)
         .barrier( 
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["out0"].buffer()
@@ -920,7 +1057,7 @@ void AdaptiveAvgPoolingNode::run(CommandBuffer cmdBuff)
 }  
 
 /////////////////////////////////////////////////////////////////////////////////////////
-// TODO: HSNode
+// HSNode
 /////////////////////////////////////////////////////////////////////////////////////////
 HSNode::HSNode()
 {
@@ -963,45 +1100,111 @@ void HSNode::run(CommandBuffer cmdBuff)
 }  
 
 /////////////////////////////////////////////////////////////////////////////////////////
-// TODO: BatchNormNode
+// BatchNormNode
 /////////////////////////////////////////////////////////////////////////////////////////
+
 BatchNormNode::BatchNormNode(uint32_t channel)
 : C(channel)
 {
     addSlot("in0", NodeSlot::input);
     addSlot("out0", NodeSlot::output);
+    addSlot("gamma", NodeSlot::input);
+    addSlot("beta", NodeSlot::input);
+    addSlot("running_mean", NodeSlot::input);
+    addSlot("running_var", NodeSlot::input);
 
-    bn = requestPipeline(src_relu);
+    bn = requestPipeline(src_batchnorm2d);
     bnDescSet = bn.descSetLayout(0).newDescSet(gDestSetPool);
 }
 
 void BatchNormNode::prepare()
 {
-    _ASSERT((*this)["in0"].validShape());
-    (*this)["out0"] = Tensor((*this)["in0"].shape());
+    _ASSERT((*this)["in0"].isShapeOf(-1, -1, C));
+    _ASSERT((*this)["gamma"].isShapeOf(C));
+    _ASSERT((*this)["beta"].isShapeOf(C));
+    _ASSERT((*this)["running_mean"].isShapeOf(C));
+    _ASSERT((*this)["running_var"].isShapeOf(C));
+    const auto& inShape = (*this)["in0"].shape();
+    (*this)["out0"] = Tensor(inShape);
 }
 
 void BatchNormNode::run(CommandBuffer cmdBuff)
 {
     const auto& inShape = (*this)["in0"].shape();
-    int I = 1;
-    for (int dim : inShape) I *= dim;
-    
+    uint32_t H = inShape[0], W = inShape[1];
+    // C is a member; also verify runtime if needed
+    uint32_t C_ = inShape[2];
+
     bnDescSet.write({
         (*this)["out0"].buffer(),
         (*this)["in0"].buffer(),
+        (*this)["gamma"].buffer(),
+        (*this)["beta"].buffer(),
+        (*this)["running_mean"].buffer(),
+        (*this)["running_var"].buffer(),
     });
 
-    int bnConstants[] = {I};
+    struct { uint32_t H, W, C; float eps; } push { H, W, C_, 1e-5f };
 
     cmdBuff
         .bindPipeline(bn)
-        .setPushConstants(0, sizeof(bnConstants), bnConstants)
         .bindDescSets({bnDescSet})
-        .dispatch(I)
+        .setPushConstants(0, sizeof(push), &push)
+        .dispatch(H * W * C_)
         .barrier( 
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["out0"].buffer()
             / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
         );
 }  
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// MultiplyNode (channel-wise broadcast multiply)
+/////////////////////////////////////////////////////////////////////////////////////////
+MultiplyNode::MultiplyNode()
+{
+    addSlot("in0", NodeSlot::input);
+    addSlot("atten", NodeSlot::input);
+    addSlot("out0", NodeSlot::output);
+
+    multiply = requestPipeline(src_multiply);
+    multiplyDescSet = multiply.descSetLayout(0).newDescSet(gDestSetPool);
+}
+
+void MultiplyNode::prepare()
+{
+    const auto& inShape = (*this)["in0"].shape();
+    _ASSERT(inShape.size() == 3);
+    uint32_t H = inShape[0], W = inShape[1], C = inShape[2];
+
+    const auto& aShape = (*this)["atten"].shape();
+    _ASSERT( (aShape.size() == 1 && aShape[0] == C)
+          || (aShape.size() == 3 && aShape[0] == 1 && aShape[1] == 1 && aShape[2] == C));
+
+    (*this)["out0"] = Tensor(H, W, C);
+}
+
+void MultiplyNode::run(CommandBuffer cmdBuff)
+{
+    const auto& inShape = (*this)["in0"].shape();
+    uint32_t H = inShape[0], W = inShape[1], C = inShape[2];
+
+    multiplyDescSet.write({
+        (*this)["out0"].buffer(),
+        (*this)["in0"].buffer(),
+        (*this)["atten"].buffer(),
+    });
+
+    uint32_t constants[] = {H, W, C};
+
+    cmdBuff
+        .bindPipeline(multiply)
+        .bindDescSets({multiplyDescSet})
+        .setPushConstants(0, sizeof(constants), constants)
+        .dispatch(H * W * C)
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["out0"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}

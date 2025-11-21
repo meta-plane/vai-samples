@@ -12,6 +12,7 @@ add_executable(${PROJECT_NAME}
     core/vulkanApp.cpp
     core/spirvHelpers.cpp
     core/jsonParser.cpp
+    core/globalContext.cpp
     model/embedding/embeddingNode.cpp
     model/embedding/embeddingNodeTest.cpp
     model/attention/attentionNode.cpp

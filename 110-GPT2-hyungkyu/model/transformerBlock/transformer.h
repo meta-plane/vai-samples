@@ -2,14 +2,11 @@
 #define TRANSFORMER_H
 
 #include "../../core/neuralNet.h"
+#include "../../core/globalContext.h"
 #include "../../core/vulkanApp.h"
 #include "../attention/attentionNode.h"
 
 using namespace vk;
-
-// Global device and descriptor pool (defined in test file)
-extern Device netGlobalDevice;
-extern DescriptorPool gDestSetPool;
 
 /**
  * Layer Normalization

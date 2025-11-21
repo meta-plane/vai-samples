@@ -8,13 +8,21 @@
 #include <numeric>
 #include <cmath>
 #include <iostream>
+#include <iomanip>
 #include <cstring>  // memcpy
 
 /**
  * Sample a token from logits using temperature and top-k sampling
+ * If temperature is 0.0, uses greedy decoding (deterministic)
  */
 inline int sampleToken(const std::vector<float>& logits, float temperature, int top_k)
 {
+    // Greedy decoding: always pick the token with highest probability
+    if (temperature == 0.0f) {
+        auto max_it = std::max_element(logits.begin(), logits.end());
+        return (int)std::distance(logits.begin(), max_it);
+    }
+
     std::vector<float> probs = logits;
 
     // Apply temperature
@@ -77,8 +85,9 @@ inline int sampleToken(const std::vector<float>& logits, float temperature, int 
  * @param gpt2Net The GPT2 network
  * @param prompt_ids Initial token IDs
  * @param max_new_tokens Number of tokens to generate
- * @param temperature Sampling temperature
+ * @param temperature Sampling temperature (0.0 for greedy/deterministic)
  * @param top_k Top-k sampling parameter
+ * @param seed Random seed (optional, -1 for random)
  * @return Generated token IDs (prompt + new tokens)
  */
 inline std::vector<int> generate_gpt2(
@@ -86,16 +95,24 @@ inline std::vector<int> generate_gpt2(
     const std::vector<int>& prompt_ids,
     uint32_t max_new_tokens,
     float temperature = 1.0f,
-    int top_k = 0)
+    int top_k = 0,
+    int seed = -1)
 {
     const GPT2Config& config = gpt2Net.getConfig();
     Device& device = netGlobalDevice;
+
+    // Set random seed if provided
+    if (seed >= 0) {
+        srand((unsigned int)seed);
+        std::cout << "\nRandom seed set to: " << seed << std::endl;
+    }
 
     std::vector<int> generated = prompt_ids;
 
     std::cout << "\nGenerating text..." << std::endl;
     std::cout << "  Prompt length: " << prompt_ids.size() << " tokens" << std::endl;
     std::cout << "  Max new tokens: " << max_new_tokens << std::endl;
+    std::cout << "  Temperature: " << temperature << (temperature == 0.0f ? " (greedy)" : "") << std::endl;
 
     // Pre-allocate CPU buffer for logits (reuse across iterations)
     uint32_t max_logits_size = config.max_seq_len * config.vocab_size * sizeof(float);
@@ -124,16 +141,10 @@ inline std::vector<int> generate_gpt2(
 
         Tensor inputTensor = Tensor(1, seq_len).set(input_data);
 
-        std::cout << "  [Debug] Starting forward pass (seq_len=" << seq_len << ")..." << std::endl;
-
         // Forward pass (like eval_mnist)
         std::vector<Tensor> outputs = gpt2Net(inputTensor);
 
-        std::cout << "  [Debug] Forward pass completed, extracting logits..." << std::endl;
-
         Tensor logits = outputs[0];  // Returns GPU tensor
-
-        std::cout << "  [Debug] Logits extracted, preparing to copy to CPU..." << std::endl;
 
         // Copy logits to CPU (reusing pre-allocated buffer)
         uint32_t logits_size = seq_len * config.vocab_size * sizeof(float);
@@ -159,6 +170,44 @@ inline std::vector<int> generate_gpt2(
         uint32_t last_token_offset = (seq_len - 1) * config.vocab_size;
         for (uint32_t j = 0; j < config.vocab_size; ++j) {
             last_token_logits[j] = logits_data[last_token_offset + j];
+        }
+
+        // Debug: Print logits statistics for first iteration
+        if (i == 0) {
+            // Calculate statistics
+            float min_logit = *std::min_element(last_token_logits.begin(), last_token_logits.end());
+            float max_logit = *std::max_element(last_token_logits.begin(), last_token_logits.end());
+            float sum_logit = std::accumulate(last_token_logits.begin(), last_token_logits.end(), 0.0f);
+            float mean_logit = sum_logit / last_token_logits.size();
+
+            std::cout << "\n  [Debug] Logits statistics:" << std::endl;
+            std::cout << "    Min: " << std::fixed << std::setprecision(2) << min_logit << std::endl;
+            std::cout << "    Max: " << std::fixed << std::setprecision(2) << max_logit << std::endl;
+            std::cout << "    Mean: " << std::fixed << std::setprecision(2) << mean_logit << std::endl;
+            std::cout << "    Range: " << std::fixed << std::setprecision(2) << (max_logit - min_logit) << std::endl;
+
+            // Top 5 logits
+            std::vector<std::pair<float, int>> top_logits;
+            for (size_t j = 0; j < last_token_logits.size(); ++j) {
+                top_logits.push_back({last_token_logits[j], (int)j});
+            }
+            std::sort(top_logits.begin(), top_logits.end(),
+                     [](const auto& a, const auto& b) { return a.first > b.first; });
+
+            std::cout << "    Top 5 logits: ";
+            for (int k = 0; k < 5; ++k) {
+                std::cout << "(token=" << top_logits[k].second << ", logit="
+                          << std::fixed << std::setprecision(2) << top_logits[k].first << ") ";
+            }
+            std::cout << std::endl;
+
+            // Bottom 5 logits
+            std::cout << "    Bottom 5 logits: ";
+            for (int k = (int)top_logits.size() - 5; k < (int)top_logits.size(); ++k) {
+                std::cout << "(token=" << top_logits[k].second << ", logit="
+                          << std::fixed << std::setprecision(2) << top_logits[k].first << ") ";
+            }
+            std::cout << "\n" << std::endl;
         }
 
         // Sample next token

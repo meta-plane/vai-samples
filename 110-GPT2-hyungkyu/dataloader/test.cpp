@@ -122,7 +122,7 @@ void testIterator(BPETokenizer& tokenizer) {
 void testWithVerdictFile(BPETokenizer& tokenizer) {
     std::cout << "\n========== Test: the-verdict.txt Basic ==========" << std::endl;
 
-    std::ifstream file(PROJECT_CURRENT_DIR "/the-verdict.txt");
+    std::ifstream file(PROJECT_CURRENT_DIR "/assets/the-verdict.txt");
     if (!file.is_open()) {
         std::cerr << "Failed to open the-verdict.txt" << std::endl;
         return;
@@ -153,7 +153,7 @@ void testVerdictTextContent(BPETokenizer& tokenizer) {
     std::cout << "\n========== Test: Verdict Text Content Verification ==========" << std::endl;
 
     // Load the-verdict.txt
-    std::ifstream file(PROJECT_CURRENT_DIR "/the-verdict.txt");
+    std::ifstream file(PROJECT_CURRENT_DIR "/assets/the-verdict.txt");
     if (!file.is_open()) {
         std::cerr << "✗ Failed to open the-verdict.txt" << std::endl;
         return;
@@ -198,7 +198,7 @@ void testVerdictTextContent(BPETokenizer& tokenizer) {
 void testSlidingWindowOverlap(BPETokenizer& tokenizer) {
     std::cout << "\n========== Test: Sliding Window Overlap ==========" << std::endl;
 
-    std::ifstream file(PROJECT_CURRENT_DIR "/the-verdict.txt");
+    std::ifstream file(PROJECT_CURRENT_DIR "/assets/the-verdict.txt");
     if (!file.is_open()) {
         std::cerr << "Failed to open the-verdict.txt" << std::endl;
         return;
@@ -259,7 +259,7 @@ void testSlidingWindowOverlap(BPETokenizer& tokenizer) {
 void testBatchContentDecoding(BPETokenizer& tokenizer) {
     std::cout << "\n========== Test: Batch Content Decoding ==========" << std::endl;
 
-    std::ifstream file(PROJECT_CURRENT_DIR "/the-verdict.txt");
+    std::ifstream file(PROJECT_CURRENT_DIR "/assets/the-verdict.txt");
     if (!file.is_open()) {
         std::cerr << "Failed to open the-verdict.txt" << std::endl;
         return;
@@ -369,8 +369,8 @@ void dataLoaderTest() {
     try {
         std::cout << "Initializing GPT-2 BPE Tokenizer..." << std::endl;
         BPETokenizer tokenizer(
-            PROJECT_CURRENT_DIR "/vocab.json",
-            PROJECT_CURRENT_DIR "/merges.txt"
+            PROJECT_CURRENT_DIR "/assets/vocab.json",
+            PROJECT_CURRENT_DIR "/assets/merges.txt"
         );
 
         // Run all basic tests

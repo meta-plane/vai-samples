@@ -137,8 +137,8 @@ void tokenizerTest() {
         // Initialize tokenizer
         std::cout << "Initializing GPT-2 BPE Tokenizer..." << std::endl;
         BPETokenizer tokenizer(
-            PROJECT_CURRENT_DIR "/vocab.json",
-            PROJECT_CURRENT_DIR "/merges.txt"
+            PROJECT_CURRENT_DIR "/assets/vocab.json",
+            PROJECT_CURRENT_DIR "/assets/merges.txt"
         );
         std::cout << "\nTokenizer ready! Vocab size: " << tokenizer.vocab_size() << std::endl;
 
@@ -151,7 +151,7 @@ void tokenizerTest() {
 
         // Long text file test
         std::cout << "\n========== Test 7: the-verdict.txt (Long Text) ==========" << std::endl;
-        testLongTextFile(tokenizer, PROJECT_CURRENT_DIR "/the-verdict.txt",
+        testLongTextFile(tokenizer, PROJECT_CURRENT_DIR "/assets/the-verdict.txt",
                          passed_tests, total_tests);
 
         // Print results

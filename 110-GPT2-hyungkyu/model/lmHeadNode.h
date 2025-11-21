@@ -2,12 +2,9 @@
 #define LM_HEAD_NODE_H
 
 #include "../core/neuralNet.h"
+#include "../core/globalContext.h"
 
 using namespace vk;
-
-// Global device and descriptor pool
-extern Device netGlobalDevice;
-extern DescriptorPool gDestSetPool;
 
 /**
  * Language Modeling Head Node

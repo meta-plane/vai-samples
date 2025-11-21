@@ -232,6 +232,7 @@ layout(local_size_x = 16, local_size_y = 16) in;
 layout(set = 0, binding = 0) buffer Output { float y[]; };      // [B*S*O]
 layout(set = 0, binding = 1) buffer Input { float x[]; };       // [B*S*I]
 layout(set = 0, binding = 2) buffer Weight { float w[]; };      // [O*I]
+layout(set = 0, binding = 3) buffer Bias { float b[]; };        // [O] - NEW: bias
 
 layout(push_constant) uniform PushConstants {
     int B;   // batch size
@@ -252,7 +253,7 @@ void main() {
         sum += x[bs * I + i] * w[o * I + i];
     }
 
-    y[bs * O + o] = sum;
+    y[bs * O + o] = sum + b[o];
 }
 )";
 
@@ -262,6 +263,8 @@ FeedForwardNode::FeedForwardNode(uint32_t d_model)
     addSlot("in0", NodeSlot::input);
     addSlot("weight1", NodeSlot::input);  // [4*d_model, d_model] (learnable parameter)
     addSlot("weight2", NodeSlot::input);  // [d_model, 4*d_model] (learnable parameter)
+    addSlot("bias1", NodeSlot::input);    // [4*d_model] - NEW: bias parameter
+    addSlot("bias2", NodeSlot::input);    // [d_model] - NEW: bias parameter
     addSlot("out0", NodeSlot::output);
 
     linear1Pipeline = requestPipeline(src_linear_ff);
@@ -296,6 +299,18 @@ void FeedForwardNode::prepare()
         weight2 = Tensor(d_model, hidden_dim);
     }
 
+    // Initialize biases if not set
+    Tensor& bias1 = (*this)["bias1"];
+    Tensor& bias2 = (*this)["bias2"];
+
+    if (!bias1.validShape()) {
+        bias1 = Tensor(hidden_dim);
+    }
+
+    if (!bias2.validShape()) {
+        bias2 = Tensor(d_model);
+    }
+
     (*this)["out0"] = Tensor(B, S, D);
 }
 
@@ -304,6 +319,8 @@ void FeedForwardNode::run(CommandBuffer cmdBuff)
     Tensor& input = (*this)["in0"];
     Tensor& weight1 = (*this)["weight1"];
     Tensor& weight2 = (*this)["weight2"];
+    Tensor& bias1 = (*this)["bias1"];
+    Tensor& bias2 = (*this)["bias2"];
     Tensor& output = (*this)["out0"];
 
     uint32_t B = input.shape()[0];
@@ -325,7 +342,8 @@ void FeedForwardNode::run(CommandBuffer cmdBuff)
         linear1DescSet.write({
             hidden.buffer(),
             input.buffer(),
-            weight1.buffer()
+            weight1.buffer(),
+            bias1.buffer()
         });
 
         int constants[] = {(int)B, (int)S, (int)D, (int)H};
@@ -368,7 +386,8 @@ void FeedForwardNode::run(CommandBuffer cmdBuff)
         linear2DescSet.write({
             output.buffer(),
             gelu_out.buffer(),
-            weight2.buffer()
+            weight2.buffer(),
+            bias2.buffer()
         });
 
         int constants[] = {(int)B, (int)S, (int)H, (int)D};
@@ -531,10 +550,16 @@ Tensor& TransformerBlock::operator[](const std::string& name)
     if (name == "attn_wk") return attention["W_key"];
     if (name == "attn_wv") return attention["W_value"];
     if (name == "attn_wout") return attention["W_out"];
+    if (name == "attn_bq") return attention["B_query"];
+    if (name == "attn_bk") return attention["B_key"];
+    if (name == "attn_bv") return attention["B_value"];
+    if (name == "attn_bout") return attention["B_out"];
     if (name == "norm2_scale") return norm2["scale"];
     if (name == "norm2_shift") return norm2["shift"];
     if (name == "ff_w1") return feedforward["weight1"];
     if (name == "ff_w2") return feedforward["weight2"];
+    if (name == "ff_b1") return feedforward["bias1"];
+    if (name == "ff_b2") return feedforward["bias2"];
 
     throw std::runtime_error("No such weight in TransformerBlock: " + name);
 }
