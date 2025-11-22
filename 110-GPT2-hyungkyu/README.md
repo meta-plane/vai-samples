@@ -36,71 +36,23 @@ C++ implementation of GPT-2 (Generative Pre-trained Transformer 2) using Vulkan 
 
 ```
 110-GPT2-hyungkyu/
-├── assets/                          # Data files and model weights
-│   ├── vocab.json                   # GPT-2 vocabulary (50,257 tokens)
-│   ├── merges.txt                   # BPE merge rules (50,000 rules)
-│   ├── the-verdict.txt              # Test data file
-│   ├── test_data/                   # Test reference data (JSON)
-│   │   ├── layer_norm_test_data.json
-│   │   ├── gelu_test_data.json
-│   │   ├── feedforward_test_data.json
-│   │   ├── mha_test_data.json
-│   │   └── transformer_block_test_data.json
-│   └── weights/
-│       └── 124M/                    # GPT-2 124M model
-│           ├── checkpoint           # TensorFlow checkpoint metadata
-│           ├── hparams.json         # Model hyperparameters
-│           ├── model.ckpt.*         # TensorFlow checkpoint files
-│           ├── gpt2_weights.bin     # Binary weights (converted)
-│           └── gpt2_config.txt      # Model configuration
-├── utils/                           # Utility scripts
-│   ├── setup_weights.py             # One-step download + convert (recommended)
-│   ├── download_gpt2_weights.py     # Download from HuggingFace
-│   ├── convert_openai_weights.py    # Convert checkpoint to binary
-│   ├── generate_attention_test_data.py
-│   ├── generate_transformer_test_data.py
-│   └── ...
-├── debug/                           # Debugging and verification scripts
-│   ├── check_weights.py             # Verify weight loading
-│   ├── check_bias_values.py         # Analyze bias magnitudes
-│   ├── check_token.py               # Token ID decoder
-│   ├── compare_with_pytorch.py      # PyTorch comparison
-│   └── ...
-├── core/                            # Core neural network framework
-│   ├── neuralNet.h                  # Base neural network class
-│   ├── tensor.h                     # Tensor operations
-│   ├── globalContext.h/cpp          # Global Vulkan context (device, descriptor pool)
-│   └── vulkanApp.h                  # Vulkan compute setup
-├── tokenizer/                       # BPE tokenizer implementation
-│   ├── tokenizer.h                  # BPE tokenizer class
-│   └── test.cpp                     # Tokenizer tests
-├── dataloader/                      # Data loading utilities
-│   ├── dataloader.h                 # Text data loader
-│   └── test.cpp                     # Dataloader tests
-├── model/                           # GPT-2 model architecture
-│   ├── embedding/                   # Embedding layers
-│   ├── attention/                   # Multi-head attention with KV cache
-│   │   ├── attentionNode.h/cpp      # Multi-head attention implementation
-│   │   └── attentionHelpers.h       # Refactored helper functions
-│   ├── transformerBlock/            # Transformer block
-│   │   ├── transformer.h            # LayerNorm, GELU, Add, Identity, FeedForward
-│   │   └── feedforwardHelpers.h     # Refactored FeedForward helpers
-│   ├── cache/                       # KV Cache implementation
-│   ├── gpt2Net.h                    # Main GPT-2 network
-│   ├── gpt2Weights.h                # Weight loading
-│   ├── gpt2Generation.h             # Text generation utilities
-│   ├── inference.h/cpp              # Inference module (load, generate, interactive)
-│   └── gpt2Test.cpp                 # Legacy test functions
-├── test/                            # Unit tests
-│   ├── testFramework.h              # Base test classes and assertions
-│   ├── testHelpers.h                # JSON loading and utilities
-│   ├── layerTests.cpp               # LayerNorm, GELU, Add, Identity, FeedForward tests
-│   ├── attentionTests.cpp           # Linear, Softmax, MHA, KV Cache tests
-│   ├── runAllTests.cpp              # Test runner executable
-│   └── README.md                    # Test framework documentation
-├── main.cpp                         # Inference CLI entry point
-├── CMakeLists.txt                   # Build configuration
-└── BUILD_AND_RUN.md                 # Build and usage guide
+├── assets/                  # Model weights and tokenizer data
+│   ├── weights/124M/        # GPT-2 pretrained weights (gpt2_weights.bin)
+│   ├── vocab.json           # BPE vocabulary
+│   └── merges.txt           # BPE merge rules
+├── model/                   # GPT-2 architecture implementation
+│   ├── inference.h/cpp      # Inference API (load, generate, interactive)
+│   ├── gpt2Net.h            # Main GPT-2 network
+│   ├── attention/           # Multi-head attention + KV cache
+│   └── transformerBlock/    # Transformer components (LayerNorm, GELU, etc.)
+├── test/                    # Unit tests with test framework
+│   ├── testFramework.h      # BaseTest, TestAssert classes
+│   └── runAllTests.cpp      # Test runner
+├── core/                    # Vulkan-based neural network framework
+├── tokenizer/               # BPE tokenizer
+├── utils/                   # Weight download/conversion scripts
+├── main.cpp                 # CLI entry point
+└── CMakeLists.txt          # Build configuration
 
 ```
 
