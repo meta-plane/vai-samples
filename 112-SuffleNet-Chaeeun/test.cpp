@@ -345,6 +345,65 @@ void eval_batchnorm2d()
     }
 }
 
+void eval_channel_shuffle_concat()
+{
+    void loadShaders();
+    loadShaders();
+
+    const uint32_t H = 3, W = 3, C = 4; // 3x3x4 input
+
+    // Build input (HWC) with a simple increasing pattern
+    std::vector<float> input(H * W * C);
+    for (uint32_t h = 0; h < H; ++h)
+        for (uint32_t w = 0; w < W; ++w)
+            for (uint32_t c = 0; c < C; ++c)
+                input[(h * W + w) * C + c] = float((h * W + w) * C + c);
+
+    NeuralNet net(netGlobalDevice, 1, 1);
+    ChannelShuffleNode cs(C);
+    ConcatNode concat;
+
+    // input -> channel shuffle -> concat -> output
+    net.input(0) - ("in0" / cs);
+    (cs / "out_even") - ("in0" / concat);
+    (cs / "out_odd")  - ("in1" / concat);
+    concat - net.output(0);
+
+    auto outputs = net(Tensor(H, W, C).set(input));
+    Tensor out = outputs[0];
+
+    // Read back output
+    uint32_t count = H * W * C;
+    vk::Buffer outBuf = netGlobalDevice.createBuffer({
+        count * sizeof(float),
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    });
+
+    netGlobalDevice.newCommandBuffer(queue_compute)
+        .begin()
+        .copyBuffer(outBuf, out.buffer())
+        .end()
+        .submit()
+        .wait();
+
+    std::vector<float> host(count);
+    memcpy(host.data(), outBuf.map(), count * sizeof(float));
+
+    printf("ChannelShuffle + Concat test (H=%u,W=%u,C=%u):\n", H, W, C);
+    printf("Input vs Reconstructed Output:\n");
+    for (uint32_t h = 0; h < H; ++h) {
+        for (uint32_t w = 0; w < W; ++w) {
+            printf("  (h=%u,w=%u): ", h, w);
+            for (uint32_t c = 0; c < C; ++c) {
+                uint32_t idx = (h * W + w) * C + c;
+                printf("[%5.1f -> %5.1f] ", input[idx], host[idx]);
+            }
+            printf("\n");
+        }
+    }
+}
+
 void Run()
 {
     void loadShaders();

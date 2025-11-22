@@ -112,7 +112,7 @@ public:
 };
 
 
-class PointNet : public NodeGroup
+class PointNetEncoder : public NodeGroup
 {
     TNetBlock tnet1;           // input transform (3x3)
     MLPSequence<2> mlp1;       // (3 → 64 → 64)
@@ -120,15 +120,14 @@ class PointNet : public NodeGroup
     MLPSequence<2> mlp2;       // (64 → 128 → 1024)
 
 public:
-    PointNet(uint32_t numClasses)
+    PointNetEncoder()
     : tnet1(3)
     , mlp1({3, 64, 64})
     , tnet2(64)
     , mlp2({64, 128, 1024})
-
     {
         tnet1 - mlp1 - tnet2 - mlp2;
-        defineSlot("in0", tnet1.slot("in0"));
+        defineSlot("in0",  tnet1.slot("in0"));
         defineSlot("out0", mlp2.slot("out0"));
     }
 
@@ -144,7 +143,7 @@ public:
 };
 
 
-class PointNetNet : public NeuralNet
+class PointNetSegment : public NeuralNet
 {
     PointNet pointNet;
     MaxPooling1DNode maxpool;  // (N → 1)
@@ -152,7 +151,7 @@ class PointNetNet : public NeuralNet
 
     uint32_t numClasses;
 public:
-    PointNetNet(Device& device, uint32_t numClasses)
+    PointNetSegment(Device& device, uint32_t numClasses)
     : NeuralNet(device, 1, 1)
     , pointNet(numClasses)
     , maxpool()  
@@ -170,9 +169,9 @@ public:
     }
 };
 
-Tensor eval_mnist(const std::vector<float>& srcImage, const JsonParser& json, uint32_t iter) // srcImage layout: [H][W][C]
+Tensor eval(const std::vector<float>& srcImage, const JsonParser& json, uint32_t iter) // srcImage layout: [H][W][C]
 {
-    PointNetNet pointNetNet(netGlobalDevice, 10);
+    PointNetSegment PointNetSegment(netGlobalDevice, 10);
 
     pointNetNet["tnet1.weight"] = Tensor(json["layer1.0.weight"]).reshape(32, 1*3*3).permute(1, 0);
     pointNetNet["tnet1.bias"] = Tensor(json["layer1.0.bias"]);
@@ -199,38 +198,38 @@ void test()
     void loadShaders();
     loadShaders();
 
-    const uint32_t channels = 1;
-    std::vector<float> inputData(28*28*channels);
-    for (size_t i = 0; i < inputData.size(); ++i)
-        inputData[i] = 0.0f;
+    // const uint32_t channels = 1;
+    // std::vector<float> inputData(28*28*channels);
+    // for (size_t i = 0; i < inputData.size(); ++i)
+    //     inputData[i] = 0.0f;
 
-    JsonParser json = JsonParser(PROJECT_CURRENT_DIR"/weights.json");
+    // JsonParser json = JsonParser(PROJECT_CURRENT_DIR"/weights.json");
 
-    uint32_t iter = 1;  
-    Tensor eval;
+    // uint32_t iter = 1;  
+    // Tensor eval;
 
-    {
-        TimeChecker timer("(VAI) MNIST evaluation: {} iterations", iter);
-        eval = eval_mnist(inputData, json, iter);
-    }
+    // {
+    //     TimeChecker timer("(VAI) MNIST evaluation: {} iterations", iter);
+    //     eval = eval_mnist(inputData, json, iter);
+    // }
 
-    vk::Buffer outBuffer = netGlobalDevice.createBuffer({
-        10 * sizeof(float),
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT, 
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-    });
+    // vk::Buffer outBuffer = netGlobalDevice.createBuffer({
+    //     10 * sizeof(float),
+    //     VK_BUFFER_USAGE_TRANSFER_DST_BIT, 
+    //     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    // });
 
-    vk::Buffer evalBuffer = eval.buffer();
-    netGlobalDevice.newCommandBuffer(queue_compute)
-        .begin()
-        .copyBuffer(outBuffer, evalBuffer)
-        .end()
-        .submit()
-        .wait();
+    // vk::Buffer evalBuffer = eval.buffer();
+    // netGlobalDevice.newCommandBuffer(queue_compute)
+    //     .begin()
+    //     .copyBuffer(outBuffer, evalBuffer)
+    //     .end()
+    //     .submit()
+    //     .wait();
 
-    float data[10];
-    memcpy(data, outBuffer.map(), 10 * sizeof(float));
+    // float data[10];
+    // memcpy(data, outBuffer.map(), 10 * sizeof(float));
 
-    for(int i=0; i<10; ++i)
-        printf("data[%d] = %f\n", i, data[i]);
+    // for(int i=0; i<10; ++i)
+    //     printf("data[%d] = %f\n", i, data[i]);
 }

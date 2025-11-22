@@ -76,6 +76,7 @@ class SELayer : public NodeGroup
     ReluNode relu;
     ConvolutionNode conv_2;
     HSNode hs;
+    MultiplyNode mul;
 
 public:
     SELayer(uint32_t inChannels)
@@ -83,9 +84,10 @@ public:
       aap(1), conv_1(inChannels, inChannels/4, 1),
       bn(inChannels/4), conv_2(inChannels/4, inChannels, 1)
     {
-        aap - conv_1 - bn - relu - conv_2 - hs;
+        aap - conv_1 - bn - relu - conv_2 - hs - "atten" / mul;
         defineSlot("in0", aap.slot("in0"));
-        defineSlot("out0", hs.slot("out0"));
+        defineSlot("in1", mul.slot("in0"));
+        defineSlot("out0", mul.slot("out0"));
     }
 
     Tensor& operator[](const std::string& name)
