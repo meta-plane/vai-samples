@@ -635,14 +635,15 @@ static const char* src_concatenate_kv = R"(
 layout(local_size_x = 16, local_size_y = 16) in;
 
 layout(set = 0, binding = 0) buffer Output { float full[]; };   // [B*H*(cache_len+new_len)*HD]
-layout(set = 0, binding = 1) buffer Cached { float cached[]; }; // [B*H*cache_len*HD]
+layout(set = 0, binding = 1) buffer Cached { float cached[]; }; // [B*H*max_len*HD] - FULL cache buffer!
 layout(set = 0, binding = 2) buffer NewKV { float new_kv[]; };  // [B*H*new_len*HD]
 
 layout(push_constant) uniform PushConstants {
     int B;          // Batch size
     int H;          // Number of heads
-    int cache_len;  // Length of cached sequence
+    int cache_len;  // Length of cached sequence (actual used length)
     int new_len;    // Length of new sequence
+    int max_len;    // Maximum cache length (stride for cache buffer)
     int HD;         // Head dimension
 };
 
@@ -663,8 +664,8 @@ void main() {
     int out_offset = (b * H * total_len * HD) + (h * total_len * HD) + (s * HD);
 
     if (s < cache_len) {
-        // Copy from cached data
-        int cache_offset = (b * H * cache_len * HD) + (h * cache_len * HD) + (s * HD);
+        // Copy from cached data - use max_len as stride!
+        int cache_offset = (b * H * max_len * HD) + (h * max_len * HD) + (s * HD);
         for (int hd = 0; hd < HD; ++hd) {
             full[out_offset + hd] = cached[cache_offset + hd];
         }
@@ -708,6 +709,9 @@ MultiHeadAttentionNode::MultiHeadAttentionNode(uint32_t d_in, uint32_t d_out, ui
     reshapeForHeads = requestPipeline(src_reshape_to_heads);
     concatenateKV = requestPipeline(src_concatenate_kv);
     updateCache = requestPipeline(src_update_cache);
+    scoresPipelineCached = requestPipeline(src_attention_scores_cached);
+    maskPipelineCached = requestPipeline(src_causal_mask_cached);
+    weightedSumPipelineCached = requestPipeline(src_weighted_sum_cached);
 
     // Create descriptor sets
     qkvProjDescSet = qkvProjection.descSetLayout(0).newDescSet(gDestSetPool);
@@ -715,9 +719,12 @@ MultiHeadAttentionNode::MultiHeadAttentionNode(uint32_t d_in, uint32_t d_out, ui
     concatDescSet = concatenateKV.descSetLayout(0).newDescSet(gDestSetPool);
     updateCacheDescSet = updateCache.descSetLayout(0).newDescSet(gDestSetPool);
     scoresDescSet = attentionScores.descSetLayout(0).newDescSet(gDestSetPool);
+    scoresCachedDescSet = scoresPipelineCached.descSetLayout(0).newDescSet(gDestSetPool);
     maskDescSet = applyCausalMask.descSetLayout(0).newDescSet(gDestSetPool);
+    maskCachedDescSet = maskPipelineCached.descSetLayout(0).newDescSet(gDestSetPool);
     softmaxDescSet = softmaxPipeline.descSetLayout(0).newDescSet(gDestSetPool);
     weightedSumDescSet = weightedSum.descSetLayout(0).newDescSet(gDestSetPool);
+    weightedSumCachedDescSet = weightedSumPipelineCached.descSetLayout(0).newDescSet(gDestSetPool);
     combineDescSet = combineHeads.descSetLayout(0).newDescSet(gDestSetPool);
 }
 
@@ -779,8 +786,12 @@ void MultiHeadAttentionNode::run(CommandBuffer cmdBuff)
     uint32_t H = num_heads;
     uint32_t HD = head_dim;
 
-    if (!use_cache || kv_cache == nullptr) {
-        // Standard path: no KV cache
+    // Use standard path if cache is disabled OR if cache is empty (cache_len=0)
+    // This ensures the prompt phase produces identical results to non-cached mode
+    bool use_standard_path = !use_cache || kv_cache == nullptr || kv_cache->current_len == 0;
+
+    if (use_standard_path) {
+        // Standard path: no KV cache OR cache is empty (first token)
         IntermediateTensors tensors = allocateIntermediateBuffers(B, S, D_out, H, HD);
         computeQKVProjection(cmdBuff, input, tensors, W_q, W_k, W_v, B_q, B_k, B_v, B, S, D_in, D_out);
         computeAttentionScores(cmdBuff, tensors, B, H, S, HD);
@@ -788,8 +799,24 @@ void MultiHeadAttentionNode::run(CommandBuffer cmdBuff)
         computeSoftmax(cmdBuff, tensors, B, H, S);
         computeWeightedSum(cmdBuff, tensors, B, H, S, HD);
         combineHeadsAndProject(cmdBuff, tensors, W_out, B_out, output, B, S, D_out, H, HD);
+
+        // If cache is enabled but empty, update it with the computed K/V
+        if (use_cache && kv_cache != nullptr && kv_cache->current_len == 0) {
+            // We need to reshape K/V and update cache
+            // Extract K and V from tensors.K_flat and tensors.V_flat
+            Tensor K_reshaped = Tensor(B, H, S, HD);
+            Tensor V_reshaped = Tensor(B, H, S, HD);
+            BufferPool& pool = BufferPool::get();
+            K_reshaped.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*S*HD*sizeof(float)));
+            V_reshaped.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*S*HD*sizeof(float)));
+
+            reshapeToHeads(cmdBuff, tensors.K_flat, K_reshaped, B, S, H, HD);
+            reshapeToHeads(cmdBuff, tensors.V_flat, V_reshaped, B, S, H, HD);
+
+            updateCacheWithNewKV(cmdBuff, K_reshaped, V_reshaped, B, H, S, 0, kv_cache->max_len, HD);
+        }
     } else {
-        // Cache path: use KV cache
+        // Cache path: use KV cache (cache has data from previous tokens)
         uint32_t cache_len = kv_cache->current_len;
         uint32_t new_S = S;  // Number of new tokens to process
         uint32_t total_S = cache_len + new_S;  // Total sequence length after concatenation
@@ -822,27 +849,32 @@ void MultiHeadAttentionNode::run(CommandBuffer cmdBuff)
 
         // Step 2: Reshape Q to multi-head format [B, H, new_S, HD]
         Tensor Q_reshaped = Tensor(B, H, new_S, HD);
+        Q_reshaped.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*new_S*HD*sizeof(float)));
         reshapeToHeads(cmdBuff, tensors.Q_flat, Q_reshaped, B, new_S, H, HD);
 
         // Step 3: Prepare K, V for concatenation
-        // First reshape K, V to multi-head format, storing in K_flat/V_flat buffer temporarily
+        // First reshape K, V to multi-head format
         Tensor K_new_reshaped = Tensor(B, H, new_S, HD);
         Tensor V_new_reshaped = Tensor(B, H, new_S, HD);
+        K_new_reshaped.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*new_S*HD*sizeof(float)));
+        V_new_reshaped.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*new_S*HD*sizeof(float)));
         reshapeToHeads(cmdBuff, tensors.K_flat, K_new_reshaped, B, new_S, H, HD);
         reshapeToHeads(cmdBuff, tensors.V_flat, V_new_reshaped, B, new_S, H, HD);
 
-        // Store reshaped tensors back into tensors struct for concatenation
-        tensors.K_flat = K_new_reshaped;
-        tensors.V_flat = V_new_reshaped;
-
         // Step 4: Concatenate with cache
         if (cache_len > 0) {
+            // Store reshaped tensors for concatenation
+            tensors.K_flat = K_new_reshaped;
+            tensors.V_flat = V_new_reshaped;
+
             // Allocate full tensors
             tensors.K_full = Tensor(B, H, total_S, HD);
             tensors.V_full = Tensor(B, H, total_S, HD);
+            tensors.K_full.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*total_S*HD*sizeof(float)));
+            tensors.V_full.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*total_S*HD*sizeof(float)));
             concatenateWithCache(cmdBuff, tensors, B, H, new_S, cache_len, HD);
         } else {
-            // No cached data, just use new data
+            // No cached data, use reshaped tensors directly (they already have buffers bound)
             tensors.K_full = K_new_reshaped;
             tensors.V_full = V_new_reshaped;
         }
@@ -1051,7 +1083,10 @@ void MultiHeadAttentionNode::disableCache()
 void MultiHeadAttentionNode::reshapeToHeads(CommandBuffer& cmdBuff, const Tensor& flat, Tensor& reshaped,
                                             uint32_t B, uint32_t S, uint32_t H, uint32_t HD)
 {
-    reshapeDescSet.write({
+    // Create local descriptor set to avoid conflicts when called multiple times
+    DescriptorSet localReshapeDescSet = reshapeForHeads.descSetLayout(0).newDescSet(gDestSetPool);
+
+    localReshapeDescSet.write({
         reshaped.buffer(),
         flat.buffer()
     });
@@ -1062,7 +1097,7 @@ void MultiHeadAttentionNode::reshapeToHeads(CommandBuffer& cmdBuff, const Tensor
     cmdBuff
         .bindPipeline(reshapeForHeads)
         .setPushConstants(0, sizeof(constants), constants)
-        .bindDescSets({reshapeDescSet})
+        .bindDescSets({localReshapeDescSet})
         .dispatch0(CEIL_DIV(B*S, 16), CEIL_DIV(D, 16))
         .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / reshaped.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
 }
@@ -1074,28 +1109,31 @@ void MultiHeadAttentionNode::concatenateWithCache(CommandBuffer& cmdBuff, Interm
     _ASSERT(use_cache);
 
     uint32_t total_len = cache_len + new_S;
+    uint32_t max_len = kv_cache->max_len;
 
     // Note: This version expects K_new and V_new to already be in tensors
     // It will concatenate them with the cache
 
     // Concatenate K: [cached_K, K_new] → K_full
-    concatDescSet.write({
+    DescriptorSet concatDescSetK = concatenateKV.descSetLayout(0).newDescSet(gDestSetPool);
+    concatDescSetK.write({
         tensors.K_full.buffer(),
         kv_cache->K.buffer(),
         tensors.K_flat.buffer()  // K_new should be placed here (reshaped)
     });
 
-    int k_constants[] = {(int)B, (int)H, (int)cache_len, (int)new_S, (int)HD};
+    int k_constants[] = {(int)B, (int)H, (int)cache_len, (int)new_S, (int)max_len, (int)HD};
 
     cmdBuff
         .bindPipeline(concatenateKV)
         .setPushConstants(0, sizeof(k_constants), k_constants)
-        .bindDescSets({concatDescSet})
+        .bindDescSets({concatDescSetK})
         .dispatch0(CEIL_DIV(B * H, 16), CEIL_DIV(total_len, 16))
         .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / tensors.K_full.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
 
     // Concatenate V: [cached_V, V_new] → V_full
-    concatDescSet.write({
+    DescriptorSet concatDescSetV = concatenateKV.descSetLayout(0).newDescSet(gDestSetPool);
+    concatDescSetV.write({
         tensors.V_full.buffer(),
         kv_cache->V.buffer(),
         tensors.V_flat.buffer()  // V_new should be placed here (reshaped)
@@ -1104,7 +1142,7 @@ void MultiHeadAttentionNode::concatenateWithCache(CommandBuffer& cmdBuff, Interm
     cmdBuff
         .bindPipeline(concatenateKV)
         .setPushConstants(0, sizeof(k_constants), k_constants)
-        .bindDescSets({concatDescSet})
+        .bindDescSets({concatDescSetV})
         .dispatch0(CEIL_DIV(B * H, 16), CEIL_DIV(total_len, 16))
         .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / tensors.V_full.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
 }
@@ -1116,7 +1154,8 @@ void MultiHeadAttentionNode::updateCacheWithNewKV(CommandBuffer& cmdBuff, const 
     _ASSERT(use_cache);
 
     // Update K cache
-    updateCacheDescSet.write({
+    DescriptorSet updateCacheDescSetK = updateCache.descSetLayout(0).newDescSet(gDestSetPool);
+    updateCacheDescSetK.write({
         kv_cache->K.buffer(),
         K_new.buffer()
     });
@@ -1126,12 +1165,13 @@ void MultiHeadAttentionNode::updateCacheWithNewKV(CommandBuffer& cmdBuff, const 
     cmdBuff
         .bindPipeline(updateCache)
         .setPushConstants(0, sizeof(constants), constants)
-        .bindDescSets({updateCacheDescSet})
+        .bindDescSets({updateCacheDescSetK})
         .dispatch0(CEIL_DIV(B * H, 16), CEIL_DIV(new_S, 16))
         .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / kv_cache->K.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
 
     // Update V cache
-    updateCacheDescSet.write({
+    DescriptorSet updateCacheDescSetV = updateCache.descSetLayout(0).newDescSet(gDestSetPool);
+    updateCacheDescSetV.write({
         kv_cache->V.buffer(),
         V_new.buffer()
     });
@@ -1139,7 +1179,7 @@ void MultiHeadAttentionNode::updateCacheWithNewKV(CommandBuffer& cmdBuff, const 
     cmdBuff
         .bindPipeline(updateCache)
         .setPushConstants(0, sizeof(constants), constants)
-        .bindDescSets({updateCacheDescSet})
+        .bindDescSets({updateCacheDescSetV})
         .dispatch0(CEIL_DIV(B * H, 16), CEIL_DIV(new_S, 16))
         .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / kv_cache->V.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
 }
@@ -1147,11 +1187,8 @@ void MultiHeadAttentionNode::updateCacheWithNewKV(CommandBuffer& cmdBuff, const 
 void MultiHeadAttentionNode::computeAttentionScoresCached(CommandBuffer& cmdBuff, const Tensor& Q, const Tensor& K, Tensor& scores,
                                                           uint32_t B, uint32_t H, uint32_t S_q, uint32_t S_kv, uint32_t HD)
 {
-    // Request cached attention scores pipeline
-    static ComputePipeline scoresPipelineCached = requestPipeline(src_attention_scores_cached);
-    static DescriptorSet scoresDescSetCached = scoresPipelineCached.descSetLayout(0).newDescSet(gDestSetPool);
-
-    scoresDescSetCached.write({
+    // Use member descriptor set (OK because this function is called only once per layer per forward pass)
+    scoresCachedDescSet.write({
         scores.buffer(),
         Q.buffer(),
         K.buffer()
@@ -1163,7 +1200,7 @@ void MultiHeadAttentionNode::computeAttentionScoresCached(CommandBuffer& cmdBuff
     cmdBuff
         .bindPipeline(scoresPipelineCached)
         .setPushConstants(0, sizeof(constants), &constants)
-        .bindDescSets({scoresDescSetCached})
+        .bindDescSets({scoresCachedDescSet})
         .dispatch0(CEIL_DIV(B*H, 8), CEIL_DIV(S_q, 8))
         .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / scores.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
 }
@@ -1171,17 +1208,15 @@ void MultiHeadAttentionNode::computeAttentionScoresCached(CommandBuffer& cmdBuff
 void MultiHeadAttentionNode::applyCausalMaskCached(CommandBuffer& cmdBuff, Tensor& scores,
                                                     uint32_t B, uint32_t H, uint32_t S_q, uint32_t S_kv, uint32_t cache_len)
 {
-    static ComputePipeline maskPipelineCached = requestPipeline(src_causal_mask_cached);
-    static DescriptorSet maskDescSetCached = maskPipelineCached.descSetLayout(0).newDescSet(gDestSetPool);
-
-    maskDescSetCached.write({scores.buffer()});
+    // Use member descriptor set (OK because this function is called only once per layer per forward pass)
+    maskCachedDescSet.write({scores.buffer()});
 
     int constants[] = {(int)B, (int)H, (int)S_q, (int)S_kv, (int)cache_len};
 
     cmdBuff
         .bindPipeline(maskPipelineCached)
         .setPushConstants(0, sizeof(constants), constants)
-        .bindDescSets({maskDescSetCached})
+        .bindDescSets({maskCachedDescSet})
         .dispatch0(CEIL_DIV(B*H*S_q*S_kv, 256))
         .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / scores.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
 }
@@ -1207,10 +1242,8 @@ void MultiHeadAttentionNode::computeSoftmaxCached(CommandBuffer& cmdBuff, Interm
 void MultiHeadAttentionNode::computeWeightedSumCached(CommandBuffer& cmdBuff, IntermediateTensors& tensors,
                                                        uint32_t B, uint32_t H, uint32_t S_q, uint32_t S_kv, uint32_t HD)
 {
-    static ComputePipeline weightedSumPipelineCached = requestPipeline(src_weighted_sum_cached);
-    static DescriptorSet weightedSumDescSetCached = weightedSumPipelineCached.descSetLayout(0).newDescSet(gDestSetPool);
-
-    weightedSumDescSetCached.write({
+    // Use member descriptor set (OK because this function is called only once per layer per forward pass)
+    weightedSumCachedDescSet.write({
         tensors.context.buffer(),
         tensors.attn_weights.buffer(),
         tensors.V_full.buffer()
@@ -1221,7 +1254,7 @@ void MultiHeadAttentionNode::computeWeightedSumCached(CommandBuffer& cmdBuff, In
     cmdBuff
         .bindPipeline(weightedSumPipelineCached)
         .setPushConstants(0, sizeof(constants), constants)
-        .bindDescSets({weightedSumDescSetCached})
+        .bindDescSets({weightedSumCachedDescSet})
         .dispatch0(CEIL_DIV(B*H, 8), CEIL_DIV(S_q, 8))
         .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / tensors.context.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
 }

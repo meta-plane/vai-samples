@@ -45,6 +45,7 @@ layout(push_constant) uniform PushConstants {
     int S;   // seq_length
     int M;   // max_length
     int E;   // embedding_dim
+    int pos_offset;  // NEW: position offset for KV cache support
 };
 
 void main()
@@ -53,11 +54,12 @@ void main()
     int BS = B * S;
     if (bs >= BS) return;
 
-    int s = bs % S;  // position in sequence
+    int s = bs % S;  // position in sequence (relative)
+    int abs_pos = s + pos_offset;  // absolute position in full sequence
 
-    // Copy positional embedding from weight table
+    // Copy positional embedding from weight table using absolute position
     for (int e = 0; e < E; ++e) {
-        out0[bs * E + e] = weight[s * E + e];
+        out0[bs * E + e] = weight[abs_pos * E + e];
     }
 })";
 
@@ -207,7 +209,7 @@ void PositionalEmbeddingNode::run(CommandBuffer cmdBuff)
         weight.buffer()
     });
 
-    int constants[] = {(int)B, (int)S, (int)M, (int)E};
+    int constants[] = {(int)B, (int)S, (int)M, (int)E, 0};  // pos_offset = 0 (default)
 
     cmdBuff
         .bindPipeline(positionalEmbedding)
@@ -319,7 +321,7 @@ void GPTEmbeddingNode::run(CommandBuffer cmdBuff)
         posWeight.buffer()
     });
 
-    int posConstants[] = {(int)B, (int)S, (int)M, (int)E};
+    int posConstants[] = {(int)B, (int)S, (int)M, (int)E, (int)position_offset};
 
     cmdBuff
         .bindPipeline(positionalEmbedding)

@@ -81,16 +81,22 @@ class MultiHeadAttentionNode : public Node
     ComputePipeline reshapeForHeads;      // Reshape to multi-head format [B,S,D] -> [B,H,S,HD]
     ComputePipeline concatenateKV;        // Concatenate cached K,V with new K,V
     ComputePipeline updateCache;          // Update cache with new K,V values
+    ComputePipeline scoresPipelineCached; // Attention scores with different K/V lengths
+    ComputePipeline maskPipelineCached;   // Causal mask for cached attention
+    ComputePipeline weightedSumPipelineCached; // Weighted sum for cached attention
 
     // Descriptor sets
     DescriptorSet qkvProjDescSet;
-    DescriptorSet reshapeDescSet;
-    DescriptorSet concatDescSet;          // For KV concatenation
-    DescriptorSet updateCacheDescSet;     // For cache update
+    DescriptorSet reshapeDescSet;         // NOTE: Not used in cache mode (creates local sets)
+    DescriptorSet concatDescSet;          // NOTE: Not used in cache mode (creates local sets)
+    DescriptorSet updateCacheDescSet;     // NOTE: Not used in cache mode (creates local sets)
     DescriptorSet scoresDescSet;
+    DescriptorSet scoresCachedDescSet;    // For cached attention scores
     DescriptorSet maskDescSet;
+    DescriptorSet maskCachedDescSet;      // For cached causal mask
     DescriptorSet softmaxDescSet;
     DescriptorSet weightedSumDescSet;
+    DescriptorSet weightedSumCachedDescSet; // For cached weighted sum
     DescriptorSet combineDescSet;
     DescriptorSet outProjDescSet;
 

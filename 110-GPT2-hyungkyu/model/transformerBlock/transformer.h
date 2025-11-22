@@ -142,6 +142,11 @@ public:
 
     // Provide weight access
     Tensor& operator[](const std::string& name);
+
+    // KV cache control
+    void setAttentionCache(LayerKVCache* cache) { attention.setCache(cache); }
+    void disableAttentionCache() { attention.disableCache(); }
+    bool isAttentionCacheEnabled() const { return attention.isCacheEnabled(); }
 };
 
 #endif // TRANSFORMER_H

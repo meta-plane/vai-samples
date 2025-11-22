@@ -1,5 +1,7 @@
 #include "kvCache.h"
 #include "../../core/error.h"
+#include "../../core/tensor.h"
+#include "../../core/globalContext.h"
 #include <iostream>
 
 KVCacheManager::KVCacheManager(
@@ -47,6 +49,8 @@ void KVCacheManager::initialize()
     std::cout << "  Total cache memory: " << total_bytes / 1024.0 / 1024.0 << " MB" << std::endl;
 
     // Allocate cache tensors for each layer
+    BufferPool& pool = BufferPool::get();
+
     for (uint32_t layer = 0; layer < num_layers; ++layer) {
         auto& cache = layer_caches[layer];
 
@@ -54,9 +58,27 @@ void KVCacheManager::initialize()
         cache.K = Tensor(batch_size, num_heads, max_seq_len, head_dim);
         cache.V = Tensor(batch_size, num_heads, max_seq_len, head_dim);
 
-        // Mark as non-constant (these are temporary buffers)
-        cache.K.setConstant(false);
-        cache.V.setConstant(false);
+        // Bind GPU buffers to cache tensors
+        cache.K.bindBuffer(pool.requestBuffer(
+            netGlobalDevice,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            cache_bytes
+        ));
+
+        cache.V.bindBuffer(pool.requestBuffer(
+            netGlobalDevice,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            cache_bytes
+        ));
+
+        // Mark as constant to prevent buffer reuse by BufferPool
+        // NOTE: These are NOT actually constant (they change during generation),
+        // but marking them as constant prevents the BufferPool from treating them
+        // as temporary buffers that can be reused for other operations
+        cache.K.setConstant(true);
+        cache.V.setConstant(true);
 
         cache.current_len = 0;
     }

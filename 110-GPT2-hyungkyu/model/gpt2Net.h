@@ -6,6 +6,7 @@
 #include "embedding/embeddingNode.h"
 #include "transformerBlock/transformer.h"
 #include "lmHeadNode.h"
+#include "cache/kvCache.h"
 #include <memory>
 
 using namespace vk;
@@ -31,6 +32,7 @@ struct GPT2Config {
 class GPT2Net : public NeuralNet
 {
     GPT2Config config;
+    std::unique_ptr<KVCacheManager> cache_manager;  // KV cache for generation
 
 public:
     // Nodes as objects (like MnistNet)
@@ -98,6 +100,99 @@ public:
     }
 
     const GPT2Config& getConfig() const { return config; }
+
+    /**
+     * Enable KV caching for efficient autoregressive generation
+     * Creates and initializes cache for all transformer layers
+     */
+    void enableCache()
+    {
+        if (!cache_manager) {
+            uint32_t batch_size = 1;  // Currently only support batch_size=1 for generation
+            uint32_t head_dim = config.d_model / config.num_heads;
+
+            cache_manager = std::make_unique<KVCacheManager>(
+                config.num_layers,
+                batch_size,
+                config.num_heads,
+                head_dim,
+                config.max_seq_len
+            );
+
+            cache_manager->initialize();
+
+            // Connect cache to all attention layers
+            for (uint32_t i = 0; i < config.num_layers; ++i) {
+                transformerBlocks[i]->setAttentionCache(&cache_manager->getCache(i));
+            }
+        }
+    }
+
+    /**
+     * Disable KV caching and free cache memory
+     */
+    void disableCache()
+    {
+        if (cache_manager) {
+            // Disconnect cache from all attention layers
+            for (uint32_t i = 0; i < config.num_layers; ++i) {
+                transformerBlocks[i]->disableAttentionCache();
+            }
+
+            cache_manager.reset();
+        }
+    }
+
+    /**
+     * Reset cache (clear all cached K,V values)
+     */
+    void resetCache()
+    {
+        if (cache_manager) {
+            cache_manager->reset();
+        }
+    }
+
+    /**
+     * Update cache lengths after forward pass
+     * @param new_tokens Number of new tokens processed
+     */
+    void updateCacheLength(uint32_t new_tokens)
+    {
+        if (cache_manager) {
+            for (uint32_t i = 0; i < config.num_layers; ++i) {
+                cache_manager->updateCacheLength(i, new_tokens);
+            }
+        }
+    }
+
+    /**
+     * Check if cache is enabled
+     */
+    bool isCacheEnabled() const { return cache_manager != nullptr; }
+
+    /**
+     * Get current cache length
+     */
+    uint32_t getCacheLength() const
+    {
+        return cache_manager ? cache_manager->getCurrentLength() : 0;
+    }
+
+    /**
+     * Get cache manager (for debugging/inspection)
+     */
+    KVCacheManager* getCacheManager() { return cache_manager.get(); }
+
+    /**
+     * Set position offset for embedding layer (for KV cache support)
+     * When using KV cache, new tokens need to use their absolute position
+     * in the full sequence, not their relative position in the input
+     */
+    void setPositionOffset(uint32_t offset)
+    {
+        embedding.setPositionOffset(offset);
+    }
 };
 
 // Helper function to create common configs
