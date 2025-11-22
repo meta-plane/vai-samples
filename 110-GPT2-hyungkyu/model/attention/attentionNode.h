@@ -122,6 +122,10 @@ class MultiHeadAttentionNode : public Node
                                 uint32_t B, uint32_t S, uint32_t D, uint32_t H, uint32_t HD);
 
     // Private helper functions - cache mode
+    IntermediateTensors allocateIntermediateBuffersCached(uint32_t B, uint32_t new_S, uint32_t total_S, uint32_t D, uint32_t H, uint32_t HD);
+    void reshapeQKVForCache(CommandBuffer& cmdBuff, IntermediateTensors& tensors,
+                            Tensor& Q_reshaped, Tensor& K_reshaped, Tensor& V_reshaped,
+                            uint32_t B, uint32_t new_S, uint32_t H, uint32_t HD);
     void reshapeToHeads(CommandBuffer& cmdBuff, const Tensor& flat, Tensor& reshaped, uint32_t B, uint32_t S, uint32_t H, uint32_t HD);
     void concatenateWithCache(CommandBuffer& cmdBuff, IntermediateTensors& tensors,
                               uint32_t B, uint32_t H, uint32_t new_S, uint32_t cache_len, uint32_t HD);

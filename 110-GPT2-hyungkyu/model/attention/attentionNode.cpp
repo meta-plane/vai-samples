@@ -821,45 +821,15 @@ void MultiHeadAttentionNode::run(CommandBuffer cmdBuff)
         uint32_t new_S = S;  // Number of new tokens to process
         uint32_t total_S = cache_len + new_S;  // Total sequence length after concatenation
 
-        // Allocate intermediate buffers - use larger size for scores/weights to accommodate cache
-        BufferPool& pool = BufferPool::get();
-        IntermediateTensors tensors;
+        // Step 1: Allocate intermediate buffers for cached attention
+        IntermediateTensors tensors = allocateIntermediateBuffersCached(B, new_S, total_S, D_out, H, HD);
 
-        tensors.Q_flat = Tensor(B, new_S, D_out);
-        tensors.K_flat = Tensor(B, new_S, D_out);
-        tensors.V_flat = Tensor(B, new_S, D_out);
-        tensors.Q_flat.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*new_S*D_out*sizeof(float)));
-        tensors.K_flat.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*new_S*D_out*sizeof(float)));
-        tensors.V_flat.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*new_S*D_out*sizeof(float)));
-
-        tensors.scores = Tensor(B, H, new_S, total_S);
-        tensors.scores.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*new_S*total_S*sizeof(float)));
-
-        tensors.attn_weights = Tensor(B, H, new_S, total_S);
-        tensors.attn_weights.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*new_S*total_S*sizeof(float)));
-
-        tensors.context = Tensor(B, H, new_S, HD);
-        tensors.context.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*new_S*HD*sizeof(float)));
-
-        tensors.context_combined = Tensor(B, new_S, D_out);
-        tensors.context_combined.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*new_S*D_out*sizeof(float)));
-
-        // Step 1: Compute Q, K, V for new tokens
+        // Step 2: Compute Q, K, V for new tokens
         computeQKVProjection(cmdBuff, input, tensors, W_q, W_k, W_v, B_q, B_k, B_v, B, new_S, D_in, D_out);
 
-        // Step 2: Reshape Q to multi-head format [B, H, new_S, HD]
-        Tensor Q_reshaped = Tensor(B, H, new_S, HD);
-        Q_reshaped.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*new_S*HD*sizeof(float)));
-        reshapeToHeads(cmdBuff, tensors.Q_flat, Q_reshaped, B, new_S, H, HD);
-
-        // Step 3: Prepare K, V for concatenation
-        // First reshape K, V to multi-head format
-        Tensor K_new_reshaped = Tensor(B, H, new_S, HD);
-        Tensor V_new_reshaped = Tensor(B, H, new_S, HD);
-        K_new_reshaped.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*new_S*HD*sizeof(float)));
-        V_new_reshaped.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*new_S*HD*sizeof(float)));
-        reshapeToHeads(cmdBuff, tensors.K_flat, K_new_reshaped, B, new_S, H, HD);
-        reshapeToHeads(cmdBuff, tensors.V_flat, V_new_reshaped, B, new_S, H, HD);
+        // Step 3: Reshape Q, K, V to multi-head format [B, H, new_S, HD]
+        Tensor Q_reshaped, K_new_reshaped, V_new_reshaped;
+        reshapeQKVForCache(cmdBuff, tensors, Q_reshaped, K_new_reshaped, V_new_reshaped, B, new_S, H, HD);
 
         // Step 4: Concatenate with cache
         if (cache_len > 0) {
@@ -868,6 +838,7 @@ void MultiHeadAttentionNode::run(CommandBuffer cmdBuff)
             tensors.V_flat = V_new_reshaped;
 
             // Allocate full tensors
+            BufferPool& pool = BufferPool::get();
             tensors.K_full = Tensor(B, H, total_S, HD);
             tensors.V_full = Tensor(B, H, total_S, HD);
             tensors.K_full.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*total_S*HD*sizeof(float)));
@@ -926,6 +897,57 @@ MultiHeadAttentionNode::allocateIntermediateBuffers(uint32_t B, uint32_t S, uint
     tensors.context_combined.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*S*D*sizeof(float)));
 
     return tensors;
+}
+
+MultiHeadAttentionNode::IntermediateTensors
+MultiHeadAttentionNode::allocateIntermediateBuffersCached(uint32_t B, uint32_t new_S, uint32_t total_S, uint32_t D, uint32_t H, uint32_t HD)
+{
+    BufferPool& pool = BufferPool::get();
+    IntermediateTensors tensors;
+
+    // Q, K, V for new tokens only
+    tensors.Q_flat = Tensor(B, new_S, D);
+    tensors.K_flat = Tensor(B, new_S, D);
+    tensors.V_flat = Tensor(B, new_S, D);
+    tensors.Q_flat.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*new_S*D*sizeof(float)));
+    tensors.K_flat.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*new_S*D*sizeof(float)));
+    tensors.V_flat.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*new_S*D*sizeof(float)));
+
+    // Scores and weights use total_S (cached + new)
+    tensors.scores = Tensor(B, H, new_S, total_S);
+    tensors.scores.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*new_S*total_S*sizeof(float)));
+
+    tensors.attn_weights = Tensor(B, H, new_S, total_S);
+    tensors.attn_weights.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*new_S*total_S*sizeof(float)));
+
+    // Context uses new_S
+    tensors.context = Tensor(B, H, new_S, HD);
+    tensors.context.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*new_S*HD*sizeof(float)));
+
+    tensors.context_combined = Tensor(B, new_S, D);
+    tensors.context_combined.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*new_S*D*sizeof(float)));
+
+    return tensors;
+}
+
+void MultiHeadAttentionNode::reshapeQKVForCache(CommandBuffer& cmdBuff, IntermediateTensors& tensors,
+                                                 Tensor& Q_reshaped, Tensor& K_reshaped, Tensor& V_reshaped,
+                                                 uint32_t B, uint32_t new_S, uint32_t H, uint32_t HD)
+{
+    BufferPool& pool = BufferPool::get();
+
+    // Allocate reshaped tensors [B, H, new_S, HD]
+    Q_reshaped = Tensor(B, H, new_S, HD);
+    K_reshaped = Tensor(B, H, new_S, HD);
+    V_reshaped = Tensor(B, H, new_S, HD);
+    Q_reshaped.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*new_S*HD*sizeof(float)));
+    K_reshaped.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*new_S*HD*sizeof(float)));
+    V_reshaped.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*new_S*HD*sizeof(float)));
+
+    // Reshape Q, K, V to multi-head format
+    reshapeToHeads(cmdBuff, tensors.Q_flat, Q_reshaped, B, new_S, H, HD);
+    reshapeToHeads(cmdBuff, tensors.K_flat, K_reshaped, B, new_S, H, HD);
+    reshapeToHeads(cmdBuff, tensors.V_flat, V_reshaped, B, new_S, H, HD);
 }
 
 void MultiHeadAttentionNode::computeQKVProjection(CommandBuffer& cmdBuff, const Tensor& input, IntermediateTensors& tensors,
