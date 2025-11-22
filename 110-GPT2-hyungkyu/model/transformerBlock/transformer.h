@@ -75,6 +75,11 @@ class FeedForwardNode : public Node
     DescriptorSet geluDescSet;
     DescriptorSet linear2DescSet;
 
+    // Helper functions for run() steps
+    void runLinear1(CommandBuffer& cmdBuff, const Tensor& input, Tensor& hidden, const Tensor& weight1, const Tensor& bias1, uint32_t B, uint32_t S, uint32_t D, uint32_t H);
+    void runGELU(CommandBuffer& cmdBuff, const Tensor& hidden, Tensor& gelu_out, uint32_t B, uint32_t S, uint32_t H);
+    void runLinear2(CommandBuffer& cmdBuff, const Tensor& gelu_out, Tensor& output, const Tensor& weight2, const Tensor& bias2, uint32_t B, uint32_t S, uint32_t H, uint32_t D);
+
 public:
     FeedForwardNode(uint32_t d_model);
 
