@@ -142,6 +142,7 @@ class ShuffleUnit : public NodeGroup
 
     // utilities
     ChannelShuffleNode cs;   // only used when s==1; C = 2*inp
+    SplitNode         split; // only used when s==2; fan-out input to proj/main
     ConcatNode         concat;
 
 public:
@@ -202,13 +203,13 @@ public:
         }
         else
         {
-            // stride==2: both branches consume the same input (need two input slots externally)
+            // stride==2: both branches consume the same input (fan-out internally)
             // proj: x -> dw_proj -> bn -> pw_proj -> bn -> act
-            dw_proj - bn_proj1 - pw_proj - bn_proj2;
+            split / "out0" - dw_proj - bn_proj1 - pw_proj - bn_proj2;
             if (act == Act::HS) bn_proj2 - hs_proj; else bn_proj2 - relu_proj;
 
             // main: x -> pw1 -> bn1 -> act -> dw -> bn2 -> pw2 -> bn3 -> act2 [-> SE]
-            pw1 - bn1;
+            split / "out1" - pw1 - bn1;
             if (act == Act::HS) { bn1 - hs1; hs1 - dw; } else { bn1 - relu1; relu1 - dw; }
             dw - bn2 - pw2 - bn3;
             if (act == Act::HS) bn3 - hs2; else bn3 - relu2;
@@ -236,9 +237,8 @@ public:
 
             if (act == Act::HS) ("out0" / hs_proj) - ("in0" / concat); else ("out0" / relu_proj) - ("in0" / concat);
 
-            // expose two input slots (same upstream tensor should feed both)
-            defineSlot("in_main", pw1.slot("in0"));
-            defineSlot("in_proj", dw_proj.slot("in0"));
+            // expose single input slot (fan-out inside)
+            defineSlot("in0", split.slot("in0"));
             defineSlot("out0", concat.slot("out0"));
         }
     }
@@ -307,6 +307,7 @@ class ShuffleXception : public NodeGroup
 
     // utils
     ChannelShuffleNode cs; // only when s==1 (C=2*inp)
+    SplitNode         split; // only when s==2; fan-out input
     ConcatNode         concat;
 
 public:
@@ -356,11 +357,11 @@ public:
         }
         else
         {
-            // stride==2: proj and main both take the same input (expose two input slots)
-            dwp - bnp1 - pwp - bnp2;
+            // stride==2: proj and main both take the same input (fan-out internally)
+            split / "out0" - dwp - bnp1 - pwp - bnp2;
             if (act == Act::HS) bnp2 - hs_proj; else bnp2 - relu_proj;
 
-            dw1 - bn1 - pw1 - bn1p;
+            split / "out1" - dw1 - bn1 - pw1 - bn1p;
             if (act == Act::HS) { bn1p - hs1; hs1 - dw2; } else { bn1p - relu1; relu1 - dw2; }
             dw2 - bn2 - pw2 - bn2p;
             if (act == Act::HS) { bn2p - hs2; hs2 - dw3; } else { bn2p - relu2; relu2 - dw3; }
@@ -379,8 +380,7 @@ public:
 
             if (act == Act::HS) ("out0" / hs_proj) - ("in0" / concat); else ("out0" / relu_proj) - ("in0" / concat);
 
-            defineSlot("in_main", dw1.slot("in0"));
-            defineSlot("in_proj", dwp.slot("in0"));
+            defineSlot("in0", split.slot("in0"));
             defineSlot("out0", concat.slot("out0"));
         }
     }
@@ -444,8 +444,7 @@ public:
     {
         // Stem: input -> conv -> bn -> HS
         input(0) - first_conv - first_bn - first_hs;
-        Node* tailNode = &first_hs; // current tail for wiring
-        NodeGroup* tailGroup = nullptr;
+        std::vector<NodeGroup*> feature_chain;
         uint32_t input_channel = stage_out_channels_small[1]; // 16
         size_t archIndex = 0;
         for (size_t idxstage = 0; idxstage < stage_repeats.size(); ++idxstage)
@@ -464,48 +463,14 @@ public:
                 {
                     uint32_t ksize = (blockIndex == 0 ? 3u : (blockIndex == 1 ? 5u : 7u));
                     auto& blk = *blocks_su.emplace_back(std::make_unique<ShuffleUnit>(inp, output_channel, output_channel / 2, ksize, stride, activation, useSE));
-                    if (stride == 1)
-                    {
-                        if (tailNode) { (NodeFlow)(*tailNode) - blk; }
-                        else          { ("out0" / *tailGroup) - blk; }
-                    }
-                    else
-                    {
-                        if (tailNode)
-                        {
-                            (NodeFlow)(*tailNode) - ("in_main" / blk);
-                            (NodeFlow)(*tailNode) - ("in_proj" / blk);
-                        }
-                        else
-                        {
-                            ("out0" / *tailGroup) - ("in_main" / blk);
-                            ("out0" / *tailGroup) - ("in_proj" / blk);
-                        }
-                    }
-                    tailNode = nullptr; tailGroup = &blk; feature_order.push_back({false, &blk, nullptr});
+                    feature_chain.push_back(&blk);
+                    feature_order.push_back({false, &blk, nullptr});
                 }
                 else if (blockIndex == 3)
                 {
                     auto& blk = *blocks_xc.emplace_back(std::make_unique<ShuffleXception>(inp, output_channel, output_channel / 2, stride, activation, useSE));
-                    if (stride == 1)
-                    {
-                        if (tailNode) { (NodeFlow)(*tailNode) - blk; }
-                        else          { ("out0" / *tailGroup) - blk; }
-                    }
-                    else
-                    {
-                        if (tailNode)
-                        {
-                            (NodeFlow)(*tailNode) - ("in_main" / blk);
-                            (NodeFlow)(*tailNode) - ("in_proj" / blk);
-                        }
-                        else
-                        {
-                            ("out0" / *tailGroup) - ("in_main" / blk);
-                            ("out0" / *tailGroup) - ("in_proj" / blk);
-                        }
-                    }
-                    tailNode = nullptr; tailGroup = &blk; feature_order.push_back({true, nullptr, &blk});
+                    feature_chain.push_back(&blk);
+                    feature_order.push_back({true, nullptr, &blk});
                 }
                 else
                 {
@@ -517,8 +482,20 @@ public:
         // Tail: conv_last(C->1280)->bn->HS
         conv_last = std::make_unique<ConvolutionNode>(input_channel, 1280, 1, 1, 0);
         bn_last   = std::make_unique<BatchNormNode>(1280);
-        if (tailNode) { (NodeFlow)(*tailNode) - *conv_last - *bn_last - last_hs; }
-        else          { ("out0" / *tailGroup) - *conv_last - *bn_last - last_hs; }
+
+        // Link chain: first_hs -> first block -> ... -> last block -> conv_last -> bn_last -> last_hs
+        if (!feature_chain.empty())
+        {
+            (NodeFlow)first_hs - *feature_chain.front();
+            for (size_t k = 0; k + 1 < feature_chain.size(); ++k)
+                *feature_chain[k] - *feature_chain[k + 1];
+            *feature_chain.back() - *conv_last - *bn_last - last_hs;
+        }
+        else
+        {
+            // No blocks (theoretically shouldn't happen for ShuffleNetV2 Small), wire stem -> tail
+            (NodeFlow)first_hs - *conv_last - *bn_last - last_hs;
+        }
         // GAP(1x1) -> SE (feed same tensor to both in0 and in1)
         (NodeFlow)last_hs - gap;
         (NodeFlow)gap - ("in0" / lastSE);
