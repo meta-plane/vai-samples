@@ -108,6 +108,34 @@ public:
 };
 
 
+// BroadcastNode: [1, C] → [N, C]
+// Broadcasts a global feature vector to all points
+class BroadcastNode : public Node
+{
+    ComputePipeline broadcast;
+    DescriptorSet broadcastDescSet;
+
+public:
+    BroadcastNode();
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+
+// ConcatNode: [N, C1] + [N, C2] → [N, C1+C2]
+// Concatenates two tensors along the channel dimension
+class ConcatNode : public Node
+{
+    ComputePipeline concat;
+    DescriptorSet concatDescSet;
+
+public:
+    ConcatNode();
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+
 extern Device netGlobalDevice; // Global device for neural network operations
 
 

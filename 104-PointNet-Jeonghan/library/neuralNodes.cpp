@@ -561,6 +561,61 @@ void main()
 })";
 
 
+// Broadcast shader: repeat [1, C] to [N, C]
+static const char* src_broadcast = R"(
+#version 450
+layout(local_size_x = 256) in;
+
+layout(binding = 0) readonly buffer In0 { float global_feature[]; };  // [1, C]
+layout(binding = 1) writeonly buffer Out0 { float output_data[]; };   // [N, C]
+
+layout(push_constant) uniform PushConstants {
+    uint N;
+    uint C;
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= N * C) return;
+    
+    uint n = idx / C;
+    uint c = idx % C;
+    output_data[idx] = global_feature[c];
+}
+)";
+
+// Concat shader: concatenate [N, C1] + [N, C2] → [N, C1+C2]
+static const char* src_concat = R"(
+#version 450
+layout(local_size_x = 256) in;
+
+layout(binding = 0) readonly buffer In0 { float input0[]; };   // [N, C1]
+layout(binding = 1) readonly buffer In1 { float input1[]; };   // [N, C2]
+layout(binding = 2) writeonly buffer Out0 { float output_data[]; };  // [N, C1+C2]
+
+layout(push_constant) uniform PushConstants {
+    uint N;
+    uint C1;
+    uint C2;
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = N * (C1 + C2);
+    if (idx >= total) return;
+    
+    uint n = idx / (C1 + C2);
+    uint c = idx % (C1 + C2);
+    
+    if (c < C1) {
+        output_data[idx] = input0[n * C1 + c];
+    } else {
+        output_data[idx] = input1[n * C2 + (c - C1)];
+    }
+}
+)";
+
+
 Device netGlobalDevice = VulkanApp::get().device();
 
 static DescriptorPool gDestSetPool = netGlobalDevice.createDescriptorPool({
@@ -974,4 +1029,125 @@ void FullyConnectedNode::run(CommandBuffer cmdBuff)
             / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
         );
 
+}
+
+
+//==============================================================================
+// BroadcastNode Implementation
+//==============================================================================
+
+BroadcastNode::BroadcastNode()
+{
+    addSlot("in0", NodeSlot::input);   // [1, C]
+    addSlot("in1", NodeSlot::input);   // [N, C] (for shape reference)
+    addSlot("out0", NodeSlot::output); // [N, C]
+    
+    broadcast = requestPipeline(src_broadcast);
+    broadcastDescSet = broadcast.descSetLayout(0).newDescSet(gDestSetPool);
+}
+
+void BroadcastNode::prepare()
+{
+    Tensor& in0 = (*this)["in0"];  // global feature [1, C]
+    Tensor& in1 = (*this)["in1"];  // point features [N, C] for shape reference
+    
+    _ASSERT(in0.validShape() && in1.validShape());
+    _ASSERT(in0.shape().size() == 2);
+    _ASSERT(in1.shape().size() == 2);
+    _ASSERT(in0.shape()[0] == 1);  // global feature should have batch size 1
+    _ASSERT(in0.shape()[1] == in1.shape()[1]); // same channel dimension
+    
+    // Output shape: [N, C]
+    (*this)["out0"] = Tensor(in1.shape()[0], in0.shape()[1]);
+}
+
+void BroadcastNode::run(CommandBuffer cmdBuff)
+{
+    Tensor& in0 = (*this)["in0"];   // [1, C]
+    Tensor& in1 = (*this)["in1"];   // [N, C]
+    Tensor& out0 = (*this)["out0"]; // [N, C]
+    
+    uint32_t N = in1.shape()[0];
+    uint32_t C = in0.shape()[1];
+    
+    broadcastDescSet.write({
+        in0.buffer(),
+        out0.buffer()
+    });
+    
+    uint32_t pc[] = {N, C};
+    
+    cmdBuff
+        .bindPipeline(broadcast)
+        .bindDescSets({broadcastDescSet})
+        .setPushConstants(0, sizeof(pc), pc)
+        .dispatch0((N * C + 255) / 256, 1, 1)
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / out0.buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
+
+
+//==============================================================================
+// ConcatNode Implementation
+//==============================================================================
+
+ConcatNode::ConcatNode()
+{
+    addSlot("in0", NodeSlot::input);   // [N, C1]
+    addSlot("in1", NodeSlot::input);   // [N, C2]
+    addSlot("out0", NodeSlot::output); // [N, C1+C2]
+    
+    concat = requestPipeline(src_concat);
+    concatDescSet = concat.descSetLayout(0).newDescSet(gDestSetPool);
+}
+
+void ConcatNode::prepare()
+{
+    Tensor& in0 = (*this)["in0"];
+    Tensor& in1 = (*this)["in1"];
+    
+    _ASSERT(in0.validShape() && in1.validShape());
+    _ASSERT(in0.shape().size() == 2);
+    _ASSERT(in1.shape().size() == 2);
+    _ASSERT(in0.shape()[0] == in1.shape()[0]); // same N
+    
+    uint32_t N = in0.shape()[0];
+    uint32_t C1 = in0.shape()[1];
+    uint32_t C2 = in1.shape()[1];
+    
+    // Output shape: [N, C1+C2]
+    (*this)["out0"] = Tensor(N, C1 + C2);
+}
+
+void ConcatNode::run(CommandBuffer cmdBuff)
+{
+    Tensor& in0 = (*this)["in0"];   // [N, C1]
+    Tensor& in1 = (*this)["in1"];   // [N, C2]
+    Tensor& out0 = (*this)["out0"]; // [N, C1+C2]
+    
+    uint32_t N = in0.shape()[0];
+    uint32_t C1 = in0.shape()[1];
+    uint32_t C2 = in1.shape()[1];
+    
+    concatDescSet.write({
+        in0.buffer(),
+        in1.buffer(),
+        out0.buffer()
+    });
+    
+    uint32_t pc[] = {N, C1, C2};
+    
+    cmdBuff
+        .bindPipeline(concat)
+        .bindDescSets({concatDescSet})
+        .setPushConstants(0, sizeof(pc), pc)
+        .dispatch0((N * (C1 + C2) + 255) / 256, 1, 1)
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / out0.buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
 }  

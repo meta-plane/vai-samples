@@ -1,12 +1,17 @@
+#ifndef POINTNET_HPP
+#define POINTNET_HPP
+
 #include "neuralNet.h"
 #include "neuralNodes.h"
 #include "jsonParser.h"
-#include "timeChecker.hpp"
-#include <stb/stb_image.h>
-#include <cstring>  // memcpy
+#include "tensor.h"
+#include <memory>
+#include <string>
 
+namespace networks
+{
 
-
+// FCSequence template class
 template<uint32_t nBlocks>
 class FCSequence : public NodeGroup
 {
@@ -44,6 +49,7 @@ template<std::size_t N>
 FCSequence(const uint32_t (&)[N]) -> FCSequence<N - 1>;
 
 
+// MLPSequence template class
 template<uint32_t nBlocks>
 class MLPSequence : public NodeGroup
 {
@@ -80,6 +86,8 @@ public:
 template<std::size_t N>
 MLPSequence(const uint32_t (&)[N]) -> MLPSequence<N - 1>;
 
+
+// TNetBlock class
 class TNetBlock : public NodeGroup
 {
     uint32_t K;
@@ -112,6 +120,7 @@ public:
 };
 
 
+// PointNetEncoder class
 class PointNetEncoder : public NodeGroup
 {
     TNetBlock tnet1;           // input transform (3x3)
@@ -143,93 +152,71 @@ public:
 };
 
 
+// PointNetSegment class - Proper implementation following the paper
 class PointNetSegment : public NeuralNet
 {
-    PointNet pointNet;
-    MaxPooling1DNode maxpool;  // (N → 1)
-    FCSequence<3> fc;          // 1024 → 512 → 256 → numClasses
+    PointNetEncoder encoder;    // PointNet encoder: [N, 3] → [N, 1024]
+    MaxPooling1DNode maxpool;   // Global max pooling: [N, 1024] → [1, 1024]
+    BroadcastNode broadcast;    // Broadcast global feature: [1, 1024] → [N, 1024]
+    ConcatNode concat;          // Concatenate: [N, 1024] + [N, 1024] → [N, 2048]
+    MLPSequence<3> segHead;     // Segmentation head: [N, 2048] → [N, 512] → [N, 256] → [N, numClasses]
 
     uint32_t numClasses;
+
 public:
+    using u_ptr = std::unique_ptr<PointNetSegment>;
+
     PointNetSegment(Device& device, uint32_t numClasses)
     : NeuralNet(device, 1, 1)
-    , pointNet(numClasses)
-    , maxpool()  
-    , fc({1024, 512, 256, numClasses})
+    , numClasses(numClasses)
+    , encoder()
+    , maxpool()
+    , broadcast()
+    , concat()
+    , segHead({2048, 512, 256, numClasses})  // 1024 (point feature) + 1024 (global feature) = 2048
     {
-        input(0) - pointNet - maxpool - fc - output(0);
+        // PointNet Segmentation Architecture (following the paper):
+        //
+        // Input [N, 3]
+        //   ↓
+        // encoder → [N, 1024] (point-wise features)
+        //   ├───→ maxpool → [1, 1024] (global feature)
+        //   │         ↓
+        //   │    broadcast → [N, 1024] (replicated global)
+        //   │         ↓
+        //   └───→ concat → [N, 2048] (point + global)
+        //             ↓
+        //         segHead → [N, numClasses]
+        //             ↓
+        //         output
+        
+        // 1. Main path: input → encoder
+        input(0) - encoder;
+        
+        // 2. Global feature branch: encoder → maxpool → broadcast
+        encoder - maxpool - broadcast / "in0";      // global feature path
+        encoder / "out0" - broadcast / "in1";       // shape reference for broadcast
+        
+        // 3. Concatenate point features + global features
+        encoder - concat / "in0";                   // point-wise features [N, 1024]
+        broadcast - concat / "in1";                 // broadcasted global [N, 1024]
+        
+        // 4. Segmentation head: concat → segHead → output
+        concat - segHead - output(0);
     }
 
     Tensor& operator[](const std::string& name)
     {
-        if (name.starts_with("pointNet.")) return pointNet[name];
-        if (name.starts_with("maxpool.")) return maxpool[name];
-        if (name.starts_with("fc.")) return fc[name];
+        if (name.starts_with("encoder.")) 
+            return encoder[name.substr(8)];  // "encoder." 제거
+        if (name.starts_with("segHead.")) 
+            return segHead[name.substr(8)];  // "segHead." 제거
         throw std::runtime_error("Unknown parameter: " + name);
     }
 };
 
-Tensor eval(const std::vector<float>& srcImage, const JsonParser& json, uint32_t iter) // srcImage layout: [H][W][C]
-{
-    PointNetSegment PointNetSegment(netGlobalDevice, 10);
 
-    pointNetNet["tnet1.weight"] = Tensor(json["layer1.0.weight"]).reshape(32, 1*3*3).permute(1, 0);
-    pointNetNet["tnet1.bias"] = Tensor(json["layer1.0.bias"]);
-    pointNetNet["mlp1.weight"] = Tensor(json["layer2.0.weight"]).reshape(64, 32*3*3).permute(1, 0);
-    pointNetNet["mlp1.bias"] = Tensor(json["layer2.0.bias"]);
-    pointNetNet["tnet2.weight"] = Tensor(json["layer3.0.weight"]).reshape(64, 64*3*3).permute(1, 0);
-    pointNetNet["tnet2.bias"] = Tensor(json["layer3.0.bias"]);
-    pointNetNet["mlp2.weight"] = Tensor(json["layer4.0.weight"]).reshape(128, 64*3*3).permute(1, 0);
-    pointNetNet["mlp2.bias"] = Tensor(json["layer4.0.bias"]);
-    pointNetNet["fc.weight"] = Tensor(json["fc.weight"]).reshape(10, 128, 7*7).permute(2, 1, 0).reshape(7*7*128, 10);
-    pointNetNet["fc.bias"] = Tensor(json["fc.bias"]);
-    
-    Tensor result;
-    Tensor inputTensor = Tensor(28, 28, 1).set(srcImage);
+} // namespace networks
 
-    for (uint32_t i = 0; i < iter; ++i)
-        result = pointNetNet(inputTensor)[0];
+#endif // POINTNET_HPP
 
-    return result;
-}
-
-void test()
-{
-    void loadShaders();
-    loadShaders();
-
-    // const uint32_t channels = 1;
-    // std::vector<float> inputData(28*28*channels);
-    // for (size_t i = 0; i < inputData.size(); ++i)
-    //     inputData[i] = 0.0f;
-
-    // JsonParser json = JsonParser(PROJECT_CURRENT_DIR"/weights.json");
-
-    // uint32_t iter = 1;  
-    // Tensor eval;
-
-    // {
-    //     TimeChecker timer("(VAI) MNIST evaluation: {} iterations", iter);
-    //     eval = eval_mnist(inputData, json, iter);
-    // }
-
-    // vk::Buffer outBuffer = netGlobalDevice.createBuffer({
-    //     10 * sizeof(float),
-    //     VK_BUFFER_USAGE_TRANSFER_DST_BIT, 
-    //     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-    // });
-
-    // vk::Buffer evalBuffer = eval.buffer();
-    // netGlobalDevice.newCommandBuffer(queue_compute)
-    //     .begin()
-    //     .copyBuffer(outBuffer, evalBuffer)
-    //     .end()
-    //     .submit()
-    //     .wait();
-
-    // float data[10];
-    // memcpy(data, outBuffer.map(), 10 * sizeof(float));
-
-    // for(int i=0; i<10; ++i)
-    //     printf("data[%d] = %f\n", i, data[i]);
-}
