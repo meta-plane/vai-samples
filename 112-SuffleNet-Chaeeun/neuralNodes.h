@@ -157,6 +157,18 @@ public:
     void run(CommandBuffer cmdBuff) override;
 };
 
+// SplitNode: fan-out one input tensor to two identical outputs
+class SplitNode : public Node
+{
+    ComputePipeline dup2; // copy to two outputs
+    DescriptorSet dup2DescSet;
+
+public:
+    SplitNode();
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
 extern Device netGlobalDevice; // Global device for neural network operations
 
 #endif // NEURAL_NODES_H

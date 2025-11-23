@@ -765,7 +765,26 @@ static const char* src_concat = R"(
         }
     }
 )";
+
+static const char* src_copy2 = R"(
+    #version 450
+    layout(local_size_x = 64) in;
+    layout(set = 0, binding = 0) buffer Out0 { float out0[]; };
+    layout(set = 0, binding = 1) buffer Out1 { float out1[]; };
+    layout(set = 0, binding = 2) readonly buffer In0 { float in0[]; };
+    layout(push_constant) uniform PushConstants {
+        int N; // total elements
+    };
     
+    void main()
+    {
+        int i = int(gl_GlobalInvocationID.x);
+        if (i >= N) return;
+        float v = in0[i];
+        out0[i] = v;
+        out1[i] = v;
+    }
+)";
 
 Device netGlobalDevice = VulkanApp::get().device();
 
@@ -1434,6 +1453,58 @@ void ConcatNode::run(CommandBuffer cmdBuff)
         .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["out0"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// SplitNode (duplicate input to two outputs)
+/////////////////////////////////////////////////////////////////////////////////////////
+SplitNode::SplitNode()
+{
+    addSlot("in0",  NodeSlot::input);
+    addSlot("out0", NodeSlot::output);
+    addSlot("out1", NodeSlot::output);
+
+    dup2 = requestPipeline(src_copy2);
+    dup2DescSet = dup2.descSetLayout(0).newDescSet(gDestSetPool);
+}
+
+void SplitNode::prepare()
+{
+    _ASSERT((*this)["in0"].validShape());
+    const auto& s = (*this)["in0"].shape();
+    if (s.size() == 3)
+        (*this)["out0"] = Tensor(s[0], s[1], s[2]);
+    else
+        (*this)["out0"] = Tensor(s);
+    (*this)["out1"] = (*this)["out0"]; // same shape
+}
+
+void SplitNode::run(CommandBuffer cmdBuff)
+{
+    const auto& s = (*this)["in0"].shape();
+    int N = 1; for (auto d : s) N *= int(d);
+
+    dup2DescSet.write({
+        (*this)["out0"].buffer(),
+        (*this)["out1"].buffer(),
+        (*this)["in0"].buffer(),
+    });
+
+    cmdBuff
+        .bindPipeline(dup2)
+        .bindDescSets({dup2DescSet})
+        .setPushConstants(0, sizeof(N), &N)
+        .dispatch(N)
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["out0"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        )
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["out1"].buffer()
             / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
         );
 }
