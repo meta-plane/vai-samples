@@ -1,0 +1,143 @@
+#ifndef NEURAL_NODES_H
+#define NEURAL_NODES_H
+
+
+#include "neuralNet.h"
+#include "vulkanApp.h"
+
+
+class ConvolutionNode : public Node
+{
+    uint32_t C, F, K;   // C: input channels, F: output channels, K: kernel width
+
+    ComputePipeline im2col;
+    ComputePipeline gemm;
+    DescriptorSet im2colDescSet;
+    DescriptorSet gemmDescSet;
+    uint32_t gemmTileSize;
+
+public:
+    ConvolutionNode(uint32_t inChannels, uint32_t outChannels, uint32_t kernelWidth);
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+
+class PointWiseMLPNode : public Node
+{
+    uint32_t Cin, Cout;
+
+    ComputePipeline gemm;
+    DescriptorSet gemmDesc;
+
+public:
+    PointWiseMLPNode(uint32_t inDim, uint32_t outDim);
+
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+
+class ReluNode : public Node
+{
+    ComputePipeline relu;
+    DescriptorSet reluDescSet;
+
+public:
+    ReluNode();
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+class MaxPooling1DNode : public Node
+{
+
+    uint32_t C;
+
+    ComputePipeline maxpool;
+    DescriptorSet desc;
+
+public:
+    MaxPooling1DNode();
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+
+class MaxPoolingNode : public Node
+{
+    const bool discardTail = true; // If true, discard the tail elements that don't fit into the pooling window
+    uint32_t P;
+
+    ComputePipeline maxpool;
+    DescriptorSet maxpoolDescSet;
+
+public:
+    MaxPoolingNode(uint32_t poolSize);
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+
+class FlattenNode : public Node
+{
+    ComputePipeline copy;
+    DescriptorSet copyDescSet;
+
+public:
+    FlattenNode();
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+
+class FullyConnectedNode : public Node
+{
+    uint32_t I, O; // I: input size, O: output size
+    ComputePipeline gemm;
+    DescriptorSet gemmDescSet;
+    uint32_t gemmTileSize;
+
+    ComputePipeline setZero;
+    DescriptorSet setZeroDescSet;
+
+public:
+    FullyConnectedNode(uint32_t inDim, uint32_t outDim);
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+
+// BroadcastNode: [1, C] → [N, C]
+// Broadcasts a global feature vector to all points
+class BroadcastNode : public Node
+{
+    ComputePipeline broadcast;
+    DescriptorSet broadcastDescSet;
+
+public:
+    BroadcastNode();
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+
+// ConcatNode: [N, C1] + [N, C2] → [N, C1+C2]
+// Concatenates two tensors along the channel dimension
+class ConcatNode : public Node
+{
+    ComputePipeline concat;
+    DescriptorSet concatDescSet;
+
+public:
+    ConcatNode();
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+
+extern Device netGlobalDevice; // Global device for neural network operations
+
+
+
+#endif // NEURAL_NODES_H

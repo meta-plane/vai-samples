@@ -314,6 +314,82 @@ void FeedForwardNode::prepare()
     (*this)["out0"] = Tensor(B, S, D);
 }
 
+// ==================== FeedForwardNode Helper Functions ====================
+
+void FeedForwardNode::runLinear1(CommandBuffer& cmdBuff, const Tensor& input, Tensor& hidden,
+                                   const Tensor& weight1, const Tensor& bias1,
+                                   uint32_t B, uint32_t S, uint32_t D, uint32_t H)
+{
+    linear1DescSet.write({
+        hidden.buffer(),
+        input.buffer(),
+        weight1.buffer(),
+        bias1.buffer()
+    });
+
+    int constants[] = {(int)B, (int)S, (int)D, (int)H};
+
+    cmdBuff
+        .bindPipeline(linear1Pipeline)
+        .setPushConstants(0, sizeof(constants), constants)
+        .bindDescSets({linear1DescSet})
+        .dispatch0(CEIL_DIV(B*S, 16), CEIL_DIV(H, 16))
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / hidden.buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
+
+void FeedForwardNode::runGELU(CommandBuffer& cmdBuff, const Tensor& hidden, Tensor& gelu_out,
+                               uint32_t B, uint32_t S, uint32_t H)
+{
+    geluDescSet.write({
+        gelu_out.buffer(),
+        hidden.buffer()
+    });
+
+    int constants[] = {(int)(B * S * H)};
+
+    cmdBuff
+        .bindPipeline(geluPipeline)
+        .setPushConstants(0, sizeof(constants), constants)
+        .bindDescSets({geluDescSet})
+        .dispatch0(CEIL_DIV(B * S * H, 256))
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / gelu_out.buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
+
+void FeedForwardNode::runLinear2(CommandBuffer& cmdBuff, const Tensor& gelu_out, Tensor& output,
+                                   const Tensor& weight2, const Tensor& bias2,
+                                   uint32_t B, uint32_t S, uint32_t H, uint32_t D)
+{
+    linear2DescSet.write({
+        output.buffer(),
+        gelu_out.buffer(),
+        weight2.buffer(),
+        bias2.buffer()
+    });
+
+    int constants[] = {(int)B, (int)S, (int)H, (int)D};
+
+    cmdBuff
+        .bindPipeline(linear2Pipeline)
+        .setPushConstants(0, sizeof(constants), constants)
+        .bindDescSets({linear2DescSet})
+        .dispatch0(CEIL_DIV(B*S, 16), CEIL_DIV(D, 16))
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / output.buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
+
+// ==================== FeedForwardNode Main Run ====================
+
 void FeedForwardNode::run(CommandBuffer cmdBuff)
 {
     Tensor& input = (*this)["in0"];
@@ -330,79 +406,16 @@ void FeedForwardNode::run(CommandBuffer cmdBuff)
 
     // Allocate temporary buffers
     BufferPool& pool = BufferPool::get();
-
     Tensor hidden(B, S, H);
     hidden.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*S*H*sizeof(float)));
 
     Tensor gelu_out(B, S, H);
     gelu_out.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*S*H*sizeof(float)));
 
-    // Step 1: Linear1 (d_model -> 4*d_model)
-    {
-        linear1DescSet.write({
-            hidden.buffer(),
-            input.buffer(),
-            weight1.buffer(),
-            bias1.buffer()
-        });
-
-        int constants[] = {(int)B, (int)S, (int)D, (int)H};
-
-        cmdBuff
-            .bindPipeline(linear1Pipeline)
-            .setPushConstants(0, sizeof(constants), constants)
-            .bindDescSets({linear1DescSet})
-            .dispatch0(CEIL_DIV(B*S, 16), CEIL_DIV(H, 16))
-            .barrier(
-                (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
-                / hidden.buffer()
-                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
-            );
-    }
-
-    // Step 2: GELU activation
-    {
-        geluDescSet.write({
-            gelu_out.buffer(),
-            hidden.buffer()
-        });
-
-        int constants[] = {(int)(B * S * H)};
-
-        cmdBuff
-            .bindPipeline(geluPipeline)
-            .setPushConstants(0, sizeof(constants), constants)
-            .bindDescSets({geluDescSet})
-            .dispatch0(CEIL_DIV(B * S * H, 256))
-            .barrier(
-                (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
-                / gelu_out.buffer()
-                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
-            );
-    }
-
-    // Step 3: Linear2 (4*d_model -> d_model)
-    {
-        linear2DescSet.write({
-            output.buffer(),
-            gelu_out.buffer(),
-            weight2.buffer(),
-            bias2.buffer()
-        });
-
-        int constants[] = {(int)B, (int)S, (int)H, (int)D};
-
-        cmdBuff
-            .bindPipeline(linear2Pipeline)
-            .setPushConstants(0, sizeof(constants), constants)
-            .bindDescSets({linear2DescSet})
-            .dispatch0(CEIL_DIV(B*S, 16), CEIL_DIV(D, 16))
-            .barrier(
-                (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
-                / output.buffer()
-                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
-            );
-    }
+    // Execute feedforward pipeline
+    runLinear1(cmdBuff, input, hidden, weight1, bias1, B, S, D, H);
+    runGELU(cmdBuff, hidden, gelu_out, B, S, H);
+    runLinear2(cmdBuff, gelu_out, output, weight2, bias2, B, S, H, D);
 }
 
 // ============================================================================

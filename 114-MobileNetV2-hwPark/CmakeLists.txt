@@ -9,6 +9,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 get_filename_component(REPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/.. ABSOLUTE)
 
+find_package(Vulkan REQUIRED)
+
 if(NOT TARGET nlohmann_json::nlohmann_json)
     if(EXISTS ${REPO_ROOT}/external/json/CMakeLists.txt)
         add_subdirectory(${REPO_ROOT}/external/json ${CMAKE_BINARY_DIR}/external/json)
@@ -24,14 +26,15 @@ endif()
 
 add_executable(${PROJECT_NAME}
     main.cpp
-    core/vulkan_app.cpp
-    core/tensor.cpp
-    core/neural_net.cpp
+    core/vulkanApp.cpp
     nodes/base_node.cpp
+    nodes/neural_nodes.cpp
     model/mobilenet_v2.cpp
     dataloader/image_loader.cpp
-    utils/json_parser.cpp
+    utils/jsonParser.cpp
+    utils/spirvHelpers.cpp
 )
+
 
 add_definitions(
     -DPROJECT_CURRENT_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
@@ -40,7 +43,7 @@ add_definitions(
 target_link_libraries(${PROJECT_NAME} PRIVATE
     glfw
     spirv-reflect-static
-    ${Vulkan_LIBRARIES}
+    Vulkan::Vulkan
     glslang
     glslang-default-resource-limits
     nlohmann_json::nlohmann_json
@@ -48,5 +51,4 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 
 target_include_directories(${PROJECT_NAME} PRIVATE 
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${Vulkan_INCLUDE_DIRS}
 )

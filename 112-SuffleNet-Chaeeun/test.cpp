@@ -28,27 +28,6 @@ auto readImage(const char* filename)
     return std::make_tuple(srcImage, (uint32_t)w, (uint32_t)h);
 }
 
-// TODO: weight initialization
-Tensor eval_shufflenet(const std::vector<float>& srcImage, const JsonParser& json, uint32_t iter) // srcImage layout: [H][W][C]
-{
-    SuffleNet suffleNet(netGlobalDevice);
-
-    suffleNet["conv0.weight"] = Tensor(json["layer1.0.weight"]).reshape(32, 1*3*3).permute(1, 0);
-    suffleNet["conv0.bias"] = Tensor(json["layer1.0.bias"]);
-    suffleNet["conv1.weight"] = Tensor(json["layer2.0.weight"]).reshape(64, 32*3*3).permute(1, 0);
-    suffleNet["conv1.bias"] = Tensor(json["layer2.0.bias"]);
-    suffleNet["weight"] = Tensor(json["fc.weight"]).reshape(10, 64, 7*7).permute(2, 1, 0).reshape(7*7*64, 10);
-    suffleNet["bias"] = Tensor(json["fc.bias"]);
-    
-    Tensor result;
-    Tensor inputTensor = Tensor(28, 28, 1).set(srcImage);
-
-    for (uint32_t i = 0; i < iter; ++i)
-        result = suffleNet(inputTensor)[0];
-
-    return result;
-}
-
 void eval_adaptive_avgpool()
 {
     void loadShaders();
@@ -345,47 +324,276 @@ void eval_batchnorm2d()
     }
 }
 
+void eval_channel_shuffle_concat()
+{
+    void loadShaders();
+    loadShaders();
+
+    const uint32_t H = 3, W = 3, C = 4; // 3x3x4 input
+
+    // Build input (HWC) with a simple increasing pattern
+    std::vector<float> input(H * W * C);
+    for (uint32_t h = 0; h < H; ++h)
+        for (uint32_t w = 0; w < W; ++w)
+            for (uint32_t c = 0; c < C; ++c)
+                input[(h * W + w) * C + c] = float((h * W + w) * C + c);
+
+    NeuralNet net(netGlobalDevice, 1, 1);
+    ChannelShuffleNode cs(C);
+    ConcatNode concat;
+
+    // input -> channel shuffle -> concat -> output
+    net.input(0) - ("in0" / cs);
+    (cs / "out_even") - ("in0" / concat);
+    (cs / "out_odd")  - ("in1" / concat);
+    concat - net.output(0);
+
+    auto outputs = net(Tensor(H, W, C).set(input));
+    Tensor out = outputs[0];
+
+    // Read back output
+    uint32_t count = H * W * C;
+    vk::Buffer outBuf = netGlobalDevice.createBuffer({
+        count * sizeof(float),
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    });
+
+    netGlobalDevice.newCommandBuffer(queue_compute)
+        .begin()
+        .copyBuffer(outBuf, out.buffer())
+        .end()
+        .submit()
+        .wait();
+
+    std::vector<float> host(count);
+    memcpy(host.data(), outBuf.map(), count * sizeof(float));
+
+    printf("ChannelShuffle + Concat test (H=%u,W=%u,C=%u):\n", H, W, C);
+    printf("Input vs Reconstructed Output:\n");
+    for (uint32_t h = 0; h < H; ++h) {
+        for (uint32_t w = 0; w < W; ++w) {
+            printf("  (h=%u,w=%u): ", h, w);
+            for (uint32_t c = 0; c < C; ++c) {
+                uint32_t idx = (h * W + w) * C + c;
+                printf("[%5.1f -> %5.1f] ", input[idx], host[idx]);
+            }
+            printf("\n");
+        }
+    }
+}
+
+static void load_shufflenet_weights(SuffleNetV2& net, const JsonParser& json, const std::vector<int>& architecture)
+{
+    auto set = [&](const std::string& key, const JsonParserRef& ref) {
+        try { net[key] = Tensor(ref); } catch (...) {}
+    };
+
+    // Stem
+    try {
+        auto stem = json["stem"];
+        set("stem.conv.weight", stem["conv.weight"]);
+        set("stem.conv.bias",   stem["conv.bias"]);
+        set("stem.bn.gamma",    stem["bn.gamma"]);
+        set("stem.bn.beta",     stem["bn.beta"]);
+        set("stem.bn.running_mean", stem["bn.running_mean"]);
+        set("stem.bn.running_var",  stem["bn.running_var"]);
+    } catch (...) {}
+
+    // Features
+    auto feats = json["features"];
+    auto is_stride2 = [&](size_t idx){ return idx==0 || idx==4 || idx==8 || idx==16; };
+
+    for (size_t i = 0; i < architecture.size(); ++i)
+    {
+        auto bj = feats[static_cast<uint32_t>(i)];
+        char idxs[32]; sprintf(idxs, "%zu", i);
+        std::string base = std::string("features.") + idxs + ".";
+        bool stride2 = is_stride2(i);
+        if (architecture[i] == 3) // Xception
+        {
+            set(base+"dw1.weight", bj["dw1.weight"]);
+            set(base+"dw1.bias",   bj["dw1.bias"]);
+            set(base+"bn1.gamma",  bj["bn1.gamma"]);
+            set(base+"bn1.beta",   bj["bn1.beta"]);
+            set(base+"bn1.running_mean", bj["bn1.running_mean"]);
+            set(base+"bn1.running_var",  bj["bn1.running_var"]);
+
+            set(base+"pw1.weight", bj["pw1.weight"]);
+            set(base+"pw1.bias",   bj["pw1.bias"]);
+            set(base+"bn1p.gamma", bj["bn1p.gamma"]);
+            set(base+"bn1p.beta",  bj["bn1p.beta"]);
+            set(base+"bn1p.running_mean", bj["bn1p.running_mean"]);
+            set(base+"bn1p.running_var",  bj["bn1p.running_var"]);
+
+            set(base+"dw2.weight", bj["dw2.weight"]);
+            set(base+"dw2.bias",   bj["dw2.bias"]);
+            set(base+"bn2.gamma",  bj["bn2.gamma"]);
+            set(base+"bn2.beta",   bj["bn2.beta"]);
+            set(base+"bn2.running_mean", bj["bn2.running_mean"]);
+            set(base+"bn2.running_var",  bj["bn2.running_var"]);
+
+            set(base+"pw2.weight", bj["pw2.weight"]);
+            set(base+"pw2.bias",   bj["pw2.bias"]);
+            set(base+"bn2p.gamma", bj["bn2p.gamma"]);
+            set(base+"bn2p.beta",  bj["bn2p.beta"]);
+            set(base+"bn2p.running_mean", bj["bn2p.running_mean"]);
+            set(base+"bn2p.running_var",  bj["bn2p.running_var"]);
+
+            set(base+"dw3.weight", bj["dw3.weight"]);
+            set(base+"dw3.bias",   bj["dw3.bias"]);
+            set(base+"bn3.gamma",  bj["bn3.gamma"]);
+            set(base+"bn3.beta",   bj["bn3.beta"]);
+            set(base+"bn3.running_mean", bj["bn3.running_mean"]);
+            set(base+"bn3.running_var",  bj["bn3.running_var"]);
+
+            set(base+"pw3.weight", bj["pw3.weight"]);
+            set(base+"pw3.bias",   bj["pw3.bias"]);
+            set(base+"bn3p.gamma", bj["bn3p.gamma"]);
+            set(base+"bn3p.beta",  bj["bn3p.beta"]);
+            set(base+"bn3p.running_mean", bj["bn3p.running_mean"]);
+            set(base+"bn3p.running_var",  bj["bn3p.running_var"]);
+
+            if (stride2)
+            {
+                set(base+"proj.dw.weight", bj["proj.dw.weight"]);
+                set(base+"proj.dw.bias",   bj["proj.dw.bias"]);
+                set(base+"proj.bn1.gamma", bj["proj.bn1.gamma"]);
+                set(base+"proj.bn1.beta",  bj["proj.bn1.beta"]);
+                set(base+"proj.bn1.running_mean", bj["proj.bn1.running_mean"]);
+                set(base+"proj.bn1.running_var",  bj["proj.bn1.running_var"]);
+                set(base+"proj.pw.weight", bj["proj.pw.weight"]);
+                set(base+"proj.pw.bias",   bj["proj.pw.bias"]);
+                set(base+"proj.bn2.gamma", bj["proj.bn2.gamma"]);
+                set(base+"proj.bn2.beta",  bj["proj.bn2.beta"]);
+                set(base+"proj.bn2.running_mean", bj["proj.bn2.running_mean"]);
+                set(base+"proj.bn2.running_var",  bj["proj.bn2.running_var"]);
+            }
+        }
+        else // ShuffleUnit
+        {
+            set(base+"pw1.weight", bj["pw1.weight"]);
+            set(base+"pw1.bias",   bj["pw1.bias"]);
+            set(base+"bn1.gamma",  bj["bn1.gamma"]);
+            set(base+"bn1.beta",   bj["bn1.beta"]);
+            set(base+"bn1.running_mean", bj["bn1.running_mean"]);
+            set(base+"bn1.running_var",  bj["bn1.running_var"]);
+
+            set(base+"dw.weight", bj["dw.weight"]);
+            set(base+"dw.bias",   bj["dw.bias"]);
+            set(base+"bn2.gamma", bj["bn2.gamma"]);
+            set(base+"bn2.beta",  bj["bn2.beta"]);
+            set(base+"bn2.running_mean", bj["bn2.running_mean"]);
+            set(base+"bn2.running_var",  bj["bn2.running_var"]);
+
+            set(base+"pw2.weight", bj["pw2.weight"]);
+            set(base+"pw2.bias",   bj["pw2.bias"]);
+            set(base+"bn3.gamma",  bj["bn3.gamma"]);
+            set(base+"bn3.beta",   bj["bn3.beta"]);
+            set(base+"bn3.running_mean", bj["bn3.running_mean"]);
+            set(base+"bn3.running_var",  bj["bn3.running_var"]);
+
+            if (stride2)
+            {
+                set(base+"proj.dw.weight", bj["proj.dw.weight"]);
+                set(base+"proj.dw.bias",   bj["proj.dw.bias"]);
+                set(base+"proj.bn1.gamma", bj["proj.bn1.gamma"]);
+                set(base+"proj.bn1.beta",  bj["proj.bn1.beta"]);
+                set(base+"proj.bn1.running_mean", bj["proj.bn1.running_mean"]);
+                set(base+"proj.bn1.running_var",  bj["proj.bn1.running_var"]);
+                set(base+"proj.pw.weight", bj["proj.pw.weight"]);
+                set(base+"proj.pw.bias",   bj["proj.pw.bias"]);
+                set(base+"proj.bn2.gamma", bj["proj.bn2.gamma"]);
+                set(base+"proj.bn2.beta",  bj["proj.bn2.beta"]);
+                set(base+"proj.bn2.running_mean", bj["proj.bn2.running_mean"]);
+                set(base+"proj.bn2.running_var",  bj["proj.bn2.running_var"]);
+            }
+
+            // optional SE
+            try {
+                auto se = bj["se"];
+                set(base+"se.conv1.weight", se["conv1.weight"]);
+                set(base+"se.conv1.bias",   se["conv1.bias"]);
+                set(base+"se.bn.gamma",     se["bn.gamma"]);
+                set(base+"se.bn.beta",      se["bn.beta"]);
+                set(base+"se.bn.running_mean", se["bn.running_mean"]);
+                set(base+"se.bn.running_var",  se["bn.running_var"]);
+                set(base+"se.conv2.weight", se["conv2.weight"]);
+                set(base+"se.conv2.bias",   se["conv2.bias"]);
+            } catch (...) {}
+        }
+    }
+
+    // Tail
+    try {
+        auto last = json["last"];
+        set("last.conv.weight", last["conv.weight"]);
+        set("last.conv.bias",   last["conv.bias"]);
+        set("last.bn.gamma",    last["bn.gamma"]);
+        set("last.bn.beta",     last["bn.beta"]);
+        set("last.bn.running_mean", last["bn.running_mean"]);
+        set("last.bn.running_var",  last["bn.running_var"]);
+    } catch (...) {}
+
+    // Last SE (optional)
+    try {
+        auto se = json["lastSE"];
+        set("lastSE.conv1.weight", se["conv1.weight"]);
+        set("lastSE.conv1.bias",   se["conv1.bias"]);
+        set("lastSE.bn.gamma",     se["bn.gamma"]);
+        set("lastSE.bn.beta",      se["bn.beta"]);
+        set("lastSE.bn.running_mean", se["bn.running_mean"]);
+        set("lastSE.bn.running_var",  se["bn.running_var"]);
+        set("lastSE.conv2.weight", se["conv2.weight"]);
+        set("lastSE.conv2.bias",   se["conv2.bias"]);
+    } catch (...) {}
+
+    // FCs
+    try { auto fc = json["fc1"]; set("fc1.weight", fc["weight"]); set("fc1.bias", fc["bias"]); } catch (...) {}
+    try { auto clf = json["classifier"]; set("classifier.weight", clf["weight"]); set("classifier.bias", clf["bias"]); } catch (...) {}
+}
+
 void Run()
 {
     void loadShaders();
     loadShaders();
 
-    const uint32_t channels = 1;
-    auto [srcImage, width, height] = readImage<channels>(PROJECT_CURRENT_DIR"/data/0.png");
-    _ASSERT(width == 28 && height == 28);
-    _ASSERT(width * height * channels == srcImage.size());
-
-    std::vector<float> inputData(width * height * channels);
-    for (size_t i = 0; i < srcImage.size(); ++i)
-        inputData[i] = srcImage[i] / 255.0f;
-
+    // 1) Load exported weights
     JsonParser json = JsonParser(PROJECT_CURRENT_DIR"/weights.json");
+    printf("load weight\n");
 
-    uint32_t iter = 1;
-    Tensor eval;
+    // 2) Build ShuffleNetV2+ (Small) architecture to match exporter
+    std::vector<int> architecture = {0, 0, 3, 1, 1, 1, 0, 0, 2, 0, 2, 1, 1, 0, 2, 0, 2, 1, 3, 2};
+    SuffleNetV2 net(netGlobalDevice, architecture, 1000);
+    printf("set model\n");
+    load_shufflenet_weights(net, json, architecture);
 
-    {
-        TimeChecker timer("(VAI) SuffleNet evaluation: {} iterations", iter);
-        eval = eval_shufflenet(inputData, json, iter);
-    }
+    printf("load model\n");
 
+    // 3) Prepare a dummy RGB input (224x224x3). Replace with image if desired.
+    const uint32_t H = 224, W = 224, C = 3;
+    std::vector<float> input(H * W * C, 0.5f);
+
+    // 4) Run inference
+    Tensor logits = net(Tensor(H, W, C).set(input))[0];
+
+    // 5) Read back and print first 10 outputs
+    const uint32_t outN = 10; // print top-10 indices raw (not sorted)
     vk::Buffer outBuffer = netGlobalDevice.createBuffer({
-        10 * sizeof(float),
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT, 
+        outN * sizeof(float),
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
     });
 
-    vk::Buffer evalBuffer = eval.buffer();
     netGlobalDevice.newCommandBuffer(queue_compute)
         .begin()
-        .copyBuffer(outBuffer, evalBuffer)
+        .copyBuffer(outBuffer, logits.buffer())
         .end()
         .submit()
         .wait();
 
-    float data[10];
-    memcpy(data, outBuffer.map(), 10 * sizeof(float));
-
-    for(int i=0; i<10; ++i)
-        printf("data[%d] = %f\n", i, data[i]);
+    float data[outN];
+    memcpy(data, outBuffer.map(), outN * sizeof(float));
+    for (uint32_t i = 0; i < outN; ++i)
+        printf("logits[%u] = %f\n", i, data[i]);
 }

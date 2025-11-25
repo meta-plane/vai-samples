@@ -15,8 +15,12 @@ class BufferPool
 {
     // vk::Device device;
     std::unordered_map<
-        VkBufferUsageFlags, 
+        VkBufferUsageFlags,
         std::multimap<size_t, std::pair<vk::Buffer, VkMemoryPropertyFlags>> > bufferPool;
+
+    // Maximum number of buffers to keep in pool per usage type
+    // Prevents unbounded memory growth during long sequence generation
+    static constexpr size_t MAX_POOL_SIZE_PER_USAGE = 50;
 
 public:
     static BufferPool& get()
@@ -58,10 +62,10 @@ public:
 
     void returnBuffer(vk::Buffer buffer)
     {
-        if (buffer) 
+        if (buffer)
         {
             bufferPool[buffer.usage()].emplace(
-                buffer.size(), 
+                buffer.size(),
                 std::make_pair(std::move(buffer), buffer.memoryProperties())
             );
         }

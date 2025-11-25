@@ -2,96 +2,47 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "CMake: Configure",
+            "label": "CMake Configure",
             "type": "shell",
             "command": "cmake",
             "args": [
                 "-S",
-                ".",
+                "${workspaceFolder}",
                 "-B",
-                "build"
+                "${workspaceFolder}/build"
             ],
-            "problemMatcher": [],
-            "group": {
-                "kind": "build",
-                "isDefault": false
-            },
-            "presentation": {
-                "reveal": "always",
-                "panel": "new"
-            }
+            "group": "build",
+            "problemMatcher": []
         },
         {
-            "label": "CMake: Build",
+            "label": "CMake Build",
             "type": "shell",
             "command": "cmake",
             "args": [
                 "--build",
-                "build"
-            ],
-            "problemMatcher": [
-                "$gcc"
+                "${workspaceFolder}/build"
             ],
             "group": {
                 "kind": "build",
                 "isDefault": true
             },
-            "presentation": {
-                "reveal": "always",
-                "panel": "new"
-            },
-            "dependsOn": "CMake: Configure"
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "dependsOn": "CMake Configure"
         },
         {
-            "label": "CMake: Clean",
+            "label": "CMake Clean",
             "type": "shell",
             "command": "cmake",
             "args": [
                 "--build",
-                "build",
+                "${workspaceFolder}/build",
                 "--target",
                 "clean"
             ],
-            "problemMatcher": [],
             "group": "build",
-            "presentation": {
-                "reveal": "always",
-                "panel": "new"
-            }
-        },
-        {
-            "label": "CMake: Rebuild",
-            "type": "shell",
-            "command": "rm",
-            "args": [
-                "-rf",
-                "build"
-            ],
-            "problemMatcher": [],
-            "group": "build",
-            "presentation": {
-                "reveal": "always",
-                "panel": "new"
-            },
-            "dependsOrder": "sequence",
-            "dependsOn": [
-                "CMake: Clean",
-                "CMake: Configure",
-                "CMake: Build"
-            ]
-        },
-        {
-            "label": "Run: Execute Program",
-            "type": "shell",
-            "command": "${workspaceFolder}/build/114-MobileNetV2-hwPark",
-            "problemMatcher": [],
-            "group": "test",
-            "presentation": {
-                "reveal": "always",
-                "panel": "new"
-            },
-            "dependsOn": "CMake: Build"
+            "problemMatcher": []
         }
     ]
 }
-

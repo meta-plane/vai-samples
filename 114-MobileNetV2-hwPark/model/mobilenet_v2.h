@@ -1,20 +1,18 @@
 #ifndef MOBILENET_MOBILENET_V2_H
 #define MOBILENET_MOBILENET_V2_H
 
-#include "core/neural_net.h"
+#include "core/neuralNet.h"
 
-namespace mobilenet {
-
+// TODO: Phase 7 - MobileNetV2 implementation
+// MobileNetV2 should inherit from NeuralNet and implement the architecture
 class MobileNetV2 : public NeuralNet {
 public:
-    MobileNetV2();
-    ~MobileNetV2() = default;
+    // TODO: Phase 7 - Implement constructor with Device parameter
+    // MobileNetV2(vk::Device& device) : NeuralNet(device) {}
     
     void initialize();
     void loadWeights(const std::string& weightsPath);
 };
-
-} // namespace mobilenet
 
 #endif // MOBILENET_MOBILENET_V2_H
 

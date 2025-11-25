@@ -1,6 +1,6 @@
 #include "transformer.h"
 #include "../attention/attentionNode.h"
-#include "../testHelpers.h"
+#include "../../test/testHelpers.h"
 #include "../../core/neuralNet.h"
 #include "../../core/globalContext.h"
 #include "../../core/error.h"

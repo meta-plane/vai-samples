@@ -1,20 +1,10 @@
 #ifndef MOBILENET_BASE_NODE_H
 #define MOBILENET_BASE_NODE_H
 
-#include "core/neural_net.h"
+#include "core/neuralNet.h"
 
-namespace mobilenet {
-
-class BaseNode : public Node {
-public:
-    BaseNode(const std::string& name);
-    virtual ~BaseNode() = default;
-    
-    virtual void prepare() {}
-    virtual void forward() {}
-};
-
-} // namespace mobilenet
+// BaseNode is not used in reference code - nodes inherit directly from Node
+// This file is kept for compatibility but BaseNode should implement prepare() and run()
 
 #endif // MOBILENET_BASE_NODE_H
 

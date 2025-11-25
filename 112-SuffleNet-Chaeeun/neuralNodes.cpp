@@ -110,6 +110,10 @@ layout(push_constant) uniform PushConstants {
     int W;
     int C;
     int K;
+    int stride;
+    int pad;
+    int outH;
+    int outW;
 };
 
 void main() 
@@ -118,20 +122,22 @@ void main()
     int j = int(gl_GlobalInvocationID.y); 
     int KK = K * K;
     int CKK = C * KK;
-    if (i >= H * W || j >= CKK) 
+    int HW_out = outH * outW;
+    if (i >= HW_out || j >= CKK) 
         return;
 
-    int h = i / W;          // image center row
-    int w = i % W;          // image center col
-    int c = j / KK;         // image channel
-    int K_2 = K / 2;
-    int k = j % KK;
+    int h_ = i / outW;      // output row
+    int w_ = i % outW;      // output col
+    int c = j / KK;         // channel
+    int k = j % KK;         // kernel index
+    int kh = k / K;
+    int kw = k % K;
 
     float value = 0.0;
-    h += k / K - K_2;  
-    w += k % K - K_2;   
+    int h = h_ * stride + kh - pad;
+    int w = w_ * stride + kw - pad;
     if (0 <= h && h < H && 0 <= w && w < W) 
-        value = in0[((h * W) + w) * C + c];
+        value = in0[(h * W + w) * C + c];
 
     im2colOut[i * CKK + j] = value;
 })";
@@ -677,7 +683,108 @@ static const char* src_batchnorm2d = R"(
         out0[idx] = gamma[c] * x_hat + beta[c];
     }
 )";
+
+static const char* src_channel_shuffle = R"(
+    #version 450
+    layout(local_size_x = 64) in;
+
+    // out_even: even-indexed channels  (0,2,4,...)
+    // out_odd : odd-indexed channels   (1,3,5,...)
+    layout(set = 0, binding = 0) writeonly buffer OutEven { float out_even[]; };
+    layout(set = 0, binding = 1) writeonly buffer OutOdd  { float out_odd[];  };
+    layout(set = 0, binding = 2) readonly  buffer InBuf   { float in0[];      };
+
+    layout(push_constant) uniform PushConstants {
+        int H;
+        int W;
+        int C;   // total channels, assumed even
+    };
+
+    void main()
+    {
+        int idx = int(gl_GlobalInvocationID.x);
+        int C2  = C / 2;
+        int total = H * W * C2;
+        if (idx >= total) return;
+
+        int hw = idx / C2;
+        int k  = idx % C2;
+        int h  = hw / W;
+        int w  = hw % W;
+
+        int base_in = (h * W + w) * C;
+        int c_even  = 2 * k;
+        int c_odd   = 2 * k + 1;
+
+        out_even[idx] = in0[base_in + c_even];
+        out_odd[idx]  = in0[base_in + c_odd];
+    }
+)";
+
+static const char* src_concat = R"(
+    #version 450
+    layout(local_size_x = 64) in;
+
+    // Concatenate along channel dimension:
+    // in0: (H, W, C0)
+    // in1: (H, W, C1)
+    // out0: (H, W, C0 + C1)
+    layout(set = 0, binding = 0) writeonly buffer OutBuffer { float out0[]; };
+    layout(set = 0, binding = 1) readonly  buffer InBuffer0 { float in0[];  };
+    layout(set = 0, binding = 2) readonly  buffer InBuffer1 { float in1[];  };
+
+    layout(push_constant) uniform PushConstants {
+        int H;
+        int W;
+        int C0;
+        int C1;
+    };
+
+    void main()
+    {
+        int idx = int(gl_GlobalInvocationID.x);
+        int C  = C0 + C1;
+        int total = H * W * C;
+        if (idx >= total) return;
+
+        int hw = idx / C;
+        int c  = idx % C;
+        int h  = hw / W;
+        int w  = hw % W;
+
+        if (c < C0)
+        {
+            int base0 = (h * W + w) * C0;
+            out0[idx] = in0[base0 + c];
+        }
+        else
+        {
+            int c1 = c - C0;
+            int base1 = (h * W + w) * C1;
+            out0[idx] = in1[base1 + c1];
+        }
+    }
+)";
+
+static const char* src_copy2 = R"(
+    #version 450
+    layout(local_size_x = 64) in;
+    layout(set = 0, binding = 0) buffer Out0 { float out0[]; };
+    layout(set = 0, binding = 1) buffer Out1 { float out1[]; };
+    layout(set = 0, binding = 2) readonly buffer In0 { float in0[]; };
+    layout(push_constant) uniform PushConstants {
+        int N; // total elements
+    };
     
+    void main()
+    {
+        int i = int(gl_GlobalInvocationID.x);
+        if (i >= N) return;
+        float v = in0[i];
+        out0[i] = v;
+        out1[i] = v;
+    }
+)";
 
 Device netGlobalDevice = VulkanApp::get().device();
 
@@ -719,6 +826,8 @@ void loadShaders()
     requestPipeline(src_gemm_multiOut1d);
     requestPipeline(src_gemm_multiOut2d);
     requestPipeline(src_batchnorm2d);
+    requestPipeline(src_channel_shuffle);
+    requestPipeline(src_concat);
 
     // TODO: impelement shaders
     // requestPipeline(src_adaptiveavgpool);
@@ -729,10 +838,13 @@ void loadShaders()
 /////////////////////////////////////////////////////////////////////////////////////////
 // ConvolutionNode
 /////////////////////////////////////////////////////////////////////////////////////////
-ConvolutionNode::ConvolutionNode(uint32_t inChannels, uint32_t outChannels, uint32_t kernelWidth)
-:  C(inChannels), F(outChannels), K(kernelWidth)
+ConvolutionNode::ConvolutionNode(uint32_t inChannels, uint32_t outChannels, uint32_t kernelWidth, uint32_t stride_, int32_t padding_)
+:  C(inChannels)
+,  F(outChannels)
+,  K(kernelWidth)
+,  stride(stride_)
+,  padding(padding_ >= 0 ? padding_ : 0)
 {
-    _ASSERT(K % 2 == 1);
     addSlot("in0", NodeSlot::input);
     addSlot("out0", NodeSlot::output);
     addSlot("im2colOut", NodeSlot::internal);
@@ -756,14 +868,31 @@ void ConvolutionNode::prepare()
     _ASSERT((*this)["bias"].isShapeOf(F));
 
     const auto& inShape = (*this)["in0"].shape();
-    (*this)["im2colOut"] = Tensor(inShape[0], inShape[1], C*K*K);
-    (*this)["out0"] = Tensor(inShape[0], inShape[1], F);
+    int32_t H = static_cast<int32_t>(inShape[0]);
+    int32_t W = static_cast<int32_t>(inShape[1]);
+    int32_t numeratorH = H + 2 * padding - static_cast<int32_t>(K);
+    int32_t numeratorW = W + 2 * padding - static_cast<int32_t>(K);
+    int32_t outH = numeratorH / static_cast<int32_t>(stride) + 1;
+    int32_t outW = numeratorW / static_cast<int32_t>(stride) + 1;
+
+    uint32_t outH_u = static_cast<uint32_t>(outH);
+    uint32_t outW_u = static_cast<uint32_t>(outW);
+
+    (*this)["im2colOut"] = Tensor(outH_u, outW_u, C*K*K);
+    (*this)["out0"] = Tensor(outH_u, outW_u, F);
 }
 
 void ConvolutionNode::run(CommandBuffer cmdBuff)
 {
     const auto& inShape = (*this)["in0"].shape();
     uint32_t H = inShape[0], W = inShape[1];
+    int32_t numeratorH = static_cast<int32_t>(H) + 2 * padding - static_cast<int32_t>(K);
+    int32_t numeratorW = static_cast<int32_t>(W) + 2 * padding - static_cast<int32_t>(K);
+    int32_t outH = numeratorH / static_cast<int32_t>(stride) + 1;
+    int32_t outW = numeratorW / static_cast<int32_t>(stride) + 1;
+    uint32_t outH_u = static_cast<uint32_t>(outH);
+    uint32_t outW_u = static_cast<uint32_t>(outW);
+    uint32_t HW_out = outH_u * outW_u;
 
     im2colDescSet.write({
         (*this)["im2colOut"].buffer(),
@@ -777,10 +906,14 @@ void ConvolutionNode::run(CommandBuffer cmdBuff)
         (*this)["bias"].buffer(),
     });
 
-    uint32_t im2colConstants[] = {H, W, C, K};
-    // uint32_t gemmConstants[] = {H * W, C * K * K, F};
+    int32_t im2colConstants[] = {
+        static_cast<int32_t>(H), static_cast<int32_t>(W),
+        static_cast<int32_t>(C), static_cast<int32_t>(K),
+        static_cast<int32_t>(stride), padding,
+        static_cast<int32_t>(outH_u), static_cast<int32_t>(outW_u)
+    };
 
-    uint32_t M = H * W;         // N
+    uint32_t M = HW_out;        // N
     uint32_t K_ = C * K * K;    // I
     uint32_t N = F;             // O
     uint32_t gemmConstants[] = {M, K_, N};
@@ -789,7 +922,7 @@ void ConvolutionNode::run(CommandBuffer cmdBuff)
         .bindPipeline(im2col)
         .bindDescSets({im2colDescSet})
         .setPushConstants(0, sizeof(im2colConstants), im2colConstants)
-        .dispatch(H * W, C * K * K)
+        .dispatch(CEIL_DIV(HW_out, 64), CEIL_DIV(K_, 16))
         .barrier( 
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["im2colOut"].buffer()
@@ -1202,9 +1335,176 @@ void MultiplyNode::run(CommandBuffer cmdBuff)
         .bindDescSets({multiplyDescSet})
         .setPushConstants(0, sizeof(constants), constants)
         .dispatch(H * W * C)
+        .barrier( 
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["out0"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}  
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// ChannelShuffleNode
+/////////////////////////////////////////////////////////////////////////////////////////
+ChannelShuffleNode::ChannelShuffleNode(uint32_t channels)
+: C(channels)
+{
+    addSlot("in0", NodeSlot::input);
+    addSlot("out_even", NodeSlot::output);
+    addSlot("out_odd",  NodeSlot::output);
+
+    cs = requestPipeline(src_channel_shuffle);
+    csDescSet = cs.descSetLayout(0).newDescSet(gDestSetPool);
+}
+
+void ChannelShuffleNode::prepare()
+{
+    _ASSERT((*this)["in0"].isShapeOf(-1, -1, C));
+    _ASSERT((C % 2) == 0);
+
+    const auto& inShape = (*this)["in0"].shape();
+    uint32_t H = inShape[0];
+    uint32_t W = inShape[1];
+    uint32_t C2 = C / 2;
+
+    (*this)["out_even"] = Tensor(H, W, C2);
+    (*this)["out_odd"]  = Tensor(H, W, C2);
+}
+
+void ChannelShuffleNode::run(CommandBuffer cmdBuff)
+{
+    const auto& inShape = (*this)["in0"].shape();
+    uint32_t H = inShape[0];
+    uint32_t W = inShape[1];
+    uint32_t C2 = C / 2;
+    uint32_t total = H * W * C2;
+
+    csDescSet.write({
+        (*this)["out_even"].buffer(),
+        (*this)["out_odd"].buffer(),
+        (*this)["in0"].buffer(),
+    });
+
+    struct { int H, W, C; } push { int(H), int(W), int(C) };
+
+    cmdBuff
+        .bindPipeline(cs)
+        .bindDescSets({csDescSet})
+        .setPushConstants(0, sizeof(push), &push)
+        .dispatch(CEIL_DIV(total, 64))
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["out_even"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// ConcatNode (channel-wise concatenation)
+/////////////////////////////////////////////////////////////////////////////////////////
+ConcatNode::ConcatNode()
+{
+    addSlot("in0",  NodeSlot::input);
+    addSlot("in1",  NodeSlot::input);
+    addSlot("out0", NodeSlot::output);
+
+    concat = requestPipeline(src_concat);
+    concatDescSet = concat.descSetLayout(0).newDescSet(gDestSetPool);
+}
+
+void ConcatNode::prepare()
+{
+    const auto& s0 = (*this)["in0"].shape();
+    const auto& s1 = (*this)["in1"].shape();
+    _ASSERT(s0.size() == 3 && s1.size() == 3);
+    _ASSERT(s0[0] == s1[0] && s0[1] == s1[1]);
+
+    uint32_t H  = s0[0];
+    uint32_t W  = s0[1];
+    uint32_t C0 = s0[2];
+    uint32_t C1 = s1[2];
+
+    (*this)["out0"] = Tensor(H, W, C0 + C1);
+}
+
+void ConcatNode::run(CommandBuffer cmdBuff)
+{
+    const auto& s0 = (*this)["in0"].shape();
+    const auto& s1 = (*this)["in1"].shape();
+    uint32_t H  = s0[0];
+    uint32_t W  = s0[1];
+    uint32_t C0 = s0[2];
+    uint32_t C1 = s1[2];
+    uint32_t C  = C0 + C1;
+    uint32_t total = H * W * C;
+
+    concatDescSet.write({
+        (*this)["out0"].buffer(),
+        (*this)["in0"].buffer(),
+        (*this)["in1"].buffer(),
+    });
+
+    struct { int H, W, C0, C1; } push { int(H), int(W), int(C0), int(C1) };
+
+    cmdBuff
+        .bindPipeline(concat)
+        .bindDescSets({concatDescSet})
+        .setPushConstants(0, sizeof(push), &push)
+        .dispatch(CEIL_DIV(total, 64))
         .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["out0"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// SplitNode (duplicate input to two outputs)
+/////////////////////////////////////////////////////////////////////////////////////////
+SplitNode::SplitNode()
+{
+    addSlot("in0",  NodeSlot::input);
+    addSlot("out0", NodeSlot::output);
+    addSlot("out1", NodeSlot::output);
+
+    dup2 = requestPipeline(src_copy2);
+    dup2DescSet = dup2.descSetLayout(0).newDescSet(gDestSetPool);
+}
+
+void SplitNode::prepare()
+{
+    _ASSERT((*this)["in0"].validShape());
+    const auto& s = (*this)["in0"].shape();
+    if (s.size() == 3)
+        (*this)["out0"] = Tensor(s[0], s[1], s[2]);
+    else
+        (*this)["out0"] = Tensor(s);
+    (*this)["out1"] = (*this)["out0"]; // same shape
+}
+
+void SplitNode::run(CommandBuffer cmdBuff)
+{
+    const auto& s = (*this)["in0"].shape();
+    int N = 1; for (auto d : s) N *= int(d);
+
+    dup2DescSet.write({
+        (*this)["out0"].buffer(),
+        (*this)["out1"].buffer(),
+        (*this)["in0"].buffer(),
+    });
+
+    cmdBuff
+        .bindPipeline(dup2)
+        .bindDescSets({dup2DescSet})
+        .setPushConstants(0, sizeof(N), &N)
+        .dispatch(N)
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["out0"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        )
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["out1"].buffer()
             / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
         );
 }

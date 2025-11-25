@@ -300,6 +300,46 @@ void main() {
 }
 )";
 
+// Shader 2b: Compute attention scores with different Q and K sequence lengths
+// Used when KV cache is active
+// Input Q: [B, H, S_q, HD] (reshaped from flat)
+// Input K: [B, H, S_kv, HD] (concatenated cache + new)
+// Output scores: [B, H, S_q, S_kv]
+static const char* src_attention_scores_cached = R"(
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) buffer Scores { float scores[]; };  // [B*H*S_q*S_kv]
+layout(set = 0, binding = 1) buffer Q { float q[]; };             // [B*H*S_q*HD]
+layout(set = 0, binding = 2) buffer K { float k[]; };             // [B*H*S_kv*HD]
+
+layout(push_constant) uniform PushConstants {
+    int B, H, S_q, S_kv, HD;
+    float scale;
+};
+
+void main() {
+    int bh = int(gl_GlobalInvocationID.x);  // batch * head
+    int sq = int(gl_GlobalInvocationID.y);  // query position
+
+    int BH = B * H;
+    if (bh >= BH || sq >= S_q) return;
+
+    // Compute scores for all key positions
+    for (int skv = 0; skv < S_kv; ++skv) {
+        float score = 0.0;
+        for (int hd = 0; hd < HD; ++hd) {
+            // Q[bh, sq, hd]
+            float q_val = q[bh * S_q * HD + sq * HD + hd];
+            // K[bh, skv, hd]
+            float k_val = k[bh * S_kv * HD + skv * HD + hd];
+            score += q_val * k_val;
+        }
+        scores[bh * S_q * S_kv + sq * S_kv + skv] = score * scale;
+    }
+}
+)";
+
 // Shader 3: Apply causal mask (set upper triangle to -inf)
 static const char* src_causal_mask = R"(
 #version 450
@@ -325,6 +365,43 @@ void main() {
 
     // Apply causal mask: if s2 > s1, set to -inf
     if (s2 > s1) {
+        scores[idx] = -1e38;  // -inf approximation
+    }
+}
+)";
+
+// Shader 3b: Apply causal mask for cached attention
+// When using cache, Q has S_q tokens and K has S_kv tokens
+// The causal mask logic: query token at position (cache_len + sq) can attend to keys at positions [0, cache_len + sq]
+// So: if skv > (cache_len + sq), mask it
+static const char* src_causal_mask_cached = R"(
+#version 450
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer Scores { float scores[]; };
+
+layout(push_constant) uniform PushConstants {
+    int B, H, S_q, S_kv, cache_len;
+};
+
+void main() {
+    int idx = int(gl_GlobalInvocationID.x);
+    int total = B * H * S_q * S_kv;
+
+    if (idx >= total) return;
+
+    // Decode indices: [bh, sq, skv]
+    int temp = idx;
+    int skv = temp % S_kv;
+    temp /= S_kv;
+    int sq = temp % S_q;
+    int bh = temp / S_q;
+
+    // Query absolute position in full sequence
+    int q_abs_pos = cache_len + sq;
+
+    // Apply causal mask: query at q_abs_pos can only attend to keys at [0, q_abs_pos]
+    if (skv > q_abs_pos) {
         scores[idx] = -1e38;  // -inf approximation
     }
 }
@@ -370,6 +447,43 @@ void main() {
 }
 )";
 
+// Shader 4b: Weighted sum for cached attention
+// Input V: [B, H, S_kv, HD] (concatenated cache + new)
+// Input attn: [B, H, S_q, S_kv]
+// Output context: [B, H, S_q, HD]
+static const char* src_weighted_sum_cached = R"(
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) buffer Context { float ctx[]; };         // [B*H*S_q*HD]
+layout(set = 0, binding = 1) buffer AttnWeights { float attn[]; };    // [B*H*S_q*S_kv]
+layout(set = 0, binding = 2) buffer V { float v[]; };                 // [B*H*S_kv*HD]
+
+layout(push_constant) uniform PushConstants {
+    int B, H, S_q, S_kv, HD;
+};
+
+void main() {
+    int bh = int(gl_GlobalInvocationID.x);
+    int sq = int(gl_GlobalInvocationID.y);
+
+    int BH = B * H;
+    if (bh >= BH || sq >= S_q) return;
+
+    // context[bh, sq, :] = attn_weights[bh, sq, :] @ V[bh, :, :]
+    for (int hd = 0; hd < HD; ++hd) {
+        float sum = 0.0;
+        for (int skv = 0; skv < S_kv; ++skv) {
+            float weight = attn[bh * S_q * S_kv + sq * S_kv + skv];
+            // V[bh, skv, hd]
+            float v_val = v[bh * S_kv * HD + skv * HD + hd];
+            sum += weight * v_val;
+        }
+        ctx[bh * S_q * HD + sq * HD + hd] = sum;
+    }
+}
+)";
+
 // Shader 5: Combine heads and reshape
 // Input: [B, H, S, HD]
 // Output: [B, S, d_in] where d_in = H * HD
@@ -403,6 +517,169 @@ void main() {
 }
 )";
 
+// ============================================================================
+// Reshape Shader for KV Cache
+// ============================================================================
+
+/**
+ * Reshape Q/K/V from flat format to multi-head format
+ * Input: [B, S, D] where D = H * HD (flat format)
+ * Output: [B, H, S, HD] (multi-head format)
+ */
+static const char* src_reshape_to_heads = R"(
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) buffer Output { float out_data[]; };  // [B*H*S*HD]
+layout(set = 0, binding = 1) buffer Input { float in_data[]; };    // [B*S*D]
+
+layout(push_constant) uniform PushConstants {
+    int B, S, H, HD;
+};
+
+void main() {
+    int bs = int(gl_GlobalInvocationID.x);
+    int hhd = int(gl_GlobalInvocationID.y);
+
+    int BS = B * S;
+    int D = H * HD;
+
+    if (bs >= BS || hhd >= D) return;
+
+    int b = bs / S;
+    int s = bs % S;
+    int h = hhd / HD;
+    int hd = hhd % HD;
+
+    // in: [b, s, h*HD + hd]
+    int in_idx = b * S * D + s * D + h * HD + hd;
+    // out: [b, h, s, hd]
+    int out_idx = b * H * S * HD + h * S * HD + s * HD + hd;
+
+    out_data[out_idx] = in_data[in_idx];
+}
+)";
+
+// ============================================================================
+// KV Cache Update Shader
+// ============================================================================
+
+/**
+ * Update cache with new K/V values
+ * Copies new K or V data into the cache at the specified offset
+ *
+ * Inputs:
+ *   - new_data: [B, H, new_len, HD] - New K or V to add to cache
+ * Output:
+ *   - cache: [B, H, max_len, HD] - Cache buffer (updated in-place)
+ *
+ * The new data is written at offset [cache_offset : cache_offset + new_len]
+ */
+static const char* src_update_cache = R"(
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) buffer Cache { float cache[]; };        // [B*H*max_len*HD]
+layout(set = 0, binding = 1) buffer NewData { float new_data[]; };   // [B*H*new_len*HD]
+
+layout(push_constant) uniform PushConstants {
+    int B;              // Batch size
+    int H;              // Number of heads
+    int cache_offset;   // Offset in cache where to write new data
+    int new_len;        // Length of new data
+    int max_len;        // Maximum cache length
+    int HD;             // Head dimension
+};
+
+void main() {
+    int bh = int(gl_GlobalInvocationID.x);  // Batch * head index
+    int s = int(gl_GlobalInvocationID.y);   // Sequence index in new data
+
+    int BH = B * H;
+    if (bh >= BH || s >= new_len) return;
+
+    int b = bh / H;
+    int h = bh % H;
+
+    // Source offset in new_data: [b, h, s, :]
+    int src_offset = (b * H * new_len * HD) + (h * new_len * HD) + (s * HD);
+
+    // Destination offset in cache: [b, h, cache_offset + s, :]
+    int dst_offset = (b * H * max_len * HD) + (h * max_len * HD) + ((cache_offset + s) * HD);
+
+    // Copy entire HD-dimensional vector
+    for (int hd = 0; hd < HD; ++hd) {
+        cache[dst_offset + hd] = new_data[src_offset + hd];
+    }
+}
+)";
+
+// ============================================================================
+// KV Cache Concatenation Shader
+// ============================================================================
+
+/**
+ * Concatenate cached K/V with new K/V
+ *
+ * Inputs:
+ *   - cached: [B, H, cache_len, HD] - K or V from previous tokens
+ *   - new_kv: [B, H, new_len, HD]   - K or V from new tokens
+ * Output:
+ *   - full: [B, H, cache_len + new_len, HD] - Combined K or V
+ *
+ * This shader copies cached data first, then appends new data.
+ * Used during autoregressive generation with KV caching.
+ */
+static const char* src_concatenate_kv = R"(
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) buffer Output { float full[]; };   // [B*H*(cache_len+new_len)*HD]
+layout(set = 0, binding = 1) buffer Cached { float cached[]; }; // [B*H*max_len*HD] - FULL cache buffer!
+layout(set = 0, binding = 2) buffer NewKV { float new_kv[]; };  // [B*H*new_len*HD]
+
+layout(push_constant) uniform PushConstants {
+    int B;          // Batch size
+    int H;          // Number of heads
+    int cache_len;  // Length of cached sequence (actual used length)
+    int new_len;    // Length of new sequence
+    int max_len;    // Maximum cache length (stride for cache buffer)
+    int HD;         // Head dimension
+};
+
+void main() {
+    int bh = int(gl_GlobalInvocationID.x);  // Batch * head index
+    int s = int(gl_GlobalInvocationID.y);   // Sequence index in output
+
+    int BH = B * H;
+    int total_len = cache_len + new_len;
+
+    if (bh >= BH || s >= total_len) return;
+
+    int b = bh / H;
+    int h = bh % H;
+
+    // Copy one entire [HD] vector per thread
+    // Each thread handles one (b, h, s) position
+    int out_offset = (b * H * total_len * HD) + (h * total_len * HD) + (s * HD);
+
+    if (s < cache_len) {
+        // Copy from cached data - use max_len as stride!
+        int cache_offset = (b * H * max_len * HD) + (h * max_len * HD) + (s * HD);
+        for (int hd = 0; hd < HD; ++hd) {
+            full[out_offset + hd] = cached[cache_offset + hd];
+        }
+    } else {
+        // Copy from new data
+        int new_s = s - cache_len;
+        int new_offset = (b * H * new_len * HD) + (h * new_len * HD) + (new_s * HD);
+        for (int hd = 0; hd < HD; ++hd) {
+            full[out_offset + hd] = new_kv[new_offset + hd];
+        }
+    }
+}
+)";
+
 MultiHeadAttentionNode::MultiHeadAttentionNode(uint32_t d_in, uint32_t d_out, uint32_t num_heads)
     : d_in(d_in), d_out(d_out), num_heads(num_heads)
 {
@@ -420,7 +697,7 @@ MultiHeadAttentionNode::MultiHeadAttentionNode(uint32_t d_in, uint32_t d_out, ui
     addSlot("B_out", NodeSlot::input);    // NEW: bias parameter
     addSlot("out0", NodeSlot::output);
 
-    // Create pipelines
+    // Create pipelines - standard (no cache)
     qkvProjection = requestPipeline(src_qkv_projection);
     attentionScores = requestPipeline(src_attention_scores);
     applyCausalMask = requestPipeline(src_causal_mask);
@@ -428,12 +705,26 @@ MultiHeadAttentionNode::MultiHeadAttentionNode(uint32_t d_in, uint32_t d_out, ui
     weightedSum = requestPipeline(src_weighted_sum);
     combineHeads = requestPipeline(src_combine_heads);
 
+    // Create pipelines - KV cache support
+    reshapeForHeads = requestPipeline(src_reshape_to_heads);
+    concatenateKV = requestPipeline(src_concatenate_kv);
+    updateCache = requestPipeline(src_update_cache);
+    scoresPipelineCached = requestPipeline(src_attention_scores_cached);
+    maskPipelineCached = requestPipeline(src_causal_mask_cached);
+    weightedSumPipelineCached = requestPipeline(src_weighted_sum_cached);
+
     // Create descriptor sets
     qkvProjDescSet = qkvProjection.descSetLayout(0).newDescSet(gDestSetPool);
+    reshapeDescSet = reshapeForHeads.descSetLayout(0).newDescSet(gDestSetPool);
+    concatDescSet = concatenateKV.descSetLayout(0).newDescSet(gDestSetPool);
+    updateCacheDescSet = updateCache.descSetLayout(0).newDescSet(gDestSetPool);
     scoresDescSet = attentionScores.descSetLayout(0).newDescSet(gDestSetPool);
+    scoresCachedDescSet = scoresPipelineCached.descSetLayout(0).newDescSet(gDestSetPool);
     maskDescSet = applyCausalMask.descSetLayout(0).newDescSet(gDestSetPool);
+    maskCachedDescSet = maskPipelineCached.descSetLayout(0).newDescSet(gDestSetPool);
     softmaxDescSet = softmaxPipeline.descSetLayout(0).newDescSet(gDestSetPool);
     weightedSumDescSet = weightedSum.descSetLayout(0).newDescSet(gDestSetPool);
+    weightedSumCachedDescSet = weightedSumPipelineCached.descSetLayout(0).newDescSet(gDestSetPool);
     combineDescSet = combineHeads.descSetLayout(0).newDescSet(gDestSetPool);
 }
 
@@ -495,16 +786,85 @@ void MultiHeadAttentionNode::run(CommandBuffer cmdBuff)
     uint32_t H = num_heads;
     uint32_t HD = head_dim;
 
-    // Allocate temporary buffers (Q, K, V are in d_out space)
-    IntermediateTensors tensors = allocateIntermediateBuffers(B, S, D_out, H, HD);
+    // Use standard path if cache is disabled OR if cache is empty (cache_len=0)
+    // This ensures the prompt phase produces identical results to non-cached mode
+    bool use_standard_path = !use_cache || kv_cache == nullptr || kv_cache->current_len == 0;
 
-    // Execute attention mechanism in stages
-    computeQKVProjection(cmdBuff, input, tensors, W_q, W_k, W_v, B_q, B_k, B_v, B, S, D_in, D_out);
-    computeAttentionScores(cmdBuff, tensors, B, H, S, HD);
-    applyCausalMaskToScores(cmdBuff, tensors, B, H, S);
-    computeSoftmax(cmdBuff, tensors, B, H, S);
-    computeWeightedSum(cmdBuff, tensors, B, H, S, HD);
-    combineHeadsAndProject(cmdBuff, tensors, W_out, B_out, output, B, S, D_out, H, HD);
+    if (use_standard_path) {
+        // Standard path: no KV cache OR cache is empty (first token)
+        IntermediateTensors tensors = allocateIntermediateBuffers(B, S, D_out, H, HD);
+        computeQKVProjection(cmdBuff, input, tensors, W_q, W_k, W_v, B_q, B_k, B_v, B, S, D_in, D_out);
+        computeAttentionScores(cmdBuff, tensors, B, H, S, HD);
+        applyCausalMaskToScores(cmdBuff, tensors, B, H, S);
+        computeSoftmax(cmdBuff, tensors, B, H, S);
+        computeWeightedSum(cmdBuff, tensors, B, H, S, HD);
+        combineHeadsAndProject(cmdBuff, tensors, W_out, B_out, output, B, S, D_out, H, HD);
+
+        // If cache is enabled but empty, update it with the computed K/V
+        if (use_cache && kv_cache != nullptr && kv_cache->current_len == 0) {
+            // We need to reshape K/V and update cache
+            // Extract K and V from tensors.K_flat and tensors.V_flat
+            Tensor K_reshaped = Tensor(B, H, S, HD);
+            Tensor V_reshaped = Tensor(B, H, S, HD);
+            BufferPool& pool = BufferPool::get();
+            K_reshaped.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*S*HD*sizeof(float)));
+            V_reshaped.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*S*HD*sizeof(float)));
+
+            reshapeToHeads(cmdBuff, tensors.K_flat, K_reshaped, B, S, H, HD);
+            reshapeToHeads(cmdBuff, tensors.V_flat, V_reshaped, B, S, H, HD);
+
+            updateCacheWithNewKV(cmdBuff, K_reshaped, V_reshaped, B, H, S, 0, kv_cache->max_len, HD);
+        }
+    } else {
+        // Cache path: use KV cache (cache has data from previous tokens)
+        uint32_t cache_len = kv_cache->current_len;
+        uint32_t new_S = S;  // Number of new tokens to process
+        uint32_t total_S = cache_len + new_S;  // Total sequence length after concatenation
+
+        // Step 1: Allocate intermediate buffers for cached attention
+        IntermediateTensors tensors = allocateIntermediateBuffersCached(B, new_S, total_S, D_out, H, HD);
+
+        // Step 2: Compute Q, K, V for new tokens
+        computeQKVProjection(cmdBuff, input, tensors, W_q, W_k, W_v, B_q, B_k, B_v, B, new_S, D_in, D_out);
+
+        // Step 3: Reshape Q, K, V to multi-head format [B, H, new_S, HD]
+        Tensor Q_reshaped, K_new_reshaped, V_new_reshaped;
+        reshapeQKVForCache(cmdBuff, tensors, Q_reshaped, K_new_reshaped, V_new_reshaped, B, new_S, H, HD);
+
+        // Step 4: Concatenate with cache
+        if (cache_len > 0) {
+            // Store reshaped tensors for concatenation
+            tensors.K_flat = K_new_reshaped;
+            tensors.V_flat = V_new_reshaped;
+
+            // Allocate full tensors
+            BufferPool& pool = BufferPool::get();
+            tensors.K_full = Tensor(B, H, total_S, HD);
+            tensors.V_full = Tensor(B, H, total_S, HD);
+            tensors.K_full.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*total_S*HD*sizeof(float)));
+            tensors.V_full.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*total_S*HD*sizeof(float)));
+            concatenateWithCache(cmdBuff, tensors, B, H, new_S, cache_len, HD);
+        } else {
+            // No cached data, use reshaped tensors directly (they already have buffers bound)
+            tensors.K_full = K_new_reshaped;
+            tensors.V_full = V_new_reshaped;
+        }
+
+        // Step 5: Compute attention with cached K, V
+        computeAttentionScoresCached(cmdBuff, Q_reshaped, tensors.K_full, tensors.scores, B, H, new_S, total_S, HD);
+        applyCausalMaskCached(cmdBuff, tensors.scores, B, H, new_S, total_S, cache_len);
+        computeSoftmaxCached(cmdBuff, tensors, B, H, new_S, total_S);
+        computeWeightedSumCached(cmdBuff, tensors, B, H, new_S, total_S, HD);
+
+        // Step 6: Combine heads and project (same as standard path)
+        combineHeadsAndProject(cmdBuff, tensors, W_out, B_out, output, B, new_S, D_out, H, HD);
+
+        // Step 7: Update cache with new K, V
+        updateCacheWithNewKV(cmdBuff, K_new_reshaped, V_new_reshaped, B, H, new_S, cache_len, kv_cache->max_len, HD);
+
+        // Note: Cache length will be updated by GPT2Net after forward pass completes
+        // We don't update kv_cache->current_len here because the command buffer hasn't executed yet
+    }
 }
 
 // ============================================================================
@@ -537,6 +897,57 @@ MultiHeadAttentionNode::allocateIntermediateBuffers(uint32_t B, uint32_t S, uint
     tensors.context_combined.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*S*D*sizeof(float)));
 
     return tensors;
+}
+
+MultiHeadAttentionNode::IntermediateTensors
+MultiHeadAttentionNode::allocateIntermediateBuffersCached(uint32_t B, uint32_t new_S, uint32_t total_S, uint32_t D, uint32_t H, uint32_t HD)
+{
+    BufferPool& pool = BufferPool::get();
+    IntermediateTensors tensors;
+
+    // Q, K, V for new tokens only
+    tensors.Q_flat = Tensor(B, new_S, D);
+    tensors.K_flat = Tensor(B, new_S, D);
+    tensors.V_flat = Tensor(B, new_S, D);
+    tensors.Q_flat.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*new_S*D*sizeof(float)));
+    tensors.K_flat.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*new_S*D*sizeof(float)));
+    tensors.V_flat.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*new_S*D*sizeof(float)));
+
+    // Scores and weights use total_S (cached + new)
+    tensors.scores = Tensor(B, H, new_S, total_S);
+    tensors.scores.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*new_S*total_S*sizeof(float)));
+
+    tensors.attn_weights = Tensor(B, H, new_S, total_S);
+    tensors.attn_weights.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*new_S*total_S*sizeof(float)));
+
+    // Context uses new_S
+    tensors.context = Tensor(B, H, new_S, HD);
+    tensors.context.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*new_S*HD*sizeof(float)));
+
+    tensors.context_combined = Tensor(B, new_S, D);
+    tensors.context_combined.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*new_S*D*sizeof(float)));
+
+    return tensors;
+}
+
+void MultiHeadAttentionNode::reshapeQKVForCache(CommandBuffer& cmdBuff, IntermediateTensors& tensors,
+                                                 Tensor& Q_reshaped, Tensor& K_reshaped, Tensor& V_reshaped,
+                                                 uint32_t B, uint32_t new_S, uint32_t H, uint32_t HD)
+{
+    BufferPool& pool = BufferPool::get();
+
+    // Allocate reshaped tensors [B, H, new_S, HD]
+    Q_reshaped = Tensor(B, H, new_S, HD);
+    K_reshaped = Tensor(B, H, new_S, HD);
+    V_reshaped = Tensor(B, H, new_S, HD);
+    Q_reshaped.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*new_S*HD*sizeof(float)));
+    K_reshaped.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*new_S*HD*sizeof(float)));
+    V_reshaped.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*new_S*HD*sizeof(float)));
+
+    // Reshape Q, K, V to multi-head format
+    reshapeToHeads(cmdBuff, tensors.Q_flat, Q_reshaped, B, new_S, H, HD);
+    reshapeToHeads(cmdBuff, tensors.K_flat, K_reshaped, B, new_S, H, HD);
+    reshapeToHeads(cmdBuff, tensors.V_flat, V_reshaped, B, new_S, H, HD);
 }
 
 void MultiHeadAttentionNode::computeQKVProjection(CommandBuffer& cmdBuff, const Tensor& input, IntermediateTensors& tensors,
@@ -673,4 +1084,199 @@ void MultiHeadAttentionNode::combineHeadsAndProject(CommandBuffer& cmdBuff, Inte
         .bindDescSets({outProjDescSet})
         .dispatch0(CEIL_DIV(B*S, 16), CEIL_DIV(d_out, 16))
         .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / output.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+}
+
+// ============================================================================
+// KV Cache Support Methods
+// ============================================================================
+
+void MultiHeadAttentionNode::setCache(LayerKVCache* cache)
+{
+    kv_cache = cache;
+    use_cache = (cache != nullptr);
+}
+
+void MultiHeadAttentionNode::disableCache()
+{
+    kv_cache = nullptr;
+    use_cache = false;
+}
+
+void MultiHeadAttentionNode::reshapeToHeads(CommandBuffer& cmdBuff, const Tensor& flat, Tensor& reshaped,
+                                            uint32_t B, uint32_t S, uint32_t H, uint32_t HD)
+{
+    // Create local descriptor set to avoid conflicts when called multiple times
+    DescriptorSet localReshapeDescSet = reshapeForHeads.descSetLayout(0).newDescSet(gDestSetPool);
+
+    localReshapeDescSet.write({
+        reshaped.buffer(),
+        flat.buffer()
+    });
+
+    int constants[] = {(int)B, (int)S, (int)H, (int)HD};
+    uint32_t D = H * HD;
+
+    cmdBuff
+        .bindPipeline(reshapeForHeads)
+        .setPushConstants(0, sizeof(constants), constants)
+        .bindDescSets({localReshapeDescSet})
+        .dispatch0(CEIL_DIV(B*S, 16), CEIL_DIV(D, 16))
+        .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / reshaped.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+}
+
+void MultiHeadAttentionNode::concatenateWithCache(CommandBuffer& cmdBuff, IntermediateTensors& tensors,
+                                                   uint32_t B, uint32_t H, uint32_t new_S, uint32_t cache_len, uint32_t HD)
+{
+    _ASSERT(kv_cache != nullptr);
+    _ASSERT(use_cache);
+
+    uint32_t total_len = cache_len + new_S;
+    uint32_t max_len = kv_cache->max_len;
+
+    // Note: This version expects K_new and V_new to already be in tensors
+    // It will concatenate them with the cache
+
+    // Concatenate K: [cached_K, K_new] → K_full
+    DescriptorSet concatDescSetK = concatenateKV.descSetLayout(0).newDescSet(gDestSetPool);
+    concatDescSetK.write({
+        tensors.K_full.buffer(),
+        kv_cache->K.buffer(),
+        tensors.K_flat.buffer()  // K_new should be placed here (reshaped)
+    });
+
+    int k_constants[] = {(int)B, (int)H, (int)cache_len, (int)new_S, (int)max_len, (int)HD};
+
+    cmdBuff
+        .bindPipeline(concatenateKV)
+        .setPushConstants(0, sizeof(k_constants), k_constants)
+        .bindDescSets({concatDescSetK})
+        .dispatch0(CEIL_DIV(B * H, 16), CEIL_DIV(total_len, 16))
+        .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / tensors.K_full.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+
+    // Concatenate V: [cached_V, V_new] → V_full
+    DescriptorSet concatDescSetV = concatenateKV.descSetLayout(0).newDescSet(gDestSetPool);
+    concatDescSetV.write({
+        tensors.V_full.buffer(),
+        kv_cache->V.buffer(),
+        tensors.V_flat.buffer()  // V_new should be placed here (reshaped)
+    });
+
+    cmdBuff
+        .bindPipeline(concatenateKV)
+        .setPushConstants(0, sizeof(k_constants), k_constants)
+        .bindDescSets({concatDescSetV})
+        .dispatch0(CEIL_DIV(B * H, 16), CEIL_DIV(total_len, 16))
+        .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / tensors.V_full.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+}
+
+void MultiHeadAttentionNode::updateCacheWithNewKV(CommandBuffer& cmdBuff, const Tensor& K_new, const Tensor& V_new,
+                                                   uint32_t B, uint32_t H, uint32_t new_S, uint32_t cache_offset, uint32_t max_len, uint32_t HD)
+{
+    _ASSERT(kv_cache != nullptr);
+    _ASSERT(use_cache);
+
+    // Update K cache
+    DescriptorSet updateCacheDescSetK = updateCache.descSetLayout(0).newDescSet(gDestSetPool);
+    updateCacheDescSetK.write({
+        kv_cache->K.buffer(),
+        K_new.buffer()
+    });
+
+    int constants[] = {(int)B, (int)H, (int)cache_offset, (int)new_S, (int)max_len, (int)HD};
+
+    cmdBuff
+        .bindPipeline(updateCache)
+        .setPushConstants(0, sizeof(constants), constants)
+        .bindDescSets({updateCacheDescSetK})
+        .dispatch0(CEIL_DIV(B * H, 16), CEIL_DIV(new_S, 16))
+        .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / kv_cache->K.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+
+    // Update V cache
+    DescriptorSet updateCacheDescSetV = updateCache.descSetLayout(0).newDescSet(gDestSetPool);
+    updateCacheDescSetV.write({
+        kv_cache->V.buffer(),
+        V_new.buffer()
+    });
+
+    cmdBuff
+        .bindPipeline(updateCache)
+        .setPushConstants(0, sizeof(constants), constants)
+        .bindDescSets({updateCacheDescSetV})
+        .dispatch0(CEIL_DIV(B * H, 16), CEIL_DIV(new_S, 16))
+        .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / kv_cache->V.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+}
+
+void MultiHeadAttentionNode::computeAttentionScoresCached(CommandBuffer& cmdBuff, const Tensor& Q, const Tensor& K, Tensor& scores,
+                                                          uint32_t B, uint32_t H, uint32_t S_q, uint32_t S_kv, uint32_t HD)
+{
+    // Use member descriptor set (OK because this function is called only once per layer per forward pass)
+    scoresCachedDescSet.write({
+        scores.buffer(),
+        Q.buffer(),
+        K.buffer()
+    });
+
+    float scale = 1.0f / std::sqrt(static_cast<float>(HD));
+    struct { int B, H, S_q, S_kv, HD; float scale; } constants = {(int)B, (int)H, (int)S_q, (int)S_kv, (int)HD, scale};
+
+    cmdBuff
+        .bindPipeline(scoresPipelineCached)
+        .setPushConstants(0, sizeof(constants), &constants)
+        .bindDescSets({scoresCachedDescSet})
+        .dispatch0(CEIL_DIV(B*H, 8), CEIL_DIV(S_q, 8))
+        .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / scores.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+}
+
+void MultiHeadAttentionNode::applyCausalMaskCached(CommandBuffer& cmdBuff, Tensor& scores,
+                                                    uint32_t B, uint32_t H, uint32_t S_q, uint32_t S_kv, uint32_t cache_len)
+{
+    // Use member descriptor set (OK because this function is called only once per layer per forward pass)
+    maskCachedDescSet.write({scores.buffer()});
+
+    int constants[] = {(int)B, (int)H, (int)S_q, (int)S_kv, (int)cache_len};
+
+    cmdBuff
+        .bindPipeline(maskPipelineCached)
+        .setPushConstants(0, sizeof(constants), constants)
+        .bindDescSets({maskCachedDescSet})
+        .dispatch0(CEIL_DIV(B*H*S_q*S_kv, 256))
+        .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / scores.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+}
+
+void MultiHeadAttentionNode::computeSoftmaxCached(CommandBuffer& cmdBuff, IntermediateTensors& tensors,
+                                                   uint32_t B, uint32_t H, uint32_t S_q, uint32_t S_kv)
+{
+    softmaxDescSet.write({
+        tensors.attn_weights.buffer(),
+        tensors.scores.buffer()
+    });
+
+    int constants[] = {(int)(B * H * S_q), (int)S_kv};
+
+    cmdBuff
+        .bindPipeline(softmaxPipeline)
+        .setPushConstants(0, sizeof(constants), constants)
+        .bindDescSets({softmaxDescSet})
+        .dispatch0(CEIL_DIV(B * H * S_q, 64))
+        .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / tensors.attn_weights.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+}
+
+void MultiHeadAttentionNode::computeWeightedSumCached(CommandBuffer& cmdBuff, IntermediateTensors& tensors,
+                                                       uint32_t B, uint32_t H, uint32_t S_q, uint32_t S_kv, uint32_t HD)
+{
+    // Use member descriptor set (OK because this function is called only once per layer per forward pass)
+    weightedSumCachedDescSet.write({
+        tensors.context.buffer(),
+        tensors.attn_weights.buffer(),
+        tensors.V_full.buffer()
+    });
+
+    int constants[] = {(int)B, (int)H, (int)S_q, (int)S_kv, (int)HD};
+
+    cmdBuff
+        .bindPipeline(weightedSumPipelineCached)
+        .setPushConstants(0, sizeof(constants), constants)
+        .bindDescSets({weightedSumCachedDescSet})
+        .dispatch0(CEIL_DIV(B*H, 8), CEIL_DIV(S_q, 8))
+        .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / tensors.context.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
 }

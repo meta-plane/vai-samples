@@ -2,7 +2,7 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "(gdb) Build and Debug",
+            "name": "C++ Debug",
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/build/114-MobileNetV2-hwPark",
@@ -17,31 +17,10 @@
                     "description": "Enable pretty-printing for gdb",
                     "text": "-enable-pretty-printing",
                     "ignoreFailures": true
-                },
-                {
-                    "description": "Set Disassembly Flavor to Intel",
-                    "text": "-gdb-set disassembly-flavor intel",
-                    "ignoreFailures": true
                 }
             ],
-            "preLaunchTask": "CMake: Build",
+            "preLaunchTask": "CMake Build",
             "miDebuggerPath": "/usr/bin/gdb"
-        },
-        {
-            "name": "(gdb) Build and Run",
-            "type": "cppdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/build/114-MobileNetV2-hwPark",
-            "args": [],
-            "stopAtEntry": false,
-            "cwd": "${workspaceFolder}",
-            "environment": [],
-            "externalConsole": false,
-            "MIMode": "gdb",
-            "preLaunchTask": "CMake: Build",
-            "miDebuggerPath": "/usr/bin/gdb",
-            "console": "integratedTerminal"
         }
     ]
 }
-

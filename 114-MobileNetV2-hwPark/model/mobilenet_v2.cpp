@@ -1,17 +1,14 @@
 #include "model/mobilenet_v2.h"
 
-namespace mobilenet {
-
-MobileNetV2::MobileNetV2() : NeuralNet() {
-}
+// TODO: Phase 7 - MobileNetV2 implementation
+// MobileNetV2::MobileNetV2(vk::Device& device) : NeuralNet(device) {
+// }
 
 void MobileNetV2::initialize() {
-    // TODO: Initialize MobileNetV2 architecture
+    // TODO: Phase 7 - Initialize MobileNetV2 architecture
 }
 
 void MobileNetV2::loadWeights(const std::string& weightsPath) {
-    // TODO: Load weights from file
+    // TODO: Phase 7 - Load weights from file
 }
-
-} // namespace mobilenet
 

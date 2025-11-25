@@ -44,6 +44,7 @@ class GPTEmbeddingNode : public Node
     uint32_t V;  // vocab_size
     uint32_t M;  // max_length
     uint32_t E;  // embedding_dim
+    uint32_t position_offset = 0;  // NEW: for KV cache support
 
     ComputePipeline tokenEmbedding;
     ComputePipeline positionalEmbedding;
@@ -53,10 +54,19 @@ class GPTEmbeddingNode : public Node
     DescriptorSet positionalEmbeddingDescSet;
     DescriptorSet addEmbeddingsDescSet;
 
+    // Helper functions for run() steps
+    void runTokenEmbedding(CommandBuffer cmdBuff, vk::Buffer tokenEmbBuffer, uint32_t BS);
+    void runPositionalEmbedding(CommandBuffer cmdBuff, vk::Buffer posEmbBuffer, uint32_t B, uint32_t S);
+    void runAddEmbeddings(CommandBuffer cmdBuff, vk::Buffer tokenEmbBuffer, vk::Buffer posEmbBuffer, uint32_t BSE);
+
 public:
     GPTEmbeddingNode(uint32_t vocab_size, uint32_t max_length, uint32_t embedding_dim);
     void prepare() override;
     void run(CommandBuffer cmdBuff) override;
+
+    // NEW: Set position offset for KV cache support
+    void setPositionOffset(uint32_t offset) { position_offset = offset; }
+    uint32_t getPositionOffset() const { return position_offset; }
 };
 
 

@@ -45,6 +45,7 @@ layout(push_constant) uniform PushConstants {
     int S;   // seq_length
     int M;   // max_length
     int E;   // embedding_dim
+    int pos_offset;  // NEW: position offset for KV cache support
 };
 
 void main()
@@ -53,11 +54,12 @@ void main()
     int BS = B * S;
     if (bs >= BS) return;
 
-    int s = bs % S;  // position in sequence
+    int s = bs % S;  // position in sequence (relative)
+    int abs_pos = s + pos_offset;  // absolute position in full sequence
 
-    // Copy positional embedding from weight table
+    // Copy positional embedding from weight table using absolute position
     for (int e = 0; e < E; ++e) {
-        out0[bs * E + e] = weight[s * E + e];
+        out0[bs * E + e] = weight[abs_pos * E + e];
     }
 })";
 
@@ -207,7 +209,7 @@ void PositionalEmbeddingNode::run(CommandBuffer cmdBuff)
         weight.buffer()
     });
 
-    int constants[] = {(int)B, (int)S, (int)M, (int)E};
+    int constants[] = {(int)B, (int)S, (int)M, (int)E, 0};  // pos_offset = 0 (default)
 
     cmdBuff
         .bindPipeline(positionalEmbedding)
@@ -265,12 +267,83 @@ void GPTEmbeddingNode::prepare()
     (*this)["out0"] = Tensor(B, S, E);
 }
 
-void GPTEmbeddingNode::run(CommandBuffer cmdBuff)
+// ==================== GPTEmbeddingNode Helper Functions ====================
+
+void GPTEmbeddingNode::runTokenEmbedding(CommandBuffer cmdBuff, vk::Buffer tokenEmbBuffer, uint32_t BS)
 {
     Tensor& tokenIds = (*this)["in0"];
     Tensor& tokenWeight = (*this)["token_weight"];
+
+    tokenEmbeddingDescSet.write({
+        tokenEmbBuffer,
+        tokenIds.buffer(),
+        tokenWeight.buffer()
+    });
+
+    int tokenConstants[] = {(int)BS, (int)V, (int)E};
+
+    cmdBuff
+        .bindPipeline(tokenEmbedding)
+        .setPushConstants(0, sizeof(tokenConstants), tokenConstants)
+        .bindDescSets({tokenEmbeddingDescSet})
+        .dispatch0(CEIL_DIV(BS, 64))
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / tokenEmbBuffer
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
+
+void GPTEmbeddingNode::runPositionalEmbedding(CommandBuffer cmdBuff, vk::Buffer posEmbBuffer, uint32_t B, uint32_t S)
+{
     Tensor& posWeight = (*this)["pos_weight"];
+
+    positionalEmbeddingDescSet.write({
+        posEmbBuffer,
+        posWeight.buffer()
+    });
+
+    int posConstants[] = {(int)B, (int)S, (int)M, (int)E, (int)position_offset};
+
+    cmdBuff
+        .bindPipeline(positionalEmbedding)
+        .setPushConstants(0, sizeof(posConstants), posConstants)
+        .bindDescSets({positionalEmbeddingDescSet})
+        .dispatch0(CEIL_DIV(B * S, 64))
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / posEmbBuffer
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
+
+void GPTEmbeddingNode::runAddEmbeddings(CommandBuffer cmdBuff, vk::Buffer tokenEmbBuffer, vk::Buffer posEmbBuffer, uint32_t BSE)
+{
     Tensor& out = (*this)["out0"];
+
+    addEmbeddingsDescSet.write({
+        out.buffer(),
+        tokenEmbBuffer,
+        posEmbBuffer
+    });
+
+    cmdBuff
+        .bindPipeline(addEmbeddings)
+        .setPushConstants(0, sizeof(int), &BSE)
+        .bindDescSets({addEmbeddingsDescSet})
+        .dispatch0(CEIL_DIV(BSE, 256))
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / out.buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
+
+// ==================== GPTEmbeddingNode Main Run ====================
+
+void GPTEmbeddingNode::run(CommandBuffer cmdBuff)
+{
+    Tensor& tokenIds = (*this)["in0"];
 
     uint32_t B = tokenIds.shape()[0];
     uint32_t S = tokenIds.shape()[1];
@@ -293,62 +366,10 @@ void GPTEmbeddingNode::run(CommandBuffer cmdBuff)
         BS * E * sizeof(float)
     );
 
-    // Step 1: Token Embedding
-    tokenEmbeddingDescSet.write({
-        tokenEmbBuffer,
-        tokenIds.buffer(),
-        tokenWeight.buffer()
-    });
-
-    int tokenConstants[] = {(int)BS, (int)V, (int)E};
-
-    cmdBuff
-        .bindPipeline(tokenEmbedding)
-        .setPushConstants(0, sizeof(tokenConstants), tokenConstants)
-        .bindDescSets({tokenEmbeddingDescSet})
-        .dispatch0(CEIL_DIV(BS, 64))
-        .barrier(
-            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
-            / tokenEmbBuffer
-            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
-        );
-
-    // Step 2: Positional Embedding
-    positionalEmbeddingDescSet.write({
-        posEmbBuffer,
-        posWeight.buffer()
-    });
-
-    int posConstants[] = {(int)B, (int)S, (int)M, (int)E};
-
-    cmdBuff
-        .bindPipeline(positionalEmbedding)
-        .setPushConstants(0, sizeof(posConstants), posConstants)
-        .bindDescSets({positionalEmbeddingDescSet})
-        .dispatch0(CEIL_DIV(BS, 64))
-        .barrier(
-            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
-            / posEmbBuffer
-            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
-        );
-
-    // Step 3: Add Embeddings
-    addEmbeddingsDescSet.write({
-        out.buffer(),
-        tokenEmbBuffer,
-        posEmbBuffer
-    });
-
-    cmdBuff
-        .bindPipeline(addEmbeddings)
-        .setPushConstants(0, sizeof(int), &BSE)
-        .bindDescSets({addEmbeddingsDescSet})
-        .dispatch0(CEIL_DIV(BSE, 256))
-        .barrier(
-            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
-            / out.buffer()
-            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
-        );
+    // Execute embedding pipeline
+    runTokenEmbedding(cmdBuff, tokenEmbBuffer, BS);
+    runPositionalEmbedding(cmdBuff, posEmbBuffer, B, S);
+    runAddEmbeddings(cmdBuff, tokenEmbBuffer, posEmbBuffer, BSE);
 
     // Return temporary buffers to pool
     pool.returnBuffer(tokenEmbBuffer);

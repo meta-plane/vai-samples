@@ -172,15 +172,171 @@ inline std::vector<int> generate_gpt2(
             last_token_logits[j] = logits_data[last_token_offset + j];
         }
 
-        // Debug: Print logits statistics for first iteration
-        if (i == 0) {
+        // Debug: Print logits statistics for first and second iteration
+        if (i == 0 || i == 1) {
             // Calculate statistics
             float min_logit = *std::min_element(last_token_logits.begin(), last_token_logits.end());
             float max_logit = *std::max_element(last_token_logits.begin(), last_token_logits.end());
             float sum_logit = std::accumulate(last_token_logits.begin(), last_token_logits.end(), 0.0f);
             float mean_logit = sum_logit / last_token_logits.size();
 
-            std::cout << "\n  [Debug] Logits statistics:" << std::endl;
+            std::cout << "\n  [Debug - Standard Gen Token " << (i+1) << "] Logits statistics:" << std::endl;
+            std::cout << "    Min: " << std::fixed << std::setprecision(2) << min_logit << std::endl;
+            std::cout << "    Max: " << std::fixed << std::setprecision(2) << max_logit << std::endl;
+            std::cout << "    Mean: " << std::fixed << std::setprecision(2) << mean_logit << std::endl;
+            std::cout << "    Range: " << std::fixed << std::setprecision(2) << (max_logit - min_logit) << std::endl;
+
+            // Top 5 logits
+            std::vector<std::pair<float, int>> top_logits;
+            for (size_t j = 0; j < last_token_logits.size(); ++j) {
+                top_logits.push_back({last_token_logits[j], (int)j});
+            }
+            std::sort(top_logits.begin(), top_logits.end(),
+                     [](const auto& a, const auto& b) { return a.first > b.first; });
+
+            std::cout << "    Top 5 logits: ";
+            for (int k = 0; k < 5; ++k) {
+                std::cout << "(token=" << top_logits[k].second << ", logit="
+                          << std::fixed << std::setprecision(2) << top_logits[k].first << ") ";
+            }
+            std::cout << std::endl;
+
+            // Bottom 5 logits
+            if (i == 0) {
+                std::cout << "    Bottom 5 logits: ";
+                for (int k = (int)top_logits.size() - 5; k < (int)top_logits.size(); ++k) {
+                    std::cout << "(token=" << top_logits[k].second << ", logit="
+                              << std::fixed << std::setprecision(2) << top_logits[k].first << ") ";
+                }
+            }
+            std::cout << "\n" << std::endl;
+        }
+
+        // Sample next token
+        int next_token = sampleToken(last_token_logits, temperature, top_k);
+        generated.push_back(next_token);
+
+        std::cout << "  Generated " << (i + 1) << "/" << max_new_tokens << " tokens..." << std::endl;
+    }
+
+    std::cout << "  Generation complete! Total tokens: " << generated.size() << std::endl;
+    return generated;
+}
+
+/**
+ * Generate tokens autoregressively WITH KV CACHE (O(n) complexity)
+ *
+ * This function uses KV caching to avoid recomputing attention for previous tokens.
+ * - Prompt phase: Process all prompt tokens at once, fill the cache
+ * - Generation phase: Process one token at a time using the cache
+ *
+ * @param gpt2Net The GPT2 network
+ * @param prompt_ids Initial token IDs
+ * @param max_new_tokens Number of tokens to generate
+ * @param temperature Sampling temperature (0.0 for greedy/deterministic)
+ * @param top_k Top-k sampling parameter
+ * @param seed Random seed (optional, -1 for random)
+ * @return Generated token IDs (prompt + new tokens)
+ */
+inline std::vector<int> generate_gpt2_with_cache(
+    GPT2Net& gpt2Net,
+    const std::vector<int>& prompt_ids,
+    uint32_t max_new_tokens,
+    float temperature = 1.0f,
+    int top_k = 0,
+    int seed = -1)
+{
+    const GPT2Config& config = gpt2Net.getConfig();
+    Device& device = netGlobalDevice;
+
+    // Set random seed if provided
+    if (seed >= 0) {
+        srand((unsigned int)seed);
+        std::cout << "\nRandom seed set to: " << seed << std::endl;
+    }
+
+    std::vector<int> generated = prompt_ids;
+
+    std::cout << "\nGenerating text WITH KV CACHE..." << std::endl;
+    std::cout << "  Prompt length: " << prompt_ids.size() << " tokens" << std::endl;
+    std::cout << "  Max new tokens: " << max_new_tokens << std::endl;
+    std::cout << "  Temperature: " << temperature << (temperature == 0.0f ? " (greedy)" : "") << std::endl;
+
+    // Enable KV cache
+    gpt2Net.enableCache();
+    gpt2Net.resetCache();
+
+    // Pre-allocate CPU buffer for logits (reuse across iterations)
+    uint32_t max_logits_size = config.max_seq_len * config.vocab_size * sizeof(float);
+    Buffer cpu_buffer = device.createBuffer({
+        .size = max_logits_size,
+        .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .reqMemProps = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+    });
+
+    // ========================================================================
+    // PROMPT PHASE: Process all prompt tokens at once, fill cache
+    // ========================================================================
+    std::cout << "\n[Prompt Phase] Processing " << prompt_ids.size() << " tokens..." << std::endl;
+
+    {
+        uint32_t prompt_len = (uint32_t)prompt_ids.size();
+
+        // Truncate if too long
+        if (prompt_len > config.max_seq_len) {
+            prompt_len = config.max_seq_len;
+            std::cout << "  Warning: Prompt truncated to " << prompt_len << " tokens" << std::endl;
+        }
+
+        std::vector<float> prompt_data(prompt_len);
+        for (uint32_t j = 0; j < prompt_len; ++j) {
+            prompt_data[j] = (float)prompt_ids[j];
+        }
+
+        Tensor promptTensor = Tensor(1, prompt_len).set(prompt_data);
+
+        // Set position offset to 0 for prompt phase
+        gpt2Net.setPositionOffset(0);
+
+        // Forward pass - this will fill the cache
+        std::vector<Tensor> outputs = gpt2Net(promptTensor);
+        Tensor logits = outputs[0];
+
+        // Update cache length
+        gpt2Net.updateCacheLength(prompt_len);
+
+        std::cout << "  ✓ Prompt processed. Cache filled with " << gpt2Net.getCacheLength() << " tokens" << std::endl;
+
+        // Get last token logits for first generation
+        uint32_t logits_size = prompt_len * config.vocab_size * sizeof(float);
+        Buffer gpu_buffer = logits.buffer();
+
+        device.newCommandBuffer(queue_compute)
+            .begin()
+            .copyBuffer(cpu_buffer, gpu_buffer)
+            .end()
+            .submit()
+            .wait();
+
+        std::vector<float> logits_data(prompt_len * config.vocab_size);
+        memcpy(logits_data.data(), cpu_buffer.map(), logits_size);
+        cpu_buffer.unmap();
+
+        // Get last token logits
+        std::vector<float> last_token_logits(config.vocab_size);
+        uint32_t last_token_offset = (prompt_len - 1) * config.vocab_size;
+        for (uint32_t j = 0; j < config.vocab_size; ++j) {
+            last_token_logits[j] = logits_data[last_token_offset + j];
+        }
+
+        // Debug: Print logits statistics
+        {
+            float min_logit = *std::min_element(last_token_logits.begin(), last_token_logits.end());
+            float max_logit = *std::max_element(last_token_logits.begin(), last_token_logits.end());
+            float sum_logit = std::accumulate(last_token_logits.begin(), last_token_logits.end(), 0.0f);
+            float mean_logit = sum_logit / last_token_logits.size();
+
+            std::cout << "\n  [Debug - Cached] Logits statistics:" << std::endl;
             std::cout << "    Min: " << std::fixed << std::setprecision(2) << min_logit << std::endl;
             std::cout << "    Max: " << std::fixed << std::setprecision(2) << max_logit << std::endl;
             std::cout << "    Mean: " << std::fixed << std::setprecision(2) << mean_logit << std::endl;
@@ -210,14 +366,89 @@ inline std::vector<int> generate_gpt2(
             std::cout << "\n" << std::endl;
         }
 
+        // Sample first generated token
+        int next_token = sampleToken(last_token_logits, temperature, top_k);
+        generated.push_back(next_token);
+
+        std::cout << "  First token generated." << std::endl;
+    }
+
+    // ========================================================================
+    // GENERATION PHASE: Generate remaining tokens one by one using cache
+    // ========================================================================
+    std::cout << "\n[Generation Phase] Generating remaining tokens with cache..." << std::endl;
+
+    for (uint32_t i = 1; i < max_new_tokens; ++i) {
+        // Process only the last token (cache has all previous tokens)
+        int last_token = generated.back();
+        std::vector<float> input_data = {(float)last_token};
+
+        Tensor inputTensor = Tensor(1, 1).set(input_data);  // Single token!
+
+        // Set position offset to cache length (absolute position in sequence)
+        uint32_t current_cache_len = gpt2Net.getCacheLength();
+        gpt2Net.setPositionOffset(current_cache_len);
+
+        // Forward pass - uses cache, much faster!
+        std::vector<Tensor> outputs = gpt2Net(inputTensor);
+        Tensor logits = outputs[0];
+
+        // Update cache length
+        gpt2Net.updateCacheLength(1);
+
+        // Copy logits to CPU
+        uint32_t logits_size = 1 * config.vocab_size * sizeof(float);
+        Buffer gpu_buffer = logits.buffer();
+
+        device.newCommandBuffer(queue_compute)
+            .begin()
+            .copyBuffer(cpu_buffer, gpu_buffer)
+            .end()
+            .submit()
+            .wait();
+
+        std::vector<float> last_token_logits(config.vocab_size);
+        memcpy(last_token_logits.data(), cpu_buffer.map(), logits_size);
+        cpu_buffer.unmap();
+
+        // Debug: Print logits for second generation token
+        if (i == 1) {
+            float min_logit = *std::min_element(last_token_logits.begin(), last_token_logits.end());
+            float max_logit = *std::max_element(last_token_logits.begin(), last_token_logits.end());
+            float sum_logit = std::accumulate(last_token_logits.begin(), last_token_logits.end(), 0.0f);
+            float mean_logit = sum_logit / last_token_logits.size();
+
+            std::cout << "\n  [Debug - Cached Gen Token 2] Logits statistics:" << std::endl;
+            std::cout << "    Min: " << std::fixed << std::setprecision(2) << min_logit << std::endl;
+            std::cout << "    Max: " << std::fixed << std::setprecision(2) << max_logit << std::endl;
+            std::cout << "    Mean: " << std::fixed << std::setprecision(2) << mean_logit << std::endl;
+            std::cout << "    Range: " << std::fixed << std::setprecision(2) << (max_logit - min_logit) << std::endl;
+
+            std::vector<std::pair<float, int>> top_logits;
+            for (size_t j = 0; j < last_token_logits.size(); ++j) {
+                top_logits.push_back({last_token_logits[j], (int)j});
+            }
+            std::sort(top_logits.begin(), top_logits.end(),
+                     [](const auto& a, const auto& b) { return a.first > b.first; });
+
+            std::cout << "    Top 5 logits: ";
+            for (int k = 0; k < 5; ++k) {
+                std::cout << "(token=" << top_logits[k].second << ", logit="
+                          << std::fixed << std::setprecision(2) << top_logits[k].first << ") ";
+            }
+            std::cout << "\n" << std::endl;
+        }
+
         // Sample next token
         int next_token = sampleToken(last_token_logits, temperature, top_k);
         generated.push_back(next_token);
 
-        std::cout << "  Generated " << (i + 1) << "/" << max_new_tokens << " tokens..." << std::endl;
+        std::cout << "  Generated " << (i + 1) << "/" << max_new_tokens << " tokens (cache_len=" << gpt2Net.getCacheLength() << ")..." << std::endl;
     }
 
     std::cout << "  Generation complete! Total tokens: " << generated.size() << std::endl;
+    std::cout << "  Final cache length: " << gpt2Net.getCacheLength() << std::endl;
+
     return generated;
 }
 
