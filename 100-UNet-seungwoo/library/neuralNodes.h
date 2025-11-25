@@ -1,8 +1,44 @@
 #ifndef NEURAL_NODES_H
 #define NEURAL_NODES_H
 
-
+#include "../shaders/shaders.hpp"
 #include "neuralNet.h"
+
+class ConCatNode : public Node
+{
+    uint32_t        dim_;
+
+    ComputePipeline concat;
+    DescriptorSet concatDescSet;
+
+public:
+    ConCatNode(uint32_t dim);
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+class ConvTransposeNode : public Node
+{
+    uint32_t C, F, K;
+
+    ComputePipeline im2col;
+    ComputePipeline gemm;
+
+public:
+    ConvTransposeNode(uint32_t inChannels, uint32_t outChannels, uint32_t kernelWidth);
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+class BatchNormNode : public Node
+{
+public:
+    BatchNormNode();
+    ~BatchNormNode() override = default;
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+
+};
 
 
 class ConvolutionNode : public Node

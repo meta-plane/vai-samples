@@ -581,6 +581,120 @@ void loadShaders()
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
+// ConCatNode
+/////////////////////////////////////////////////////////////////////////////////////////
+
+//Concat 기준은 무조건 0 뒤에 붙이는 걸로 한다
+ConCatNode::ConCatNode(uint32_t dim)
+    :dim_(dim)
+{
+    addSlot("in0", NodeSlot::input);
+    addSlot("in1", NodeSlot::input);
+    addSlot("out0", NodeSlot::output);
+
+    concat = requestPipeline(src_concat);
+    concatDescSet = concat.descSetLayout(0).newDescSet(gDestSetPool);
+}
+
+void ConCatNode::prepare()
+{
+    const auto& s0 = (*this)["in0"].shape();
+    const auto& s1 = (*this)["in1"].shape();
+
+    _ASSERT(s0.size() == s1.size());
+    _ASSERT(dim_ >= 0 && dim_ < (int)s0.size());
+
+    size_t ndim = s0.size();
+    std::vector<uint32_t> out_shape(ndim);
+
+    for (size_t i; i < ndim; ++i) 
+    {
+        if (i == dim_) 
+        {
+            out_shape.emplace_back(s0[i] + s1[i]);
+        }
+        else 
+        {
+            _ASSERT(s0[i] == s1[i]);
+            out_shape.push_back(s0[i]);
+        }
+    }
+
+    (*this)["out0"] = Tensor(out_shape);
+}
+
+void ConCatNode::run(CommandBuffer cmdBuff)
+{
+    const auto& s0 = (*this)["in0"].shape();
+    const auto& s1 = (*this)["in1"].shape();
+    const auto& out = (*this)["out0"].shape();
+
+    const uint32_t rank = s0.size();
+
+    uint32_t outer_size = 1;            // Concat 축 이전 차원들의 곱 (없으면 1)
+    uint32_t inner_size = 1;            // Concat 축 이후 차원들의 곱 (없으면 1)
+    uint32_t axis_dim0 = s0[dim_];      // 입력 0의 Concat 축 크기
+    uint32_t axis_dim1 = s1[dim_];      // 입력 1의 Concat 축 크기
+    uint32_t total = outer_size * (axis_dim0 + axis_dim1) * inner_size;
+    // Outer: Axis 이전 차원들의 곱
+    for (int i = 0; i < dim_; ++i) 
+    {
+        outer_size *= static_cast<uint32_t>(s0[i]);
+    }
+
+    // Inner: Axis 이후 차원들의 곱
+    for (int i = dim_ + 1; i < rank; ++i) 
+    {
+        inner_size *= static_cast<uint32_t>(s0[i]);
+    }
+
+    concatDescSet.write({
+        (*this)["out0"].buffer(),
+        (*this)["in0"].buffer(),
+        (*this)["in1"].buffer(),
+        });
+
+    struct { int outer_size, inner_size, axis_dim0, axis_dim1; } push{ int(outer_size), int(inner_size), int(axis_dim0), int(axis_dim1) };
+
+    cmdBuff
+        .bindPipeline(concat)
+        .bindDescSets({ concatDescSet })
+        .setPushConstants(0, sizeof(push), &push)
+        .dispatch(CEIL_DIV(total, 64))
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["out0"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// ConvTransposeNode
+/////////////////////////////////////////////////////////////////////////////////////////
+
+ConvTransposeNode::ConvTransposeNode(uint32_t inChannels, uint32_t outChannels, uint32_t kernelWidth)
+{
+    addSlot("in0", NodeSlot::input);
+    addSlot("out0", NodeSlot::output);
+}
+
+void ConvTransposeNode::prepare() {}
+void ConvTransposeNode::run(CommandBuffer cmdBuff) {}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// BatchNormNode
+/////////////////////////////////////////////////////////////////////////////////////////
+
+BatchNormNode::BatchNormNode()
+{
+    addSlot("in0", NodeSlot::input);
+    addSlot("out0", NodeSlot::output);
+}
+
+void BatchNormNode::prepare() {}
+void BatchNormNode::run(CommandBuffer cmdBuff) {}
+
+/////////////////////////////////////////////////////////////////////////////////////////
 // ConvolutionNode
 /////////////////////////////////////////////////////////////////////////////////////////
 ConvolutionNode::ConvolutionNode(uint32_t inChannels, uint32_t outChannels, uint32_t kernelWidth)

@@ -9,6 +9,8 @@ add_executable(${PROJECT_NAME}
     library/spirvHelpers.cpp
     library/stb_image.cpp
     library/jsonParser.cpp
+
+    networks/src/unet.cpp
  "networks/src/unet.cpp")
 
 add_definitions(
