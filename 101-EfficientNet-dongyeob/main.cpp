@@ -12,13 +12,19 @@ GLFWwindow* createWindow()
     return glfwCreateWindow(WIDTH, HEIGHT, "EfficientNet", nullptr, nullptr);
 }
 
-void test();
+void test(const std::string& versionStr);
 
-int main()
+int main(int argc, char* argv[])
 {
     glfwInit();
     
-    test();
+    std::string versionStr = "";
+    if (argc > 1)
+    {
+        versionStr = argv[1];
+    }
+
+    test(versionStr);
     
     glfwTerminate();
     return 0;

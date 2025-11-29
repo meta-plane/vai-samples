@@ -10,6 +10,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <algorithm>
 
 template<uint32_t Channels>
 auto readImage(const char* filename)
@@ -120,20 +121,52 @@ Tensor eval_efficientnet(const std::vector<float>& srcImage, uint32_t W, uint32_
 }
 
 
-void test()
+void test(const std::string& versionStr)
 {
     void loadShaders();
     loadShaders();
 
-    std::string weightsPath = std::string(PROJECT_CURRENT_DIR) + "/weights/efficientnet-b0.json";
+    // Parse or prompt for version
+    EfficientNetVersion version = EfficientNetVersion::B0;
+    std::string selectedVersion = versionStr;
+
+    if (selectedVersion.empty())
+    {
+        std::cout << "Select EfficientNet version (B0-B7) [default: B0]: ";
+        std::string input;
+        std::getline(std::cin, input);
+        if (!input.empty())
+            selectedVersion = input;
+    }
+
+    // Normalize input (toupper)
+    std::transform(selectedVersion.begin(), selectedVersion.end(), selectedVersion.begin(), ::toupper);
+
+    if (selectedVersion == "B0") version = EfficientNetVersion::B0;
+    else if (selectedVersion == "B1") version = EfficientNetVersion::B1;
+    else if (selectedVersion == "B2") version = EfficientNetVersion::B2;
+    else if (selectedVersion == "B3") version = EfficientNetVersion::B3;
+    else if (selectedVersion == "B4") version = EfficientNetVersion::B4;
+    else if (selectedVersion == "B5") version = EfficientNetVersion::B5;
+    else if (selectedVersion == "B6") version = EfficientNetVersion::B6;
+    else if (selectedVersion == "B7") version = EfficientNetVersion::B7;
+    else 
+    {
+        if (!selectedVersion.empty())
+            std::cout << "Invalid version '" << selectedVersion << "', defaulting to B0." << std::endl;
+        version = EfficientNetVersion::B0;
+        selectedVersion = "B0";
+    }
+
+    std::string weightsPath = std::string(PROJECT_CURRENT_DIR) + "/weights/efficientnet-" + (selectedVersion.empty() ? "b0" : selectedVersion) + ".json";
+    // Lowercase for filename
+    std::transform(weightsPath.begin(), weightsPath.end(), weightsPath.begin(), ::tolower);
+    
     auto weights = tryLoadWeights(weightsPath);
     if (weights)
         std::cout << "Loaded EfficientNet weights from " << weightsPath << std::endl;
     else
         std::cout << "Weights file not found at " << weightsPath << ", running with dummy parameters." << std::endl;
-
-    // 원하는 버전 선택 (B0 ~ B7)
-    EfficientNetVersion version = EfficientNetVersion::B0;
     
     auto config = getEfficientNetConfig(version);
     const uint32_t resolution = config.resolution;
