@@ -1,9 +1,12 @@
 #ifndef NEURAL_NODES_H
 #define NEURAL_NODES_H
 
+
 #include "neuralNet.h"
 #include <memory>
 
+
+// Existing nodes from reference implementation
 class ConvolutionNode : public Node
 {
     uint32_t C, F, K;   // C: input channels, F: output channels, K: kernel width
@@ -77,7 +80,7 @@ public:
 };
 
 
-// Depthwise Cionvolution Node for EfficientNet
+// New EfficientNet-specific basic nodes
 class DepthwiseConvNode : public Node
 {
     uint32_t C, K;   // C: channels, K: kernel width
@@ -141,16 +144,16 @@ public:
 };
 
 
-// DWConv + BN + Swish in a single node
+// Fused nodes for EfficientNet
 class DepthwiseConvBNSwishNode : public Node
 {
-    uint32_t C, K;   // C: channels, K: kernel width
+    uint32_t C, K, Stride;   // C: channels, K: kernel width, Stride: stride
 
     ComputePipeline fused;
     DescriptorSet descSet;
 
 public:
-    DepthwiseConvBNSwishNode(uint32_t channels, uint32_t kernelWidth);
+    DepthwiseConvBNSwishNode(uint32_t channels, uint32_t kernelWidth, uint32_t stride = 1);
     void prepare() override;
     void run(CommandBuffer cmdBuff) override;
 };
@@ -177,8 +180,15 @@ class SEBlockNode : public Node
 {
     uint32_t C, se_reduce;   // C: channels, se_reduce: squeeze reduction channels
 
-    ComputePipeline se;
-    DescriptorSet descSet;
+    ComputePipeline gapPipeline;
+    ComputePipeline reducePipeline;
+    ComputePipeline expandPipeline;
+    ComputePipeline scalePipeline;
+
+    DescriptorSet gapDescSet;
+    DescriptorSet reduceDescSet;
+    DescriptorSet expandDescSet;
+    DescriptorSet scaleDescSet;
 
 public:
     SEBlockNode(uint32_t channels, uint32_t seReduce);
@@ -206,8 +216,17 @@ class MBConvBlockNode : public NodeGroup
     std::unique_ptr<ConvBNSwishNode> expandConv;      // Only if expand_ratio > 1
     std::unique_ptr<DepthwiseConvBNSwishNode> depthwiseConv;
     std::unique_ptr<SEBlockNode> seBlock;             // Only if se_ratio > 0
-    std::unique_ptr<ConvolutionNode> projectConv;
-    std::unique_ptr<BatchNormNode> projectBN;
+    std::unique_ptr<ConvBNSwishNode> projectConv;     // 1x1 conv is just Conv
+    // Note: projectConv usually is just Conv+BN (no Swish). 
+    // But ConvBNSwishNode fuses Swish. We might need ConvBNNode or pass a flag to disable Swish.
+    // For now, let's assume we reuse ConvBNSwishNode but we might need to separate them or add a mode.
+    // EfficientNet projection is linear (no activation).
+    // So we need a ConvBNNode (fused) or just Conv + BN nodes.
+    // Let's use standard ConvolutionNode + BatchNormNode for projection to be safe/correct.
+    std::unique_ptr<ConvolutionNode> projectConvNode;
+    std::unique_ptr<BatchNormNode> projectBNNode;
+    
+    std::unique_ptr<InputNode> inputSplitNode;       // Only if skip connection is needed
     std::unique_ptr<AddNode> addNode;                 // Only if stride == 1 and same channels
 
 public:
@@ -220,4 +239,3 @@ extern Device netGlobalDevice; // Global device for neural network operations
 
 
 #endif // NEURAL_NODES_H
-

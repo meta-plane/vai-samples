@@ -9,6 +9,8 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <cstring>  // memcpy
+#include <iostream>
+#include <typeinfo>
 
 
 using namespace vk;
@@ -411,18 +413,13 @@ inline void NeuralNet::run()
     if (sortedNodes.empty())
         sortNodes();
 
-    auto cmdBuffer = device.newCommandBuffer(queue_compute).begin();
-
+    int nodeIdx = 0;
     for (Node* node : sortedNodes)
     {
-        // - Verify whether each input slot is assigned to a tensor and the tensor has the correct shape.
-        // - Assign tensor for output/internal slots
+        auto cmdBuffer = device.newCommandBuffer(queue_compute).begin();
+
         node->prepare();
 
-        // - Share tensor of output slots with connected input slots
-        // - Input slots are classified as two types 
-        //      - Connected by some outpuslot       -> share the tensor with the output slot
-        //      - Not connected by any output slot  -> data must be feed by user
         for (auto& [name, slot] : node->slots)
         {
             Tensor& tensor = slot.getValueRef();
@@ -447,7 +444,6 @@ inline void NeuralNet::run()
                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, 
                             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                             byteSize,
-                            // tensor.isConstant() ? byteSize * 1.5f : byteSize * 4.0f
                             byteSize * 1.5f
                         );
                         
@@ -468,26 +464,18 @@ inline void NeuralNet::run()
                     }
                 }
             }
-            else // if (slot.type() != NodeSlot::input)
+            else 
             {
                 if (!tensor.hasDeviceData())
                 {
                     tensor.bindBuffer(bufferPool.requestBuffer(
                         device,
                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                        | VK_BUFFER_USAGE_TRANSFER_SRC_BIT // TODO: only needed for final output tensors, so we should remove for general case. 
+                        | VK_BUFFER_USAGE_TRANSFER_SRC_BIT 
                         , 
                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                         tensor.numElements() * sizeof(float)
                     ));
-                }
-                else
-                {
-                    /*
-                    - InputNode - out0 slot
-                    - OutputNode - out0 slot
-                    - FlattenNode - out0 slot
-                    */
                 }
                     
                 if (slot.type() == NodeSlot::output)
@@ -512,16 +500,15 @@ inline void NeuralNet::run()
 
             slot.getValueRef() = Tensor(); 
         }
-    }
 
-    device.queue() << cmdBuffer.end() << waiting;
-    uploadBufferOffset = 0; 
+        device.queue() << cmdBuffer.end() << waiting;
+        uploadBufferOffset = 0; 
+    }
 }
 
-
-
-
-
+/*
+Assume that tensors are assigned only to input slots that require explicit user input.
+*/
 struct NodeFlow 
 {
     std::string inSlotName;

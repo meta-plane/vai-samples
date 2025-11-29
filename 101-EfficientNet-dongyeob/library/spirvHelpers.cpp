@@ -11,6 +11,19 @@ using namespace vk;
 
 #define GLSLANG_STAGE_MAPPING(vk, glslang) case vk: glslang_stage = glslang; break
 
+void initCompiler()
+{
+    if (!glslang_initialize_process())
+        fprintf(stderr, "glslang_initialize_process failed.\n");
+    else
+        printf("glslang_initialize_process success.\n");
+}
+
+void finalizeCompiler()
+{
+    glslang_finalize_process();
+}
+
 std::vector<uint32_t> glsl2spv(VkShaderStageFlags stage, const char* shaderSource) 
 {
     glslang_stage_t glslang_stage;
