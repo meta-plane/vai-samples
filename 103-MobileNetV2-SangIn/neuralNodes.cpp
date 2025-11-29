@@ -106,13 +106,10 @@ layout(local_size_x = 64, local_size_y = 16) in;
 layout(set = 0, binding = 0) writeonly buffer OutBuffer { float im2colOut[]; };
 layout(set = 0, binding = 1) readonly buffer InBuffer { float in0[]; };
 layout(push_constant) uniform PushConstants {
-    int H;      // input height
-    int W;      // input width
+    int H;
+    int W;
     int C;
     int K;
-    int H_;     // output height
-    int W_;     // output width
-    int S;      // stride
 };
 
 void main() 
@@ -121,22 +118,20 @@ void main()
     int j = int(gl_GlobalInvocationID.y); 
     int KK = K * K;
     int CKK = C * KK;
-    if (i >= H_ * W_ || j >= CKK) 
+    if (i >= H * W || j >= CKK) 
         return;
 
-    int h_ = i / W_;        // output row
-    int w_ = i % W_;        // output col
-    int h = h_ * S;         // input row (with stride)
-    int w = w_ * S;         // input col (with stride)
+    int h = i / W;          // image center row
+    int w = i % W;          // image center col
     int c = j / KK;         // image channel
     int K_2 = K / 2;
     int k = j % KK;
 
     float value = 0.0;
-    int h_idx = h + (k / K - K_2);  
-    int w_idx = w + (k % K - K_2);   
-    if (0 <= h_idx && h_idx < H && 0 <= w_idx && w_idx < W) 
-        value = in0[((h_idx * W) + w_idx) * C + c];
+    h += k / K - K_2;  
+    w += k % K - K_2;   
+    if (0 <= h && h < H && 0 <= w && w < W) 
+        value = in0[((h * W) + w) * C + c];
 
     im2colOut[i * CKK + j] = value;
 })";
@@ -171,6 +166,36 @@ void main()
     C[m * N + n] = sum;
 }
 )";
+
+//static const char* gemm_srcCode_vec = R"(
+//#version 450
+//layout(local_size_x = 32, local_size_y = 32) in;
+//layout(set = 0, binding = 0) buffer OutBuffer { vec4 C[]; };
+//layout(set = 0, binding = 1) buffer InBuffer { vec4 A[]; };
+//layout(set = 0, binding = 2) buffer Weight { vec4 B[]; };
+//layout(set = 0, binding = 3) buffer Bias { float b[]; };
+//
+//// C(MxN) = A(MxK)*B(KxN) + b(1xN)
+//layout(push_constant) uniform PushConstants {
+//    int M;  // # of batchs
+//    int K;  // # of inputs
+//    int N;  // # of outputs
+//};
+//
+//void main() 
+//{
+//    int n = int(gl_GlobalInvocationID.x); 
+//    int m = int(gl_GlobalInvocationID.y); 
+//
+//    if (m >= M || n >= N) 
+//        return;
+//
+//    float sum = b[n];
+//    for (int k = 0; k < K; ++k)
+//        sum += A[m * K + k] * B[k * N + n];
+//
+//    C[m * N + n] = sum;
+//})";
 
 static const char* src_gemm_kSplit = R"(
 #version 450
@@ -513,78 +538,6 @@ void main()
     }
 })";
 
-static const char* src_im2col_depthwise = R"(
-#version 450
-layout(local_size_x = 64, local_size_y = 16) in;
-layout(set = 0, binding = 0) writeonly buffer OutBuffer { float im2colOut[]; };
-layout(set = 0, binding = 1) readonly buffer InBuffer { float in0[]; };
-layout(push_constant) uniform PushConstants {
-    int H;      // input height
-    int W;      // input width
-    int C;
-    int K;
-    int H_;     // output height
-    int W_;     // output width
-    int S;      // stride
-};
-
-void main() 
-{
-    int i = int(gl_GlobalInvocationID.x); 
-    int c = int(gl_GlobalInvocationID.y); 
-    int KK = K * K;
-    if (i >= H_ * W_ || c >= C) 
-        return;
-
-    int h_ = i / W_;        // output row
-    int w_ = i % W_;        // output col
-    int h = h_ * S;         // input row (with stride)
-    int w = w_ * S;         // input col (with stride)
-    int K_2 = K / 2;
-
-    for (int k = 0; k < KK; ++k)
-    {
-        int kh = k / K - K_2;
-        int kw = k % K - K_2;
-        int h_idx = h + kh;
-        int w_idx = w + kw;
-        
-        float value = 0.0;
-        if (0 <= h_idx && h_idx < H && 0 <= w_idx && w_idx < W) 
-            value = in0[(h_idx * W + w_idx) * C + c];
-        
-        im2colOut[(i * C + c) * KK + k] = value;
-    }
-})";
-
-static const char* src_avgpool = R"(
-#version 450
-layout(local_size_x = 64) in;
-layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };
-layout(set = 0, binding = 1) buffer InBuffer { float in0[]; };
-layout(push_constant) uniform PushConstants {
-    int H;      // input height
-    int W;      // input width
-    int C;      // channels
-};
-
-void main()
-{
-    int c = int(gl_GlobalInvocationID.x);
-    if (c >= C)
-        return;
-
-    float sum = 0.0;
-    for (int h = 0; h < H; ++h)
-    {
-        for (int w = 0; w < W; ++w)
-        {
-            sum += in0[(h * W + w) * C + c];
-        }
-    }
-    out0[c] = sum / float(H * W);
-})";
-
 Device netGlobalDevice = VulkanApp::get().device();
 
 static DescriptorPool gDestSetPool = netGlobalDevice.createDescriptorPool({
@@ -625,22 +578,20 @@ void loadShaders()
     requestPipeline(src_setZero);
     requestPipeline(src_maxpool);
     requestPipeline(src_im2col);
-    requestPipeline(src_im2col_depthwise);
     requestPipeline(src_gemm_naive);
     requestPipeline(src_gemm_kSplit);
     // requestPipeline(src_gemm_kSplit2);
     requestPipeline(src_gemm_shared);
     requestPipeline(src_gemm_multiOut1d);
     requestPipeline(src_gemm_multiOut2d);
-    requestPipeline(src_avgpool);
 
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // ConvolutionNode
 /////////////////////////////////////////////////////////////////////////////////////////
-ConvolutionNode::ConvolutionNode(uint32_t inChannels, uint32_t outChannels, uint32_t kernelWidth, uint32_t stride)
-:  C(inChannels), F(outChannels), K(kernelWidth), S(stride)
+ConvolutionNode::ConvolutionNode(uint32_t inChannels, uint32_t outChannels, uint32_t kernelWidth)
+:  C(inChannels), F(outChannels), K(kernelWidth)
 {
     _ASSERT(K % 2 == 1);
     addSlot("in0", NodeSlot::input);
@@ -666,20 +617,14 @@ void ConvolutionNode::prepare()
     _ASSERT((*this)["bias"].isShapeOf(F));
 
     const auto& inShape = (*this)["in0"].shape();
-    uint32_t H = inShape[0], W = inShape[1];
-    uint32_t H_ = (H + S - 1) / S;  // Output height with stride
-    uint32_t W_ = (W + S - 1) / S;  // Output width with stride
-    
-    (*this)["im2colOut"] = Tensor(H_, W_, C*K*K);
-    (*this)["out0"] = Tensor(H_, W_, F);
+    (*this)["im2colOut"] = Tensor(inShape[0], inShape[1], C*K*K);
+    (*this)["out0"] = Tensor(inShape[0], inShape[1], F);
 }
 
 void ConvolutionNode::run(CommandBuffer cmdBuff)
 {
     const auto& inShape = (*this)["in0"].shape();
     uint32_t H = inShape[0], W = inShape[1];
-    uint32_t H_ = (H + S - 1) / S;
-    uint32_t W_ = (W + S - 1) / S;
 
     im2colDescSet.write({
         (*this)["im2colOut"].buffer(),
@@ -693,17 +638,19 @@ void ConvolutionNode::run(CommandBuffer cmdBuff)
         (*this)["bias"].buffer(),
     });
 
-    uint32_t im2colConstants[] = {H, W, C, K, H_, W_, S};
-    uint32_t M = H_ * W_;
-    uint32_t K_ = C * K * K;
-    uint32_t N = F;
+    uint32_t im2colConstants[] = {H, W, C, K};
+    // uint32_t gemmConstants[] = {H * W, C * K * K, F};
+
+    uint32_t M = H * W;         // N
+    uint32_t K_ = C * K * K;    // I
+    uint32_t N = F;             // O
     uint32_t gemmConstants[] = {M, K_, N};
 
     cmdBuff
         .bindPipeline(im2col)
         .bindDescSets({im2colDescSet})
         .setPushConstants(0, sizeof(im2colConstants), im2colConstants)
-        .dispatch(H_ * W_, C * K * K)
+        .dispatch(H * W, C * K * K)
         .barrier( 
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["im2colOut"].buffer()
@@ -713,6 +660,7 @@ void ConvolutionNode::run(CommandBuffer cmdBuff)
         .bindPipeline(gemm)
         .bindDescSets({gemmDescSet})
         .setPushConstants(0, sizeof(gemmConstants), gemmConstants)
+        // .dispatch(F, H * W)
         .dispatch0(CEIL_DIV(N, gemmTileSize), CEIL_DIV(M, gemmTileSize))
         .barrier( 
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
@@ -912,136 +860,4 @@ void FullyConnectedNode::run(CommandBuffer cmdBuff)
             / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
         );
 
-}  
-
-
-/////////////////////////////////////////////////////////////////////////////////////////
-// DepthwiseConvolutionNode
-/////////////////////////////////////////////////////////////////////////////////////////
-DepthwiseConvolutionNode::DepthwiseConvolutionNode(uint32_t channels, uint32_t kernelWidth)
-:  C(channels), K(kernelWidth)
-{
-    _ASSERT(K % 2 == 1);
-    addSlot("in0", NodeSlot::input);
-    addSlot("out0", NodeSlot::output);
-    addSlot("im2colOut", NodeSlot::internal);
-    addSlot("weight", NodeSlot::input);
-    addSlot("bias", NodeSlot::input);
-
-    im2col = requestPipeline(src_im2col_depthwise);
-    im2colDescSet = im2col.descSetLayout(0).newDescSet(gDestSetPool);
-    
-    const char* gemmSrc = src_gemm_shared;
-    gemm = requestPipeline(gemmSrc);
-    gemmTileSize = gGemmTileSize.at(gemmSrc);
-    gemmDescSet = gemm.descSetLayout(0).newDescSet(gDestSetPool);
-}
-
-void DepthwiseConvolutionNode::prepare()
-{
-    _ASSERT((*this)["in0"].isShapeOf(-1, -1, C));
-    _ASSERT((*this)["weight"].isShapeOf(C, K*K));  // Depthwise: [C, K*K] where each row is kernel for that channel
-    _ASSERT((*this)["bias"].isShapeOf(C));
-
-    const auto& inShape = (*this)["in0"].shape();
-    uint32_t H = inShape[0], W = inShape[1];
-    // Stride is always 1 for depthwise conv (stride handled by maxpool if needed)
-    uint32_t H_ = H;
-    uint32_t W_ = W;
-    
-    (*this)["im2colOut"] = Tensor(H_, W_, C*K*K);
-    (*this)["out0"] = Tensor(H_, W_, C);
-}
-
-void DepthwiseConvolutionNode::run(CommandBuffer cmdBuff)
-{
-    const auto& inShape = (*this)["in0"].shape();
-    uint32_t H = inShape[0], W = inShape[1];
-    uint32_t H_ = H;
-    uint32_t W_ = W;
-    uint32_t S = 1;  // Stride is always 1
-
-    im2colDescSet.write({
-        (*this)["im2colOut"].buffer(),
-        (*this)["in0"].buffer(),
-    });
-
-    gemmDescSet.write({
-        (*this)["out0"].buffer(),
-        (*this)["im2colOut"].buffer(),
-        (*this)["weight"].buffer(),
-        (*this)["bias"].buffer(),
-    });
-
-    uint32_t im2colConstants[] = {H, W, C, K, H_, W_, S};
-    uint32_t M = H_ * W_;
-    uint32_t K_ = K * K;
-    uint32_t N = 1;
-    uint32_t gemmConstants[] = {M * C, K_, N};
-
-    cmdBuff
-        .bindPipeline(im2col)
-        .bindDescSets({im2colDescSet})
-        .setPushConstants(0, sizeof(im2colConstants), im2colConstants)
-        .dispatch(H_ * W_, C)
-        .barrier( 
-            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
-            / (*this)["im2colOut"].buffer()
-            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
-        )
-
-        .bindPipeline(gemm)
-        .bindDescSets({gemmDescSet})
-        .setPushConstants(0, sizeof(gemmConstants), gemmConstants)
-        .dispatch0(CEIL_DIV(N, gemmTileSize), CEIL_DIV(M * C, gemmTileSize))
-        .barrier( 
-            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
-            / (*this)["out0"].buffer()
-            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
-        );
-}  
-
-
-/////////////////////////////////////////////////////////////////////////////////////////
-// GlobalAveragePoolingNode
-/////////////////////////////////////////////////////////////////////////////////////////
-GlobalAveragePoolingNode::GlobalAveragePoolingNode()
-{
-    addSlot("in0", NodeSlot::input);
-    addSlot("out0", NodeSlot::output);
-
-    avgpool = requestPipeline(src_avgpool);
-    avgpoolDescSet = avgpool.descSetLayout(0).newDescSet(gDestSetPool);
-}
-
-void GlobalAveragePoolingNode::prepare()
-{
-    const auto& inShape = (*this)["in0"].shape();
-    _ASSERT(inShape.size() == 3);
-    uint32_t C = inShape[2];
-    (*this)["out0"] = Tensor(C);
-}
-
-void GlobalAveragePoolingNode::run(CommandBuffer cmdBuff)
-{
-    const auto& inShape = (*this)["in0"].shape();
-    uint32_t H = inShape[0], W = inShape[1], C = inShape[2];
-
-    avgpoolDescSet.write({
-        (*this)["out0"].buffer(),
-        (*this)["in0"].buffer(),
-    });
-
-    uint32_t avgpoolConstants[] = {H, W, C};
-
-    cmdBuff
-        .bindPipeline(avgpool)
-        .bindDescSets({avgpoolDescSet})
-        .setPushConstants(0, sizeof(avgpoolConstants), avgpoolConstants)
-        .dispatch(C)
-        .barrier( 
-            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
-            / (*this)["out0"].buffer()
-            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
-        );
 }  

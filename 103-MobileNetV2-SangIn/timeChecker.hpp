@@ -23,6 +23,28 @@ class TimeChecker {
         return count;
     }
 
+    /*static int countBraces(std::string_view fmt)
+    {
+        std::regex brace_re(R"(\{[^}]*\})");
+        return std::distance(
+            std::sregex_iterator(fmt.begin(), fmt.end(), brace_re),
+            std::sregex_iterator());
+    }*/
+
+    /*template <std::string_view Str, std::size_t I = 0, std::size_t Count = 0>
+    consteval std::size_t count_placeholders()
+    {
+        if constexpr (I + 1 >= Str.size()) {
+            return Count;
+        }
+        else if constexpr (Str[I] == '{' && Str[I + 1] == '}') {
+            return count_placeholders<Str, I + 2, Count + 1>();
+        }
+        else {
+            return count_placeholders<Str, I + 1, Count>();
+        }
+    }*/
+
 
 public:
     template <typename... Args>

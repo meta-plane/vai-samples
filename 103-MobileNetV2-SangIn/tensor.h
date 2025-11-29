@@ -10,7 +10,6 @@
 #include <map>
 #include <unordered_map>
 
-
 class BufferPool
 {
     // vk::Device device;
@@ -45,7 +44,8 @@ public:
                 vk::Buffer result = std::move(it->second.first);
                 subPool.erase(it);
                 return result;
-            }\
+            }
+        }
 
         // Create new buffer
         return device.createBuffer({

@@ -1,12 +1,13 @@
 #ifndef NEURAL_NODES_H
 #define NEURAL_NODES_H
 
+
 #include "neuralNet.h"
 
 
 class ConvolutionNode : public Node
 {
-    uint32_t C, F, K, S;   // C: input channels, F: output channels, K: kernel width, S: stride
+    uint32_t C, F, K;   // C: input channels, F: output channels, K: kernel width
 
     ComputePipeline im2col;
     ComputePipeline gemm;
@@ -15,7 +16,7 @@ class ConvolutionNode : public Node
     uint32_t gemmTileSize;
 
 public:
-    ConvolutionNode(uint32_t inChannels, uint32_t outChannels, uint32_t kernelWidth, uint32_t stride = 1);
+    ConvolutionNode(uint32_t inChannels, uint32_t outChannels, uint32_t kernelWidth);
     void prepare() override;
     void run(CommandBuffer cmdBuff) override;
 };
@@ -72,35 +73,6 @@ class FullyConnectedNode : public Node
 
 public:
     FullyConnectedNode(uint32_t inDim, uint32_t outDim);
-    void prepare() override;
-    void run(CommandBuffer cmdBuff) override;
-};
-
-
-class DepthwiseConvolutionNode : public Node
-{
-    uint32_t C, K;   // C: channels, K: kernel width
-
-    ComputePipeline im2col;
-    ComputePipeline gemm;
-    DescriptorSet im2colDescSet;
-    DescriptorSet gemmDescSet;
-    uint32_t gemmTileSize;
-
-public:
-    DepthwiseConvolutionNode(uint32_t channels, uint32_t kernelWidth);
-    void prepare() override;
-    void run(CommandBuffer cmdBuff) override;
-};
-
-
-class GlobalAveragePoolingNode : public Node
-{
-    ComputePipeline avgpool;
-    DescriptorSet avgpoolDescSet;
-
-public:
-    GlobalAveragePoolingNode();
     void prepare() override;
     void run(CommandBuffer cmdBuff) override;
 };
