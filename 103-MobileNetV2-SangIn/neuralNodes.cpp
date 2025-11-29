@@ -538,8 +538,64 @@ void main()
     }
 })";
 
+static const char* src_depthwise_conv3x3 = R"(
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };
+layout(set = 0, binding = 1) buffer InBuffer { float in0[]; };
+layout(set = 0, binding = 2) buffer Weight   { float w[]; };  // shape: (K*K*C)
+layout(set = 0, binding = 3) buffer Bias     { float b[]; };  // shape: (C)
+
+layout(push_constant) uniform PushConstants {
+    int H;
+    int W;
+    int C;
+    int K;      // 3
+    int stride; // 1 or 2
+};
+
+void main()
+{
+    int h_out = int(gl_GlobalInvocationID.x);
+    int w_out = int(gl_GlobalInvocationID.y);
+    int c = int(gl_GlobalInvocationID.z);
+
+    int H_out = (H - K)/stride + 1;
+    int W_out = (W - K)/stride + 1;
+    if (h_out >= H_out || w_out >= W_out || c >= C)
+        return;
+
+    int h0 = h_out * stride;
+    int w0 = w_out * stride;
+
+    float sum = b[c];
+
+    for (int kh = 0; kh < K; ++kh) {
+        for (int kw = 0; kw < K; ++kw) {
+            int h = h0 + kh;
+            int w = w0 + kw;
+            float v = in0[(h * W + w) * C + c];
+            float ww = w[(kh * K + kw) * C + c]; // [kh, kw, c]
+            sum += v * ww;
+        }
+    }
+
+    out0[(h_out * W_out + w_out) * C + c] = sum;
+})";
+
+
 Device netGlobalDevice = VulkanApp::get().device();
 
+/*
+Descriptor : 셰이더가 접근하는 소스(GPU 메모리)의 주소/정보를 담은 구조체
+ - 셰이더는 Descriptor를 통해 GPU 메모리에 접근
+
+DescriptorSet : Descriptor들의 집합
+ - 셰이더는 DescriptorSet 단위로 GPU 메모리에 접근
+
+DescriptorPool : DescriptorSet을 대량으로 생성하기 위한 GPU-side 메모리 풀
+ - DescriptorSet을 생성/해제할 때 DescriptorPool을 사용
+*/
 static DescriptorPool gDestSetPool = netGlobalDevice.createDescriptorPool({
     .maxTypes = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER <= 200}, 
     .maxSets = 100
@@ -584,7 +640,7 @@ void loadShaders()
     requestPipeline(src_gemm_shared);
     requestPipeline(src_gemm_multiOut1d);
     requestPipeline(src_gemm_multiOut2d);
-
+    requestPipeline(src_depthwise_conv3x3);
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -669,6 +725,67 @@ void ConvolutionNode::run(CommandBuffer cmdBuff)
         );
 }  
 
+/////////////////////////////////////////////////////////////////////////////////////////
+// DepthwiseConvNode
+/////////////////////////////////////////////////////////////////////////////////////////
+class DepthwiseConvNode : public Node
+{
+    uint32_t C, K, stride;
+    ComputePipeline depthwise;
+    DescriptorSet descSet;
+
+public:
+    DepthwiseConvNode(uint32_t channels, uint32_t kernel, uint32_t stride_)
+    : C(channels), K(kernel), stride(stride_)
+    {
+        addSlot("in0", NodeSlot::input);
+        addSlot("out0", NodeSlot::output);
+        addSlot("weight", NodeSlot::input);
+        addSlot("bias", NodeSlot::input);
+
+        depthwise = requestPipeline(src_depthwise_conv3x3);
+        descSet = depthwise.descSetLayout(0).newDescSet(gDestSetPool);
+    }
+
+    void prepare() override {
+        const auto& inShape = (*this)["in0"].shape(); // (H, W, C)
+        _ASSERT(inShape.size() == 3 && inShape[2] == C);
+        uint32_t H = inShape[0], W = inShape[1];
+        uint32_t H_out = (H - K)/stride + 1;
+        uint32_t W_out = (W - K)/stride + 1;
+        (*this)["out0"] = Tensor(H_out, W_out, C);
+        _ASSERT((*this)["weight"].isShapeOf(K*K, C)); // [K*K, C]
+        _ASSERT((*this)["bias"].isShapeOf(C));
+    }
+
+    void run(CommandBuffer cmdBuff) override {
+        const auto& inShape = (*this)["in0"].shape();
+        uint32_t H = inShape[0], W = inShape[1];
+
+        descSet.write({
+            (*this)["out0"].buffer(),
+            (*this)["in0"].buffer(),
+            (*this)["weight"].buffer(),
+            (*this)["bias"].buffer(),
+        });
+
+        uint32_t constants[] = {H, W, C, K, stride};
+
+        uint32_t H_out = (H - K)/stride + 1;
+        uint32_t W_out = (W - K)/stride + 1;
+
+        cmdBuff
+            .bindPipeline(depthwise)
+            .bindDescSets({descSet})
+            .setPushConstants(0, sizeof(constants), constants)
+            .dispatch(H_out, W_out, C)
+            .barrier(
+                (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+                / (*this)["out0"].buffer()
+                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+            );
+    }
+};
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // ReluNode
@@ -713,6 +830,43 @@ void ReluNode::run(CommandBuffer cmdBuff)
         );
 }  
 
+Relu6Node::Relu6Node()
+{
+    addSlot("in0", NodeSlot::input);
+    addSlot("out0", NodeSlot::output);
+
+    relu6 = requestPipeline(src_relu6);
+    relu6DescSet = relu6.descSetLayout(0).newDescSet(gDestSetPool);
+}
+
+void Relu6Node::prepare()
+{
+    _ASSERT((*this)["in0"].validShape());
+    (*this)["out0"] = Tensor((*this)["in0"].shape());
+}
+
+void Relu6Node::run(CommandBuffer cmdBuff) override {
+    const auto& inShape = (*this)["in0"].shape();
+    int I = 1;
+    for (int dim : inShape) I *= dim;
+
+    relu6DescSet.write({
+        (*this)["out0"].buffer(),
+        (*this)["in0"].buffer(),
+    });
+
+    int constants[] = {I};
+    cmdBuff
+        .bindPipeline(relu6)
+        .setPushConstants(0, sizeof(constants), constants)
+        .bindDescSets({relu6DescSet})
+        .dispatch(I)
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["out0"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // MaxPoolingNode

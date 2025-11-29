@@ -238,6 +238,36 @@ public:
         _ASSERT(_data && _data->_buffer);
         return _data->_buffer;
     }
+
+    Tensor clone() const 
+    {
+        Tensor t(_shape);
+        if (hasHostData()) {
+            t._data->hostData = _data->hostData;
+        }
+        t._isConstant = _isConstant;
+        return t;
+    }
+
+    uint32_t size(uint32_t dim) const 
+    {
+        _ASSERT(dim < _shape.size());
+        return _shape[dim];
+    }
+
+    float at(size_t idx) const 
+    {
+        _ASSERT(hasHostData());
+        _ASSERT(idx < _data->hostData.size());
+        return _data->hostData[idx];
+    }
+
+    void set(size_t idx, float v) 
+    {
+        _ASSERT(hasHostData());
+        _ASSERT(idx < _data->hostData.size());
+        _data->hostData[idx] = v;
+    }
 };
 
 

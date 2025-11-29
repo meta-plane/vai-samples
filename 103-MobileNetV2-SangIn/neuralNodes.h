@@ -33,6 +33,15 @@ public:
     void run(CommandBuffer cmdBuff) override;
 };
 
+class Relu6Node : public Node
+{
+    ComputePipeline relu6;
+    DescriptorSet relu6DescSet;
+public:
+    Relu6Node();
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
 
 class MaxPoolingNode : public Node
 {
