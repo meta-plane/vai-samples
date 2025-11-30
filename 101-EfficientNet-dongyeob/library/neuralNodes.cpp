@@ -91,16 +91,22 @@ void main()
     out0[(h_ * W_ + w_) * C + c] = maxVal;
 })";
 
+
 static const char* src_im2col = R"(
 #version 450
-layout(local_size_x = 64, local_size_y = 16) in;
-layout(set = 0, binding = 0) writeonly buffer OutBuffer { float im2colOut[]; };
+layout(local_size_x = 32, local_size_y = 32) in;
+layout(set = 0, binding = 0) buffer OutBuffer { float im2colOut[]; };
 layout(set = 0, binding = 1) readonly buffer InBuffer { float in0[]; };
+
 layout(push_constant) uniform PushConstants {
-    int H;
-    int W;
-    int C;
-    int K;
+    int H;      // Input Height
+    int W;      // Input Width
+    int C;      // Channels
+    int K;      // Kernel Size
+    int Stride; // Stride
+    int Padding;// Padding
+    int H_out;  // Output Height
+    int W_out;  // Output Width
 };
 
 void main() 
@@ -109,20 +115,21 @@ void main()
     int j = int(gl_GlobalInvocationID.y); 
     int KK = K * K;
     int CKK = C * KK;
-    if (i >= H * W || j >= CKK) 
+    
+    if (i >= H_out * W_out || j >= CKK) 
         return;
 
-    int h = i / W;          // image center row
-    int w = i % W;          // image center col
-    int c = j / KK;         // image channel
-    int K_2 = K / 2;
+    int h_out = i / W_out;
+    int w_out = i % W_out;
+    int c = j / KK;
     int k = j % KK;
 
+    int h_in = h_out * Stride + (k / K) - Padding;
+    int w_in = w_out * Stride + (k % K) - Padding;
+
     float value = 0.0;
-    h += k / K - K_2;  
-    w += k % K - K_2;   
-    if (0 <= h && h < H && 0 <= w && w < W) 
-        value = in0[((h * W) + w) * C + c];
+    if (0 <= h_in && h_in < H && 0 <= w_in && w_in < W) 
+        value = in0[((h_in * W) + w_in) * C + c];
 
     im2colOut[i * CKK + j] = value;
 })";
@@ -683,6 +690,12 @@ void ConvolutionNode::prepare()
     _ASSERT((*this)["in0"].isShapeOf(-1, -1, C));
     ensureTensorFilled((*this)["weight"], 0.0f, C * K * K, F);
     ensureTensorFilled((*this)["bias"], 0.0f, F);
+    if (!(*this)["weight"].isShapeOf(C*K*K, F)) {
+        const auto& s = (*this)["weight"].shape();
+        std::cout << "ConvolutionNode::prepare: weight shape mismatch! Expected " << C*K*K << "x" << F << ", got ";
+        for (auto d : s) std::cout << d << " ";
+        std::cout << std::endl;
+    }
     _ASSERT((*this)["weight"].isShapeOf(C*K*K, F));
     _ASSERT((*this)["bias"].isShapeOf(F));
 
@@ -708,7 +721,16 @@ void ConvolutionNode::run(CommandBuffer cmdBuff)
         (*this)["bias"].buffer(),
     });
 
-    uint32_t im2colConstants[] = {H, W, C, K};
+    uint32_t Stride = 1;
+    uint32_t Padding = 0; // ConvolutionNode assumes valid padding handled externally or same padding? 
+    // Wait, ConvolutionNode doesn't support padding in constructor?
+    // It assumes "Same" padding?
+    // Reference implementation didn't have padding logic in im2col?
+    // Let's assume Stride=1, Padding=K/2 (Same)
+    Padding = K / 2;
+    uint32_t H_out = H;
+    uint32_t W_out = W;
+    uint32_t im2colConstants[] = {H, W, C, K, Stride, Padding, H_out, W_out};
     uint32_t M = H * W;
     uint32_t K_ = C * K * K;
     uint32_t N = F;
@@ -1165,6 +1187,12 @@ DepthwiseConvBNSwishNode::DepthwiseConvBNSwishNode(uint32_t channels, uint32_t k
 
 void DepthwiseConvBNSwishNode::prepare()
 {
+    const auto& s = (*this)["weight"].shape();
+    printf("DepthwiseConvBNSwishNode::prepare: C=%d K=%d Weight=", C, K);
+    for(auto d : s) printf("%dx", d);
+    printf("\n");
+    fflush(stdout);
+
     const auto& inShape = (*this)["in0"].shape();
     _ASSERT(inShape.size() == 3 && inShape[2] == C);
     ensureTensorFilled((*this)["weight"], 0.0f, C, K, K);
@@ -1173,6 +1201,17 @@ void DepthwiseConvBNSwishNode::prepare()
     ensureTensorFilled((*this)["variance"], 1.0f, C);
     ensureTensorFilled((*this)["gamma"], 1.0f, C);
     ensureTensorFilled((*this)["beta"], 0.0f, C);
+    
+    // const auto& s = (*this)["weight"].shape();
+    // std::cout << "DepthwiseConvBNSwishNode::prepare: C=" << C << " K=" << K << " Weight=";
+    // for(auto d : s) std::cout << d << "x";
+    // std::cout << std::endl;
+    
+    if (!(*this)["weight"].isShapeOf(C, K, K)) {
+        std::cout << "DepthwiseConvBNSwishNode::prepare: weight shape mismatch! Expected " << C << "x" << K << "x" << K << ", got ";
+        for (auto d : s) std::cout << d << " ";
+        std::cout << std::endl;
+    }
     _ASSERT((*this)["weight"].isShapeOf(C, K, K));
     
     // Stride에 따른 출력 크기 계산 (same padding 가정)
@@ -1215,7 +1254,7 @@ void DepthwiseConvBNSwishNode::run(CommandBuffer cmdBuff)
         .bindPipeline(fused)
         .bindDescSets({descSet})
         .setPushConstants(0, sizeof(constants), &constants)
-        .dispatch(CEIL_DIV(W_out, 16), CEIL_DIV(H_out, 16), C)
+        .dispatch(W_out, H_out, C)
         .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["out0"].buffer()
@@ -1224,8 +1263,8 @@ void DepthwiseConvBNSwishNode::run(CommandBuffer cmdBuff)
 }
 
 
-ConvBNSwishNode::ConvBNSwishNode(uint32_t inChannels, uint32_t outChannels, uint32_t kernelWidth)
-: C(inChannels), F(outChannels), K(kernelWidth)
+ConvBNSwishNode::ConvBNSwishNode(uint32_t inChannels, uint32_t outChannels, uint32_t kernelWidth, uint32_t stride)
+: C(inChannels), F(outChannels), K(kernelWidth), Stride(stride)
 {
     addSlot("in0", NodeSlot::input);
     addSlot("out0", NodeSlot::output);
@@ -1255,14 +1294,22 @@ void ConvBNSwishNode::prepare()
     ensureTensorFilled((*this)["gamma"], 1.0f, F);
     ensureTensorFilled((*this)["beta"], 0.0f, F);
     const auto& inShape = (*this)["in0"].shape();
-    (*this)["im2colOut"] = Tensor(inShape[0], inShape[1], C*K*K);
-    (*this)["out0"] = Tensor(inShape[0], inShape[1], F);
+    
+    uint32_t H_out = (inShape[0] + Stride - 1) / Stride;
+    uint32_t W_out = (inShape[1] + Stride - 1) / Stride;
+    
+    (*this)["im2colOut"] = Tensor(H_out, W_out, C*K*K);
+    (*this)["out0"] = Tensor(H_out, W_out, F);
 }
 
 void ConvBNSwishNode::run(CommandBuffer cmdBuff)
 {
     const auto& inShape = (*this)["in0"].shape();
     uint32_t H = inShape[0], W = inShape[1];
+    
+    uint32_t Padding = K / 2;
+    uint32_t H_out = (H + Stride - 1) / Stride;
+    uint32_t W_out = (W + Stride - 1) / Stride;
 
     im2colDescSet.write({
         (*this)["im2colOut"].buffer(),
@@ -1280,8 +1327,8 @@ void ConvBNSwishNode::run(CommandBuffer cmdBuff)
         (*this)["beta"].buffer(),
     });
 
-    uint32_t im2colConstants[] = {H, W, C, K};
-    uint32_t M = H * W;
+    uint32_t im2colConstants[] = {H, W, C, K, Stride, Padding, H_out, W_out};
+    uint32_t M = H_out * W_out;
     uint32_t K_ = C * K * K;
     uint32_t N = F;
     float Eps = 1e-5f;
@@ -1293,7 +1340,7 @@ void ConvBNSwishNode::run(CommandBuffer cmdBuff)
         .bindPipeline(im2col)
         .bindDescSets({im2colDescSet})
         .setPushConstants(0, sizeof(im2colConstants), im2colConstants)
-        .dispatch(H * W, C * K * K)
+        .dispatch(H_out * W_out, C * K * K)
         .barrier( 
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["im2colOut"].buffer()

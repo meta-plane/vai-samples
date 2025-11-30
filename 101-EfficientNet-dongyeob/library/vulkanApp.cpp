@@ -7,7 +7,7 @@
 #include <algorithm>// std::all_of, std::any_of
 #include <fstream>
 #include <cstring>  // strcmp, memcpy
-#include <cstdlib>
+
 #include "error.h"
 #include "templateHelper.h"
 #include "vulkanApp.h"
@@ -471,13 +471,12 @@ DescriptorPool::Impl::~Impl()
 /////////////////////////////////////////////////////////////////////////////////////////
 // VulkanApp
 /////////////////////////////////////////////////////////////////////////////////////////
-void initCompiler();
-void finalizeCompiler();
+
 
 VulkanApp::VulkanApp(DeviceSettings defaultSettings)
 : impl(new Impl(createVkInstance())) 
 {
-    initCompiler();
+
 
     impl->physicalDevices = arrayFrom(vkEnumeratePhysicalDevices, impl->instance);
     _ASSERT(impl->physicalDevices.size() > 0);
@@ -493,65 +492,35 @@ VulkanApp::VulkanApp(DeviceSettings defaultSettings)
         }
     }
 
-    auto tryInit = [&](int candidate) -> bool
-    {
-        if (candidate < 0 || candidate >= (int)impl->physicalDevices.size())
-        {
-            fprintf(stderr, "[Error] Invalid index %d.\n", candidate);
-            return false;
-        }
-
-        if (initDevice((uint32_t)candidate, defaultSettings))
-        {
-            impl->defaultPhysicalDeviceIndex = (uint32_t)candidate;
-            printf("[Info] Successfully initialized context for physical device %d.\n", candidate);
-            fflush(stdout);
-            return true;
-        }
-
-        fprintf(stderr, "[Error] Failed to initialize context for physical device %d.\n", candidate);
-        return false;
-    };
-
     if (impl->physicalDevices.size() == 1)
     {
-        bool res = tryInit(0);
+        bool res = initDevice(0, defaultSettings);
         _ASSERT(res);
+        impl->defaultPhysicalDeviceIndex = 0;
     }
     else
     {
-        bool initialized = false;
-
-        if (const char* envIdx = std::getenv("VAI_GPU_INDEX"))
+        while(true)
         {
-            int candidate = std::atoi(envIdx);
-            initialized = tryInit(candidate);
-            if (!initialized)
-                fprintf(stderr, "[Warn] VAI_GPU_INDEX=%d unusable. Falling back to auto-selection.\n", candidate);
-        }
-
-        if (!initialized)
-            initialized = tryInit(0);
-
-        if (!initialized)
-        {
-            while (true)
-            {
-                int selected = -1;
-                printf("Select a physical device (0-%d): ", (uint32_t)impl->physicalDevices.size() - 1);
-                fflush(stdout);
-                if (scanf("%d", &selected) != 1)
-                {
-                    fprintf(stderr, "[Error] Failed to read input. Defaulting to 0.\n");
-                    clearerr(stdin);
-                    selected = 0;
-                }
-
-                if (tryInit(selected))
-                    break;
-                
-                fprintf(stderr, "[Error] Please select again.\n");
+            int selected = -1;
+            printf("Select a physical device (0-%d): ", (uint32_t)impl->physicalDevices.size() - 1);
+            fflush(stdout);
+            scanf("%d", &selected);
+            if (selected < 0 || selected >= (int)impl->physicalDevices.size())
+            {            
+                fprintf(stderr, "[Error] Invalid index %d.\n", selected);
+                continue;
             }
+    
+            if (initDevice((uint32_t)selected, defaultSettings))
+            {
+                impl->defaultPhysicalDeviceIndex = (uint32_t)selected;
+                printf("[Info] Successfully initialized context for physical device %d.\n", selected);
+                fflush(stdout);
+                break;
+            }
+
+            fprintf(stderr, "[Error] Failed to initialize context for physical device %d. Please select again.\n", selected);
         }
     }
 }
@@ -563,7 +532,7 @@ VulkanApp::~VulkanApp()
     vkDestroyInstance(impl->instance, nullptr); 
     delete impl;
 
-    finalizeCompiler();
+
 }
 
 VulkanApp& VulkanApp::get()

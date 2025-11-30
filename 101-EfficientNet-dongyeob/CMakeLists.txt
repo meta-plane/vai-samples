@@ -44,6 +44,7 @@ add_executable(${PROJECT_NAME}
     networks/efficientNet.cpp
     library/spirvHelpers.cpp
     library/jsonParser.cpp
+    library/safeTensorsParser.cpp
 )
 
 add_definitions(
