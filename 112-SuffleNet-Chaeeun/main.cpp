@@ -14,7 +14,7 @@ int main()
 {
     glfwInit();
     //GLFWwindow* window = createWindow();
-    
+
     void Run();
     Run();
 

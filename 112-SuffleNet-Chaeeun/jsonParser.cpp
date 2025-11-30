@@ -133,3 +133,19 @@ std::vector<float> JsonParserRef::parseNDArray() const
     return parseNDArray(shape);
 }
 
+bool writeTensorToJson(const std::vector<float>& data,
+                       const std::vector<uint32_t>& shape,
+                       const std::string& jsonFilePath)
+{
+    nlohmann::json j;
+    j["shape"] = shape;
+    j["data"] = data;
+
+    std::ofstream out(jsonFilePath);
+    if (!out.is_open())
+        return false;
+
+    out << j.dump(2);
+    out.flush();
+    return out.good();
+}

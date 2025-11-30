@@ -10,7 +10,17 @@ add_executable(${PROJECT_NAME}
     spirvHelpers.cpp
     stb_image.cpp
     jsonParser.cpp
+    safeTensorsParser.cpp
 )
+
+if (MSVC)
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        $<$<CONFIG:Debug>:/Zi;/Od>
+    )
+    target_link_options(${PROJECT_NAME} PRIVATE
+        $<$<CONFIG:Debug>:/DEBUG>
+    )
+endif()
 
 add_definitions(
     -DPROJECT_CURRENT_DIR="${CMAKE_CURRENT_SOURCE_DIR}"

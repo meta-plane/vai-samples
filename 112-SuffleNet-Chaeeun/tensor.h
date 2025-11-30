@@ -171,6 +171,13 @@ public:
         return _isConstant;
     }
 
+    // Mark this tensor as constant so NeuralNet::run() does not clear it.
+    Tensor& markConstant(bool v = true)
+    {
+        _isConstant = v;
+        return *this;
+    }
+
     template <typename... Ts>
     bool isShapeOf(Ts... dims) const
     {
