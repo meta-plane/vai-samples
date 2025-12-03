@@ -100,47 +100,107 @@ void main()
     out0[(h_ * W_ + w_) * C + c] = maxVal;
 })";
 
-static const char* src_im2col = R"(
+static const char* src_avgpool = R"(
 #version 450
-layout(local_size_x = 64, local_size_y = 16) in;
-layout(set = 0, binding = 0) writeonly buffer OutBuffer { float im2colOut[]; };
-layout(set = 0, binding = 1) readonly buffer InBuffer { float in0[]; };
+#define DISCARD_TAIL
+layout(local_size_x = 64, local_size_y = 4, local_size_z = 4) in;
+layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };
+layout(set = 0, binding = 1) buffer InBuffer { float in0[]; };
 layout(push_constant) uniform PushConstants {
-    int H;
-    int W;
-    int C;
-    int K;
-    int stride;
-    int pad;
-    int outH;
-    int outW;
+    int H;  // input height
+    int W;  // input width
+    int C;  // channels
+    int P;  // pool size (kernel=stride=P)
 };
 
-void main() 
+void main()
 {
-    int i = int(gl_GlobalInvocationID.x); 
-    int j = int(gl_GlobalInvocationID.y); 
-    int KK = K * K;
-    int CKK = C * KK;
-    int HW_out = outH * outW;
-    if (i >= HW_out || j >= CKK) 
+    int h_ = int(gl_GlobalInvocationID.x);
+    int w_ = int(gl_GlobalInvocationID.y);
+    int c  = int(gl_GlobalInvocationID.z);
+#ifdef DISCARD_TAIL
+    int H_ = H / P;  
+    int W_ = W / P;  
+#else
+    int H_ = (H + P - 1) / P;
+    int W_ = (W + P - 1) / P;
+#endif
+    if (h_ >= H_ || w_ >= W_ || c >= C)
         return;
 
-    int h_ = i / outW;      // output row
-    int w_ = i % outW;      // output col
-    int c = j / KK;         // channel
-    int k = j % KK;         // kernel index
-    int kh = k / K;
-    int kw = k % K;
-
-    float value = 0.0;
-    int h = h_ * stride + kh - pad;
-    int w = w_ * stride + kw - pad;
-    if (0 <= h && h < H && 0 <= w && w < W) 
-        value = in0[(h * W + w) * C + c];
-
-    im2colOut[i * CKK + j] = value;
+    int h0 = h_ * P;
+    int w0 = w_ * P;
+    float sum = 0.0;
+    for (int dh = 0; dh < P; ++dh)
+    {
+        int h = h0 + dh;
+        for (int dw = 0; dw < P; ++dw)
+        {
+            int w = w0 + dw;
+#ifndef DISCARD_TAIL
+            if (h < H && w < W)
+#endif
+            {
+                sum += in0[(h * W + w) * C + c];
+            }
+        }
+    }
+    float avg = sum / float(P * P);
+    out0[(h_ * W_ + w_) * C + c] = avg;
 })";
+
+static const char* src_im2col = R"(
+    #version 450
+    layout(local_size_x = 64, local_size_y = 16) in;
+    
+    layout(set = 0, binding = 0) writeonly buffer OutBuffer { float im2colOut[]; };
+    layout(set = 0, binding = 1) readonly buffer InBuffer { float in0[]; };
+    
+    layout(push_constant) uniform PushConstants {
+        int H;
+        int W;
+        int C;
+        int K;
+        int stride;
+        int pad;
+        int outH;
+        int outW;
+    };
+    
+    void main()
+    {
+        int i = int(gl_GlobalInvocationID.x);
+        int j = int(gl_GlobalInvocationID.y);
+    
+        int KK = K * K;
+        int KKC = C * KK;
+        int HW_out = outH * outW;
+    
+        if (i >= HW_out || j >= KKC)
+            return;
+    
+        int h_ = i / outW;
+        int w_ = i % outW;
+
+        int c = j / KK;
+        int k = j % KK;
+
+        int kh = k / K;
+        int kw = k % K;
+
+        float value = 0.0;
+        int h = h_ * stride + kh - pad;
+        int w = w_ * stride + kw - pad;
+
+        if (0 <= h && h < H && 0 <= w && w < W) {
+            // HWC layout in Tensor
+            value = in0[(h * W + w) * C + c];
+        }
+    
+        im2colOut[i * KKC + j] = value;
+    }
+)";
+    
 
 static const char* src_gemm_naive = R"(
 #version 450
@@ -288,49 +348,60 @@ void main()
 )";
 
 static const char* src_gemm_shared = R"(
-#version 450
-layout(local_size_x = 32, local_size_y = 32) in;
-layout(set = 0, binding = 0) buffer OutBuffer { float C[]; };
-layout(set = 0, binding = 1) buffer InBuffer { float A[]; };
-layout(set = 0, binding = 2) buffer Weight { float B[]; };
-layout(set = 0, binding = 3) buffer Bias { float b[]; };
+    #version 450
+    layout(local_size_x = 32, local_size_y = 32) in;
+    layout(set = 0, binding = 0) buffer OutBuffer { float C[]; };
+    layout(set = 0, binding = 1) buffer InBuffer { float A[]; };
+    layout(set = 0, binding = 2) buffer Weight   { float B[]; };
+    layout(set = 0, binding = 3) buffer Bias     { float b[]; };
 
-// C(MxN) = A(MxK)*B(KxN) + b(1xN)  
-layout(push_constant) uniform PushConstants {
-    int M;  // # of batchs
-    int K;  // # of inputs
-    int N;  // # of outputs
-};
+    layout(push_constant) uniform PushConstants {
+        int M;  // rows
+        int K;  // inner dim
+        int N;  // cols
+    };
 
-shared float As[32 * 32];
-shared float Bs[32 * 32];
+    shared float As[32][32]; // [row][col]
+    shared float Bs[32][32];
 
-void main() 
-{
-    int n = int(gl_GlobalInvocationID.x); 
-    int m = int(gl_GlobalInvocationID.y); 
-    int _n = int(gl_LocalInvocationID.x); 
-    int _m = int(gl_LocalInvocationID.y); 
-    bool validThread = (m < M && n < N);
-
-    float acc = 0.0;
-    int sharedIdx = _m * 32 + _n;
-    for (int k0 = 0; k0 < K; k0 += 32) 
+    void main()
     {
-        int n_ = k0 + _n;
-        int m_ = k0 + _m;
-        As[sharedIdx] = (m < M && n_ < K) ? A[m * K + n_] : 0.0; // A[m, n_]
-        Bs[sharedIdx] = (m_ < K && n < N) ? B[m_ * N + n] : 0.0; // B[m_, n]
-        barrier();
+        int n  = int(gl_GlobalInvocationID.x);  // col index in C
+        int m  = int(gl_GlobalInvocationID.y);  // row index in C
+        int tx = int(gl_LocalInvocationID.x);   // local col
+        int ty = int(gl_LocalInvocationID.y);   // local row
 
-        for (int k = 0; k < 32; ++k) 
-            acc += As[_m * 32 + k] * Bs[k * 32 + _n];
-        barrier();
+        bool valid = (m < M && n < N);
+        float acc = 0.0;
+
+        for (int k0 = 0; k0 < K; k0 += 32) {
+            int aCol = k0 + tx;
+            int bRow = k0 + ty;
+
+            // Load A tile: row=m, col=aCol
+            if (m < M && aCol < K)
+                As[ty][tx] = A[m * K + aCol];
+            else
+                As[ty][tx] = 0.0;
+
+            // Load B tile: row=bRow, col=n
+            if (bRow < K && n < N)
+                Bs[ty][tx] = B[bRow * N + n];
+            else
+                Bs[ty][tx] = 0.0;
+
+            barrier();
+
+            for (int k = 0; k < 32; ++k)
+                acc += As[ty][k] * Bs[k][tx];
+
+            barrier();
+        }
+
+        if (valid)
+            C[m * N + n] = acc + b[n];
     }
-
-    if (validThread)
-        C[m * N + n] = acc + b[n];
-})";
+)";
 
 static const char* src_gemm_multiOut1d = R"(
 #version 450
@@ -461,7 +532,7 @@ void main()
     int t = int(gl_LocalInvocationID.x);
     int T = int(gl_WorkGroupSize.x);        // 64 or 256 (== (BM*BN)/(TM*TN))
 
-    // A/B 로드용 로컬 인덱스
+    // Local indices for loading A/B
     int innerRowA = t / BK;
     int innerColA = t % BK;
     int rowStrideA = T / BK;    // 8 or 32
@@ -470,11 +541,11 @@ void main()
     int innerColB = t % BN;
     int rowStrideB = T / BN;    // 1(64/64) or 2(256/128)
 
-    // 이 스레드가 계산할 결과 블록 (TMxTN)
+    // Block of results (TMxTN) this thread accumulates
     int t_n = t % (BN / TN);
     int t_m = t / (BN / TN);
 
-    // 결과와 레지스터 캐시
+    // Accumulators and register cache
     float threadResults[TM * TN];
     for (int i = 0; i < TM*TN; ++i) threadResults[i] = 0.0;
     float regM[TM];
@@ -620,6 +691,22 @@ void main()
     out0[o] = in0[o] * clip;
 })";
 
+static const char* src_hsigmoid = R"(
+#version 450
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };
+layout(set = 0, binding = 1) buffer InBuffer { float in0[]; };
+layout(push_constant) uniform PushConstants {
+    int O;
+};
+
+void main()
+{
+    int o = int(gl_GlobalInvocationID.x);
+    if (o >= O) return;
+    out0[o] = min(max(in0[o] + 3.0f, 0.0f), 6.0f) / 6.0f;
+})";
+
 static const char* src_multiply = R"(
     #version 450
     layout(local_size_x = 64) in;
@@ -688,8 +775,8 @@ static const char* src_channel_shuffle = R"(
     #version 450
     layout(local_size_x = 64) in;
 
-    // out_even: even-indexed channels  (0,2,4,...)
-    // out_odd : odd-indexed channels   (1,3,5,...)
+    // Even/Odd channel split per pixel: out_even = channels 0,2,4,...; out_odd = 1,3,5,...
+    // This matches Python's channel_shuffle(...)->split() for groups=2.
     layout(set = 0, binding = 0) writeonly buffer OutEven { float out_even[]; };
     layout(set = 0, binding = 1) writeonly buffer OutOdd  { float out_odd[];  };
     layout(set = 0, binding = 2) readonly  buffer InBuf   { float in0[];      };
@@ -697,7 +784,7 @@ static const char* src_channel_shuffle = R"(
     layout(push_constant) uniform PushConstants {
         int H;
         int W;
-        int C;   // total channels, assumed even
+        int C;   // total channels, assumed even (and %4==0 at higher level)
     };
 
     void main()
@@ -789,8 +876,8 @@ static const char* src_copy2 = R"(
 Device netGlobalDevice = VulkanApp::get().device();
 
 static DescriptorPool gDestSetPool = netGlobalDevice.createDescriptorPool({
-    .maxTypes = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER <= 200}, 
-    .maxSets = 100
+    .maxTypes = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER <= 4096},
+    .maxSets = 2048
 });
 
 
@@ -828,6 +915,14 @@ void loadShaders()
     requestPipeline(src_batchnorm2d);
     requestPipeline(src_channel_shuffle);
     requestPipeline(src_concat);
+    requestPipeline(src_avgpool);
+
+    // Additional kernels used by nodes
+    requestPipeline(src_adaptiveavgpool);
+    requestPipeline(src_hs);
+    requestPipeline(src_hsigmoid);
+    requestPipeline(src_multiply);
+    requestPipeline(src_copy2);
 
     // TODO: impelement shaders
     // requestPipeline(src_adaptiveavgpool);
@@ -863,6 +958,12 @@ ConvolutionNode::ConvolutionNode(uint32_t inChannels, uint32_t outChannels, uint
 
 void ConvolutionNode::prepare()
 {
+    if (!(*this)["in0"].isShapeOf(-1, -1, C))
+    {
+        const auto& s = (*this)["in0"].shape();
+        std::string sStr = s.size()==3 ? (std::to_string(s[0])+","+std::to_string(s[1])+","+std::to_string(s[2])) : "?";
+        (void)0;
+    }
     _ASSERT((*this)["in0"].isShapeOf(-1, -1, C));
     _ASSERT((*this)["weight"].isShapeOf(C*K*K, F));
     _ASSERT((*this)["bias"].isShapeOf(F));
@@ -922,7 +1023,7 @@ void ConvolutionNode::run(CommandBuffer cmdBuff)
         .bindPipeline(im2col)
         .bindDescSets({im2colDescSet})
         .setPushConstants(0, sizeof(im2colConstants), im2colConstants)
-        .dispatch(CEIL_DIV(HW_out, 64), CEIL_DIV(K_, 16))
+        .dispatch(HW_out, K_, 1)
         .barrier( 
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["im2colOut"].buffer()
@@ -1147,6 +1248,49 @@ AdaptiveAvgPoolingNode::AdaptiveAvgPoolingNode(uint32_t outputSize)
     avgpoolDescSet = avgpool.descSetLayout(0).newDescSet(gDestSetPool);
 }
 
+/////////////////////////////////////////////////////////////////////////////////////////
+// AveragePoolingNode (fixed kernel/stride=P, no padding)
+/////////////////////////////////////////////////////////////////////////////////////////
+void AveragePoolingNode::prepare()
+{
+    const auto& inShape = (*this)["in0"].shape();
+    _ASSERT(inShape.size() == 3);
+    uint32_t H = inShape[0], W = inShape[1], C = inShape[2];
+    uint32_t H_ = H / P; // discard tail like PyTorch AvgPool2d with ceil_mode=false
+    uint32_t W_ = W / P;
+    (*this)["out0"] = Tensor(H_, W_, C);
+
+    // Ensure pipeline and descriptor set are initialized.
+    // Rationale: ComputePipeline has no guaranteed null initialization; avoid relying on operator bool().
+    avgpool = requestPipeline(src_avgpool);
+    avgpoolDescSet = avgpool.descSetLayout(0).newDescSet(gDestSetPool);
+}
+
+void AveragePoolingNode::run(CommandBuffer cmdBuff)
+{
+    const auto& inShape = (*this)["in0"].shape();
+    uint32_t H = inShape[0], W = inShape[1], C = inShape[2];
+    uint32_t H_ = H / P;
+    uint32_t W_ = W / P;
+
+    avgpoolDescSet.write({
+        (*this)["out0"].buffer(),
+        (*this)["in0"].buffer(),
+    });
+
+    uint32_t constants[] = {H, W, C, P};
+    cmdBuff
+        .bindPipeline(avgpool)
+        .bindDescSets({avgpoolDescSet})
+        .setPushConstants(0, sizeof(constants), constants)
+        .dispatch(H_, W_, C)
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["out0"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
+
 AdaptiveAvgPoolingNode::AdaptiveAvgPoolingNode(uint32_t outH_, uint32_t outW_)
 : outH(outH_), outW(outW_)
 {
@@ -1231,6 +1375,49 @@ void HSNode::run(CommandBuffer cmdBuff)
             / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
         );
 }  
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// HSigmoidNode
+/////////////////////////////////////////////////////////////////////////////////////////
+HSigmoidNode::HSigmoidNode()
+{
+    addSlot("in0", NodeSlot::input);
+    addSlot("out0", NodeSlot::output);
+
+    hsigmoid = requestPipeline(src_hsigmoid);
+    hsigmoidDescSet = hsigmoid.descSetLayout(0).newDescSet(gDestSetPool);
+}
+
+void HSigmoidNode::prepare()
+{
+    _ASSERT((*this)["in0"].validShape());
+    (*this)["out0"] = Tensor((*this)["in0"].shape());
+}
+
+void HSigmoidNode::run(CommandBuffer cmdBuff)
+{
+    const auto& inShape = (*this)["in0"].shape();
+    int I = 1;
+    for (int dim : inShape) I *= dim;
+
+    hsigmoidDescSet.write({
+        (*this)["out0"].buffer(),
+        (*this)["in0"].buffer(),
+    });
+
+    int constants[] = {I};
+
+    cmdBuff
+        .bindPipeline(hsigmoid)
+        .setPushConstants(0, sizeof(constants), constants)
+        .bindDescSets({hsigmoidDescSet})
+        .dispatch(I)
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["out0"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // BatchNormNode
@@ -1359,7 +1546,8 @@ ChannelShuffleNode::ChannelShuffleNode(uint32_t channels)
 void ChannelShuffleNode::prepare()
 {
     _ASSERT((*this)["in0"].isShapeOf(-1, -1, C));
-    _ASSERT((C % 2) == 0);
+    // Python blocks.channel_shuffle expects C % 4 == 0
+    _ASSERT((C % 4) == 0);
 
     const auto& inShape = (*this)["in0"].shape();
     uint32_t H = inShape[0];
@@ -1390,7 +1578,7 @@ void ChannelShuffleNode::run(CommandBuffer cmdBuff)
         .bindPipeline(cs)
         .bindDescSets({csDescSet})
         .setPushConstants(0, sizeof(push), &push)
-        .dispatch(CEIL_DIV(total, 64))
+        .dispatch(total)
         .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["out_even"].buffer()
@@ -1449,7 +1637,7 @@ void ConcatNode::run(CommandBuffer cmdBuff)
         .bindPipeline(concat)
         .bindDescSets({concatDescSet})
         .setPushConstants(0, sizeof(push), &push)
-        .dispatch(CEIL_DIV(total, 64))
+        .dispatch(total)
         .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["out0"].buffer()

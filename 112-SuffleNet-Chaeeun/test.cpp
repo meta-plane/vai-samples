@@ -1,26 +1,36 @@
 #include "neuralNet.h"
 #include "neuralNodes.h"
-#include "jsonParser.h"
-#include "timeChecker.hpp"
-#include <stb/stb_image.h>
-#include <cstring>  // memcpy
-
+#include "safeTensorsParser.h"
 #include "SuffleNet.h"
+#include "timeChecker.hpp"
+#include "jsonParser.h"
+#include <cstring>
+#include <vector>
+#include <string>
+#include <algorithm> // clamp
+#include <cmath>     // exp, round
+#include <stb/stb_image.h>
+#include <cstdlib>
+#include <filesystem>
 
+void loadShaders();
+
+// Reuse the same image reader pattern as 11-mnist-refactor
 template<uint32_t Channels>
 auto readImage(const char* filename)
 {
-    int w, h, c0, c = Channels;
+    int w = 0, h = 0, c0 = 0;
+    const int c = static_cast<int>(Channels);
     std::vector<uint8_t> srcImage;
 
     if (uint8_t* input = stbi_load(filename, &w, &h, &c0, c))
     {
-        srcImage.assign(input, input + w * h * c);
+        srcImage.assign(input, input + (size_t)w * h * c);
         stbi_image_free(input);
     }
     else
     {
-        printf(stbi_failure_reason());
+        printf("%s\n", stbi_failure_reason());
         fflush(stdout);
         throw;
     }
@@ -28,572 +38,331 @@ auto readImage(const char* filename)
     return std::make_tuple(srcImage, (uint32_t)w, (uint32_t)h);
 }
 
-void eval_adaptive_avgpool()
+static void load_shufflenet_safetensors(SuffleNetV2& net, const char* path)
 {
-    void loadShaders();
-    loadShaders();
+    SafeTensorsParser st(path);
+    auto names = st.getTensorNames();
+    size_t total = names.size();
+    size_t bound = 0, skipped = 0;
+    size_t wcnt = 0, bcnt = 0;
+    size_t gammacnt = 0, betacnt = 0, rmcnt = 0, rvcnt = 0;
+    size_t other = 0;
 
-    const uint32_t H = 5, W = 5, C = 3;   // 5x5x3 input
-    const uint32_t outH = 1, outW = 1;    // 1x1 adaptive average pooling
-
-    // Create a simple input pattern (HWC layout)
-    // Value encodes position and channel to make verification easy
-    std::vector<float> input(H * W * C);
-    for (uint32_t h = 0; h < H; ++h)
-        for (uint32_t w = 0; w < W; ++w)
-            for (uint32_t c = 0; c < C; ++c)
-                input[(h * W + w) * C + c] = float(h * W + w + c);
-
-    // Build a tiny net: input -> AdaptiveAvgPooling(outH,outW) -> output
-    NeuralNet net(netGlobalDevice, 1, 1);
-    AdaptiveAvgPoolingNode aap(outH, outW);
-    net.input(0) - aap - net.output(0);
-
-    Tensor out = net(Tensor(H, W, C).set(input))[0];
-
-    // Print input for verification (per-channel 5x5)
-    printf("AdaptiveAvgPool input (H=%u, W=%u, C=%u):\n", H, W, C);
-    for (uint32_t c = 0; c < C; ++c) {
-        printf("  Channel %u:\n", c);
-        for (uint32_t h = 0; h < H; ++h) {
-            printf("    ");
-            for (uint32_t w = 0; w < W; ++w) {
-                float v = input[(h * W + w) * C + c];
-                printf("%6.2f ", v);
-            }
-            printf("\n");
-        }
-    }
-
-    // Read back and print (1x1xC -> C floats)
-    uint32_t outCount = outH * outW * C;
-    vk::Buffer outBuf = netGlobalDevice.createBuffer({
-        outCount * sizeof(float),
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-    });
-
-    netGlobalDevice.newCommandBuffer(queue_compute)
-        .begin()
-        .copyBuffer(outBuf, out.buffer())
-        .end()
-        .submit()
-        .wait();
-
-    std::vector<float> host(outCount);
-    memcpy(host.data(), outBuf.map(), outCount * sizeof(float));
-
-    printf("AdaptiveAvgPool test: %ux%ux%u -> %ux%ux%u\n", H, W, C, outH, outW, C);
-    for (uint32_t c = 0; c < C; ++c)
-        printf("  out[0,0,%u] = %f\n", c, host[c]);
-}
-
-void eval_hs()
-{
-    void loadShaders();
-    loadShaders();
-
-    const uint32_t H = 3, W = 3, C = 3; // 3x3x3 input
-
-    // Build input (HWC). Values easy to track
-    std::vector<float> input(H * W * C);
-    for (uint32_t h = 0; h < H; ++h)
-        for (uint32_t w = 0; w < W; ++w)
-            for (uint32_t c = 0; c < C; ++c)
-                input[(h * W + w) * C + c] = float((int)h - 1) + float((int)w - 1) + float(c); // some negatives & positives
-
-    NeuralNet net(netGlobalDevice, 1, 1);
-    HSNode hs;
-    net.input(0) - hs - net.output(0);
-
-    Tensor out = net(Tensor(H, W, C).set(input))[0];
-
-    // Print input
-    printf("HS input (H=%u,W=%u,C=%u):\n", H, W, C);
-    for (uint32_t c = 0; c < C; ++c) {
-        printf("  Channel %u:\n", c);
-        for (uint32_t h = 0; h < H; ++h) {
-            printf("    ");
-            for (uint32_t w = 0; w < W; ++w) {
-                float v = input[(h * W + w) * C + c];
-                printf("%6.2f ", v);
-            }
-            printf("\n");
-        }
-    }
-
-    // Read back out and print
-    uint32_t outCount = H * W * C;
-    vk::Buffer outBuf = netGlobalDevice.createBuffer({
-        outCount * sizeof(float),
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-    });
-
-    netGlobalDevice.newCommandBuffer(queue_compute)
-        .begin()
-        .copyBuffer(outBuf, out.buffer())
-        .end()
-        .submit()
-        .wait();
-
-    std::vector<float> host(outCount);
-    memcpy(host.data(), outBuf.map(), outCount * sizeof(float));
-
-    printf("HS output: \n");
-    for (uint32_t c = 0; c < C; ++c) {
-        printf("  Channel %u:\n", c);
-        for (uint32_t h = 0; h < H; ++h) {
-            printf("    ");
-            for (uint32_t w = 0; w < W; ++w) {
-                float v = host[(h * W + w) * C + c];
-                printf("%6.3f ", v);
-            }
-            printf("\n");
-        }
-    }
-}
-
-void eval_multiply()
-{
-    void loadShaders();
-    loadShaders();
-
-    const uint32_t H = 3, W = 3, C = 3; // 3x3x3 input
-
-    // Input HWC
-    std::vector<float> input(H * W * C);
-    for (uint32_t h = 0; h < H; ++h)
-        for (uint32_t w = 0; w < W; ++w)
-            for (uint32_t c = 0; c < C; ++c)
-                input[(h * W + w) * C + c] = float(h * W + w + c);
-
-    // Attention 1x1xC (broadcast over H and W)
-    std::vector<float> atten(C);
-    for (uint32_t c = 0; c < C; ++c)
-        atten[c] = 0.5f + 0.5f * float(c); // [0.5, 1.0, 1.5]
-
-    NeuralNet net(netGlobalDevice, 2, 1);
-    MultiplyNode mul;
-
-    // Connect first input to mul.in0 and second input to mul.atten
-    net.input(0) - mul;                  // to in0
-    net.input(1) - ("atten" / mul);     // to atten
-    mul - net.output(0);
-
-    auto outputs = net(Tensor(H, W, C).set(input), Tensor(1, 1, C).set(atten));
-    Tensor out = outputs[0];
-
-    // Print inputs
-    printf("Multiply input X (H=%u,W=%u,C=%u):\n", H, W, C);
-    for (uint32_t c = 0; c < C; ++c) {
-        printf("  Channel %u:\n", c);
-        for (uint32_t h = 0; h < H; ++h) {
-            printf("    ");
-            for (uint32_t w = 0; w < W; ++w) {
-                float v = input[(h * W + w) * C + c];
-                printf("%6.2f ", v);
-            }
-            printf("\n");
-        }
-    }
-    printf("Attention vector (1x1xC): ");
-    for (uint32_t c = 0; c < C; ++c)
-        printf("%5.2f ", atten[c]);
-    printf("\n");
-
-    // Read back and print output
-    uint32_t outCount = H * W * C;
-    vk::Buffer outBuf = netGlobalDevice.createBuffer({
-        outCount * sizeof(float),
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-    });
-
-    netGlobalDevice.newCommandBuffer(queue_compute)
-        .begin()
-        .copyBuffer(outBuf, out.buffer())
-        .end()
-        .submit()
-        .wait();
-
-    std::vector<float> host(outCount);
-    memcpy(host.data(), outBuf.map(), outCount * sizeof(float));
-
-    printf("Multiply output Y = X * atten[c]:\n");
-    for (uint32_t c = 0; c < C; ++c) {
-        printf("  Channel %u:\n", c);
-        for (uint32_t h = 0; h < H; ++h) {
-            printf("    ");
-            for (uint32_t w = 0; w < W; ++w) {
-                float v = host[(h * W + w) * C + c];
-                printf("%6.2f ", v);
-            }
-            printf("\n");
-        }
-    }
-}
-
-void eval_batchnorm2d()
-{
-    void loadShaders();
-    loadShaders();
-
-    const uint32_t H = 3, W = 3, C = 3; // 3x3x3 input
-
-    // Input HWC with a simple pattern
-    std::vector<float> input(H * W * C);
-    for (uint32_t h = 0; h < H; ++h)
-        for (uint32_t w = 0; w < W; ++w)
-            for (uint32_t c = 0; c < C; ++c)
-                input[(h * W + w) * C + c] = float(h * W + w) + 0.1f * float(c);
-
-    // BN params per channel
-    std::vector<float> gamma = {1.0f, 0.5f, 2.0f};
-    std::vector<float> beta  = {0.0f, 1.0f, -1.0f};
-    std::vector<float> mean  = {3.0f, 4.0f, 5.0f};
-    std::vector<float> var   = {1.0f, 0.25f, 4.0f};
-
-    NeuralNet net(netGlobalDevice, 5, 1);
-    BatchNormNode bn(C);
-
-    // input(0) -> in0, input(1)->gamma, (2)->beta, (3)->running_mean, (4)->running_var
-    net.input(0) - bn;                              // in0
-    net.input(1) - ("gamma" / bn);
-    net.input(2) - ("beta" / bn);
-    net.input(3) - ("running_mean" / bn);
-    net.input(4) - ("running_var" / bn);
-    bn - net.output(0);
-
-    auto outputs = net(
-        Tensor(H, W, C).set(input),
-        Tensor(C).set(gamma),
-        Tensor(C).set(beta),
-        Tensor(C).set(mean),
-        Tensor(C).set(var)
-    );
-    Tensor out = outputs[0];
-
-    // Print inputs
-    printf("BN input X (H=%u,W=%u,C=%u):\n", H, W, C);
-    for (uint32_t c = 0; c < C; ++c) {
-        printf("  Channel %u:\n", c);
-        for (uint32_t h = 0; h < H; ++h) {
-            printf("    ");
-            for (uint32_t w = 0; w < W; ++w) {
-                float v = input[(h * W + w) * C + c];
-                printf("%6.2f ", v);
-            }
-            printf("\n");
-        }
-    }
-    printf("gamma: "); for (auto v: gamma) printf("%5.2f ", v); printf("\n");
-    printf("beta : "); for (auto v: beta ) printf("%5.2f ", v); printf("\n");
-    printf("mean : "); for (auto v: mean ) printf("%5.2f ", v); printf("\n");
-    printf("var  : "); for (auto v: var  ) printf("%5.2f ", v); printf("\n");
-
-    // Read back and print output
-    uint32_t outCount = H * W * C;
-    vk::Buffer outBuf = netGlobalDevice.createBuffer({
-        outCount * sizeof(float),
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-    });
-
-    netGlobalDevice.newCommandBuffer(queue_compute)
-        .begin()
-        .copyBuffer(outBuf, out.buffer())
-        .end()
-        .submit()
-        .wait();
-
-    std::vector<float> host(outCount);
-    memcpy(host.data(), outBuf.map(), outCount * sizeof(float));
-
-    printf("BN output Y: \n");
-    for (uint32_t c = 0; c < C; ++c) {
-        printf("  Channel %u:\n", c);
-        for (uint32_t h = 0; h < H; ++h) {
-            printf("    ");
-            for (uint32_t w = 0; w < W; ++w) {
-                float v = host[(h * W + w) * C + c];
-                printf("%7.3f ", v);
-            }
-            printf("\n");
-        }
-    }
-}
-
-void eval_channel_shuffle_concat()
-{
-    void loadShaders();
-    loadShaders();
-
-    const uint32_t H = 3, W = 3, C = 4; // 3x3x4 input
-
-    // Build input (HWC) with a simple increasing pattern
-    std::vector<float> input(H * W * C);
-    for (uint32_t h = 0; h < H; ++h)
-        for (uint32_t w = 0; w < W; ++w)
-            for (uint32_t c = 0; c < C; ++c)
-                input[(h * W + w) * C + c] = float((h * W + w) * C + c);
-
-    NeuralNet net(netGlobalDevice, 1, 1);
-    ChannelShuffleNode cs(C);
-    ConcatNode concat;
-
-    // input -> channel shuffle -> concat -> output
-    net.input(0) - ("in0" / cs);
-    (cs / "out_even") - ("in0" / concat);
-    (cs / "out_odd")  - ("in1" / concat);
-    concat - net.output(0);
-
-    auto outputs = net(Tensor(H, W, C).set(input));
-    Tensor out = outputs[0];
-
-    // Read back output
-    uint32_t count = H * W * C;
-    vk::Buffer outBuf = netGlobalDevice.createBuffer({
-        count * sizeof(float),
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-    });
-
-    netGlobalDevice.newCommandBuffer(queue_compute)
-        .begin()
-        .copyBuffer(outBuf, out.buffer())
-        .end()
-        .submit()
-        .wait();
-
-    std::vector<float> host(count);
-    memcpy(host.data(), outBuf.map(), count * sizeof(float));
-
-    printf("ChannelShuffle + Concat test (H=%u,W=%u,C=%u):\n", H, W, C);
-    printf("Input vs Reconstructed Output:\n");
-    for (uint32_t h = 0; h < H; ++h) {
-        for (uint32_t w = 0; w < W; ++w) {
-            printf("  (h=%u,w=%u): ", h, w);
-            for (uint32_t c = 0; c < C; ++c) {
-                uint32_t idx = (h * W + w) * C + c;
-                printf("[%5.1f -> %5.1f] ", input[idx], host[idx]);
-            }
-            printf("\n");
-        }
-    }
-}
-
-static void load_shufflenet_weights(SuffleNetV2& net, const JsonParser& json, const std::vector<int>& architecture)
-{
-    auto set = [&](const std::string& key, const JsonParserRef& ref) {
-        try { net[key] = Tensor(ref); } catch (...) {}
-    };
-
-    // Stem
-    try {
-        auto stem = json["stem"];
-        set("stem.conv.weight", stem["conv.weight"]);
-        set("stem.conv.bias",   stem["conv.bias"]);
-        set("stem.bn.gamma",    stem["bn.gamma"]);
-        set("stem.bn.beta",     stem["bn.beta"]);
-        set("stem.bn.running_mean", stem["bn.running_mean"]);
-        set("stem.bn.running_var",  stem["bn.running_var"]);
-    } catch (...) {}
-
-    // Features
-    auto feats = json["features"];
-    auto is_stride2 = [&](size_t idx){ return idx==0 || idx==4 || idx==8 || idx==16; };
-
-    for (size_t i = 0; i < architecture.size(); ++i)
+    for (const std::string& key : names)
     {
-        auto bj = feats[static_cast<uint32_t>(i)];
-        char idxs[32]; sprintf(idxs, "%zu", i);
-        std::string base = std::string("features.") + idxs + ".";
-        bool stride2 = is_stride2(i);
-        if (architecture[i] == 3) // Xception
-        {
-            set(base+"dw1.weight", bj["dw1.weight"]);
-            set(base+"dw1.bias",   bj["dw1.bias"]);
-            set(base+"bn1.gamma",  bj["bn1.gamma"]);
-            set(base+"bn1.beta",   bj["bn1.beta"]);
-            set(base+"bn1.running_mean", bj["bn1.running_mean"]);
-            set(base+"bn1.running_var",  bj["bn1.running_var"]);
+        try {
+            auto ref = st[key];
+            std::vector<uint32_t> shape = ref.getShape();
+            std::string dtype = ref.getDataType();
 
-            set(base+"pw1.weight", bj["pw1.weight"]);
-            set(base+"pw1.bias",   bj["pw1.bias"]);
-            set(base+"bn1p.gamma", bj["bn1p.gamma"]);
-            set(base+"bn1p.beta",  bj["bn1p.beta"]);
-            set(base+"bn1p.running_mean", bj["bn1p.running_mean"]);
-            set(base+"bn1p.running_var",  bj["bn1p.running_var"]);
-
-            set(base+"dw2.weight", bj["dw2.weight"]);
-            set(base+"dw2.bias",   bj["dw2.bias"]);
-            set(base+"bn2.gamma",  bj["bn2.gamma"]);
-            set(base+"bn2.beta",   bj["bn2.beta"]);
-            set(base+"bn2.running_mean", bj["bn2.running_mean"]);
-            set(base+"bn2.running_var",  bj["bn2.running_var"]);
-
-            set(base+"pw2.weight", bj["pw2.weight"]);
-            set(base+"pw2.bias",   bj["pw2.bias"]);
-            set(base+"bn2p.gamma", bj["bn2p.gamma"]);
-            set(base+"bn2p.beta",  bj["bn2p.beta"]);
-            set(base+"bn2p.running_mean", bj["bn2p.running_mean"]);
-            set(base+"bn2p.running_var",  bj["bn2p.running_var"]);
-
-            set(base+"dw3.weight", bj["dw3.weight"]);
-            set(base+"dw3.bias",   bj["dw3.bias"]);
-            set(base+"bn3.gamma",  bj["bn3.gamma"]);
-            set(base+"bn3.beta",   bj["bn3.beta"]);
-            set(base+"bn3.running_mean", bj["bn3.running_mean"]);
-            set(base+"bn3.running_var",  bj["bn3.running_var"]);
-
-            set(base+"pw3.weight", bj["pw3.weight"]);
-            set(base+"pw3.bias",   bj["pw3.bias"]);
-            set(base+"bn3p.gamma", bj["bn3p.gamma"]);
-            set(base+"bn3p.beta",  bj["bn3p.beta"]);
-            set(base+"bn3p.running_mean", bj["bn3p.running_mean"]);
-            set(base+"bn3p.running_var",  bj["bn3p.running_var"]);
-
-            if (stride2)
-            {
-                set(base+"proj.dw.weight", bj["proj.dw.weight"]);
-                set(base+"proj.dw.bias",   bj["proj.dw.bias"]);
-                set(base+"proj.bn1.gamma", bj["proj.bn1.gamma"]);
-                set(base+"proj.bn1.beta",  bj["proj.bn1.beta"]);
-                set(base+"proj.bn1.running_mean", bj["proj.bn1.running_mean"]);
-                set(base+"proj.bn1.running_var",  bj["proj.bn1.running_var"]);
-                set(base+"proj.pw.weight", bj["proj.pw.weight"]);
-                set(base+"proj.pw.bias",   bj["proj.pw.bias"]);
-                set(base+"proj.bn2.gamma", bj["proj.bn2.gamma"]);
-                set(base+"proj.bn2.beta",  bj["proj.bn2.beta"]);
-                set(base+"proj.bn2.running_mean", bj["proj.bn2.running_mean"]);
-                set(base+"proj.bn2.running_var",  bj["proj.bn2.running_var"]);
+            // Ensure destination exists in network before parsing large tensor payload
+            Tensor* dst = nullptr;
+            try { dst = &net[key]; }
+            catch (const std::exception& e) {
+                printf("[weights][skip] unknown param in net: %s (dtype=%s)\n", key.c_str(), dtype.c_str());
+                skipped++; continue;
             }
-        }
-        else // ShuffleUnit
-        {
-            set(base+"pw1.weight", bj["pw1.weight"]);
-            set(base+"pw1.bias",   bj["pw1.bias"]);
-            set(base+"bn1.gamma",  bj["bn1.gamma"]);
-            set(base+"bn1.beta",   bj["bn1.beta"]);
-            set(base+"bn1.running_mean", bj["bn1.running_mean"]);
-            set(base+"bn1.running_var",  bj["bn1.running_var"]);
-
-            set(base+"dw.weight", bj["dw.weight"]);
-            set(base+"dw.bias",   bj["dw.bias"]);
-            set(base+"bn2.gamma", bj["bn2.gamma"]);
-            set(base+"bn2.beta",  bj["bn2.beta"]);
-            set(base+"bn2.running_mean", bj["bn2.running_mean"]);
-            set(base+"bn2.running_var",  bj["bn2.running_var"]);
-
-            set(base+"pw2.weight", bj["pw2.weight"]);
-            set(base+"pw2.bias",   bj["pw2.bias"]);
-            set(base+"bn3.gamma",  bj["bn3.gamma"]);
-            set(base+"bn3.beta",   bj["bn3.beta"]);
-            set(base+"bn3.running_mean", bj["bn3.running_mean"]);
-            set(base+"bn3.running_var",  bj["bn3.running_var"]);
-
-            if (stride2)
-            {
-                set(base+"proj.dw.weight", bj["proj.dw.weight"]);
-                set(base+"proj.dw.bias",   bj["proj.dw.bias"]);
-                set(base+"proj.bn1.gamma", bj["proj.bn1.gamma"]);
-                set(base+"proj.bn1.beta",  bj["proj.bn1.beta"]);
-                set(base+"proj.bn1.running_mean", bj["proj.bn1.running_mean"]);
-                set(base+"proj.bn1.running_var",  bj["proj.bn1.running_var"]);
-                set(base+"proj.pw.weight", bj["proj.pw.weight"]);
-                set(base+"proj.pw.bias",   bj["proj.pw.bias"]);
-                set(base+"proj.bn2.gamma", bj["proj.bn2.gamma"]);
-                set(base+"proj.bn2.beta",  bj["proj.bn2.beta"]);
-                set(base+"proj.bn2.running_mean", bj["proj.bn2.running_mean"]);
-                set(base+"proj.bn2.running_var",  bj["proj.bn2.running_var"]);
+            catch (...) {
+                printf("[weights][skip] unknown param in net: %s (dtype=%s, reason=unknown)\n", key.c_str(), dtype.c_str());
+                skipped++; continue;
             }
 
-            // optional SE
-            try {
-                auto se = bj["se"];
-                set(base+"se.conv1.weight", se["conv1.weight"]);
-                set(base+"se.conv1.bias",   se["conv1.bias"]);
-                set(base+"se.bn.gamma",     se["bn.gamma"]);
-                set(base+"se.bn.beta",      se["bn.beta"]);
-                set(base+"se.bn.running_mean", se["bn.running_mean"]);
-                set(base+"se.bn.running_var",  se["bn.running_var"]);
-                set(base+"se.conv2.weight", se["conv2.weight"]);
-                set(base+"se.conv2.bias",   se["conv2.bias"]);
-            } catch (...) {}
+            if (dtype != "F32")
+                printf("[weights][warn] unexpected dtype for %s: %s (expect F32)\n", key.c_str(), dtype.c_str());
+
+            std::vector<float> data = ref.parseNDArray();
+            Tensor t(shape);
+            t.set(std::move(data)).markConstant();
+            net[key] = std::move(t);
+            bound++;
+
+            auto ends_with = [](const std::string& s, const char* suf) {
+                size_t n = std::strlen(suf);
+                return s.size() >= n && 0 == s.compare(s.size()-n, n, suf);
+            };
+            bool isW = ends_with(key, ".weight");
+            bool isB = ends_with(key, ".bias");
+            bool isG = ends_with(key, ".gamma");
+            bool isBe= ends_with(key, ".beta");
+            bool isRM= ends_with(key, ".running_mean");
+            bool isRV= ends_with(key, ".running_var");
+            if (isW) wcnt++; else if (isB) bcnt++; else if (isG) gammacnt++; else if (isBe) betacnt++; else if (isRM) rmcnt++; else if (isRV) rvcnt++; else other++;
+
+            if (isW || isB || isG || isBe || isRM || isRV) {
+                printf("[weights][bound] %-40s shape=", key.c_str());
+                for (size_t i = 0; i < shape.size(); ++i) {
+                    printf("%u%s", shape[i], (i+1<shape.size()?"x":""));
+                }
+                printf(", dtype=%s\n", dtype.c_str());
+            }
+        } catch (const std::exception& e) {
+            printf("[weights][error] key=%s reason=%s\n", key.c_str(), e.what());
+            skipped++;
+        } catch (...) {
+            printf("[weights][error] key=%s reason=unknown\n", key.c_str());
+            skipped++;
         }
     }
 
-    // Tail
-    try {
-        auto last = json["last"];
-        set("last.conv.weight", last["conv.weight"]);
-        set("last.conv.bias",   last["conv.bias"]);
-        set("last.bn.gamma",    last["bn.gamma"]);
-        set("last.bn.beta",     last["bn.beta"]);
-        set("last.bn.running_mean", last["bn.running_mean"]);
-        set("last.bn.running_var",  last["bn.running_var"]);
-    } catch (...) {}
+    printf("[weights] summary: total=%zu bound=%zu skipped=%zu (weights=%zu, bias=%zu, gamma=%zu, beta=%zu, running_mean=%zu, running_var=%zu, others=%zu)\n",
+           total, bound, skipped, wcnt, bcnt, gammacnt, betacnt, rmcnt, rvcnt, other);
+}
 
-    // Last SE (optional)
-    try {
-        auto se = json["lastSE"];
-        set("lastSE.conv1.weight", se["conv1.weight"]);
-        set("lastSE.conv1.bias",   se["conv1.bias"]);
-        set("lastSE.bn.gamma",     se["bn.gamma"]);
-        set("lastSE.bn.beta",      se["bn.beta"]);
-        set("lastSE.bn.running_mean", se["bn.running_mean"]);
-        set("lastSE.bn.running_var",  se["bn.running_var"]);
-        set("lastSE.conv2.weight", se["conv2.weight"]);
-        set("lastSE.conv2.bias",   se["conv2.bias"]);
-    } catch (...) {}
+// Eval function in the style of 11-mnist-refactor: run net for `iter` iterations
+static Tensor eval_shufflenet(const Tensor& input, SuffleNetV2& net, uint32_t iter)
+{
+    Tensor result;
+    Tensor in = input; // keep a local copy to avoid moving the original
+    for (uint32_t i = 0; i < iter; ++i)
+        result = net(in)[0];
+    return result;
+}
 
-    // FCs
-    try { auto fc = json["fc1"]; set("fc1.weight", fc["weight"]); set("fc1.bias", fc["bias"]); } catch (...) {}
-    try { auto clf = json["classifier"]; set("classifier.weight", clf["weight"]); set("classifier.bias", clf["bias"]); } catch (...) {}
+static bool tensorToHost(Tensor& tensor, std::vector<float>& host, std::vector<uint32_t>& shapeOut)
+{
+    const auto& shape = tensor.shape();
+    if (shape.empty()) {
+        printf("[debug] tensor has no shape\n");
+        return false;
+    }
+    size_t elemCount = tensor.numElements();
+    if (elemCount == 0) {
+        printf("[debug] tensor empty\n");
+        return false;
+    }
+    shapeOut.assign(shape.begin(), shape.end());
+    host.resize(elemCount);
+    if (tensor.hasHostData()) {
+        std::memcpy(host.data(), tensor.hostData(), elemCount * sizeof(float));
+    } else if (tensor.hasDeviceData()) {
+        vk::Buffer dbgBuffer = netGlobalDevice.createBuffer({
+            elemCount * sizeof(float),
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        });
+
+        netGlobalDevice.newCommandBuffer(queue_compute)
+            .begin()
+            .copyBuffer(dbgBuffer, tensor.buffer())
+            .end()
+            .submit()
+            .wait();
+
+        std::memcpy(host.data(), dbgBuffer.map(), elemCount * sizeof(float));
+    } else {
+        printf("[debug] tensor has no data\n");
+        return false;
+    }
+    return true;
+}
+
+static void dumpTensorSlice(const char* label, Tensor& tensor)
+{
+    std::vector<float> host;
+    std::vector<uint32_t> shape;
+    if (!tensorToHost(tensor, host, shape))
+        return;
+    size_t show = std::min<size_t>(5, host.size());
+    printf("[debug][%s] shape=[", label);
+    for (size_t i = 0; i < shape.size(); ++i)
+        printf("%u%s", shape[i], (i + 1 < shape.size() ? "," : ""));
+    printf("] values=");
+    if (show) {
+        printf("[");
+        for (size_t i = 0; i < show; ++i)
+            printf("%s%.6f", (i == 0 ? "" : ", "), host[i]);
+        printf("]");
+    } else {
+        printf("[]");
+    }
+    printf("\n");
+}
+
+static void dumpTensorToJson(const std::string& basePath, Tensor& tensor)
+{
+    std::vector<float> host;
+    std::vector<uint32_t> shape;
+    if (!tensorToHost(tensor, host, shape)) {
+        printf("[debug] cannot dump tensor %s\n", basePath.c_str());
+        return;
+    }
+
+    const std::filesystem::path dumpDir = std::filesystem::path(PROJECT_CURRENT_DIR) / "dump";
+    std::error_code ec;
+    std::filesystem::create_directories(dumpDir, ec);
+    const std::filesystem::path jsonPath = dumpDir / (basePath + ".json");
+    if (!writeTensorToJson(host, shape, jsonPath.string())) {
+        printf("[debug] failed to open %s for writing\n", jsonPath.string().c_str());
+        return;
+    }
+    printf("[debug] dumped tensor to %s\n", jsonPath.string().c_str());
 }
 
 void Run()
 {
     void loadShaders();
     loadShaders();
+    printf("[Run] shaders loaded\n");
 
-    // 1) Load exported weights
-    JsonParser json = JsonParser(PROJECT_CURRENT_DIR"/weights.json");
-    printf("load weight\n");
+    // Resolve weights path once
+    const char* candidates[] = {
+        PROJECT_CURRENT_DIR"/python/weights_cpp.safetensors",
+    };
+    const char* weightsPath = nullptr;
+    for (const char* path : candidates) {
+        printf("[Run] try weights: %s\n", path);
+        try {
+            SafeTensorsParser st(path);
+            (void)st;
+            weightsPath = path;
+            printf("[Run] loaded weights: %s\n", path);
+            break;
+        } catch(const std::exception& e) {
+            printf("[Run] not found: %s\n", path);
+        } catch(...) {
+            printf("[Run] not found: %s (unknown)\n", path);
+        }
+    }
+    if (!weightsPath)
+        throw std::runtime_error("Failed to load weights.safetensors from known locations.");
 
-    // 2) Build ShuffleNetV2+ (Small) architecture to match exporter
+    const bool dumpDebug = (std::getenv("SHUFFLENET_DEBUG") != nullptr);
+
+    // Loader using readImage<>; converts to BGR float (0..255), no resize/crop
+    auto load_image_hwc = [](const char* path, uint32_t /*outH*/, uint32_t /*outW*/) -> Tensor
+    {
+        constexpr uint32_t reqC = 3;
+        auto [srcImage, width, height] = readImage<reqC>(path);
+        printf("[Run] source image size: %ux%u\n", width, height);
+        // Convert RGB uint8 -> BGR float (0..255)
+        std::vector<float> bgr((size_t)width * height * reqC);
+        for (size_t i = 0; i < (size_t)width * height; ++i)
+        {
+            const uint8_t r = srcImage[i * reqC + 0];
+            const uint8_t g = srcImage[i * reqC + 1];
+            const uint8_t b = srcImage[i * reqC + 2];
+            bgr[i * reqC + 0] = (float)b;
+            bgr[i * reqC + 1] = (float)g;
+            bgr[i * reqC + 2] = (float)r;
+        }
+        return Tensor(height, width, reqC).set(std::move(bgr));
+    };
+
+    const uint32_t H = 224, W = 224, C = 3;
+    const char* imgCandidates[] = {
+        PROJECT_CURRENT_DIR"/data/cat_281.jpg",
+        PROJECT_CURRENT_DIR"/data/dog_207.jpg",
+        PROJECT_CURRENT_DIR"/data/dog2_207.jpg",
+        PROJECT_CURRENT_DIR"/data/tiger_292.jpg",
+        PROJECT_CURRENT_DIR"/data/trafficlight_920.jpg",
+        PROJECT_CURRENT_DIR"/data/zebra_340.jpg",
+    };
+    // Inference for each image, print argmax class
+    // Build net once and load weights once to avoid descriptor pool exhaustion and ensure stability
     std::vector<int> architecture = {0, 0, 3, 1, 1, 1, 0, 0, 2, 0, 2, 1, 1, 0, 2, 0, 2, 1, 3, 2};
     SuffleNetV2 net(netGlobalDevice, architecture, 1000);
-    printf("set model\n");
-    load_shufflenet_weights(net, json, architecture);
+    {
+        TimeChecker timer("(VAI) Load ShuffleNet weights");
+        load_shufflenet_safetensors(net, weightsPath);
+    }
+    printf("[Run] weights bound to network\n");
+    if (dumpDebug)
+    {
+        dumpTensorToJson("stem_conv_weight_cpp", net["stem.conv.weight"]);
+        dumpTensorToJson("stem_bn_gamma_cpp", net["stem.bn.gamma"]);
+        dumpTensorToJson("stem_bn_beta_cpp", net["stem.bn.beta"]);
+    }
 
-    printf("load model\n");
+    int attempted = 0, processed = 0;
+    const uint32_t iter = 1; // align with 11-mnist style (configurable if needed)
+    for (const char* p : imgCandidates)
+    {
+        attempted++;
+        const char* base = p; for (const char* q = p; *q; ++q) if (*q=='/' || *q=='\\') base = q+1;
+        Tensor input;
+        try { input = load_image_hwc(p, H, W); printf("[Run] image loaded: %s\n", base); }
+        catch (const std::exception& e) { printf("[Run] skip image %s: %s\n", base, e.what()); continue; }
+        catch (...) { printf("[Run] skip image %s: unknown error\n", base); continue; }
+        if (dumpDebug)
+            dumpTensorSlice("input", input);
 
-    // 3) Prepare a dummy RGB input (224x224x3). Replace with image if desired.
-    const uint32_t H = 224, W = 224, C = 3;
-    std::vector<float> input(H * W * C, 0.5f);
+        std::vector<std::pair<std::string, Tensor*>> debugSlots;
+        if (dumpDebug)
+        {
+            debugSlots = {
+                {"stem.conv", &net.debug_first_conv_out()},
+                {"stem.bn", &net.debug_first_bn_out()},
+                {"first_hs", &net.debug_first_hs()},
+            };
+            for (uint32_t i = 0; i < net.debug_feature_count(); ++i) {
+                debugSlots.push_back({"feat." + std::to_string(i), &net.debug_feature_out(i)});
+            }
+            debugSlots.push_back({"conv_last", &net.debug_conv_last_out()});
+            debugSlots.push_back({"bn_last", &net.debug_bn_last_out()});
+            debugSlots.push_back({"last_hs", &net.debug_last_hs_out()});
+            gNeuralNetKeepTensors = true;
+        }
 
-    // 4) Run inference
-    Tensor logits = net(Tensor(H, W, C).set(input))[0];
+        Tensor logits;
+        {
+            TimeChecker timer("(VAI) ShuffleNet evaluation: {} iterations", iter);
+            logits = eval_shufflenet(input, net, iter);
+        }
+        if (dumpDebug)
+            gNeuralNetKeepTensors = false;
 
-    // 5) Read back and print first 10 outputs
-    const uint32_t outN = 10; // print top-10 indices raw (not sorted)
-    vk::Buffer outBuffer = netGlobalDevice.createBuffer({
-        outN * sizeof(float),
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-    });
+        if (dumpDebug)
+        {
+            std::string baseNameStr(base);
+            size_t dot = baseNameStr.find_last_of('.');
+            if (dot != std::string::npos)
+                baseNameStr = baseNameStr.substr(0, dot);
 
-    netGlobalDevice.newCommandBuffer(queue_compute)
-        .begin()
-        .copyBuffer(outBuffer, logits.buffer())
-        .end()
-        .submit()
-        .wait();
+            for (auto& slot : debugSlots)
+            {
+                dumpTensorSlice(slot.first.c_str(), *slot.second);
+                const std::string& label = slot.first;
+                if (label == "stem.conv")
+                    dumpTensorToJson(baseNameStr + "_stem_conv_cpp", *slot.second);
+                else if (label == "stem.bn")
+                    dumpTensorToJson(baseNameStr + "_stem_bn_cpp", *slot.second);
+                slot.second->markConstant(false);
+                *slot.second = Tensor();
+            }
+        }
 
-    float data[outN];
-    memcpy(data, outBuffer.map(), outN * sizeof(float));
-    for (uint32_t i = 0; i < outN; ++i)
-        printf("logits[%u] = %f\n", i, data[i]);
+        // Read back all logits and find argmax
+        const auto& s = logits.shape();
+        uint32_t outN = s.empty() ? 1000u : s[0];
+        vk::Buffer outBuffer = netGlobalDevice.createBuffer({
+            outN * sizeof(float),
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        });
+
+        netGlobalDevice.newCommandBuffer(queue_compute)
+            .begin()
+            .copyBuffer(outBuffer, logits.buffer())
+            .end()
+            .submit()
+            .wait();
+
+        std::vector<float> host(outN);
+        std::memcpy(host.data(), outBuffer.map(), outN * sizeof(float));
+
+        // softmax for probability
+        float maxLogit = host[0];
+        for (uint32_t i = 1; i < outN; ++i) if (host[i] > maxLogit) maxLogit = host[i];
+        double sumExp = 0.0;
+        for (uint32_t i = 0; i < outN; ++i) { host[i] = std::exp(host[i] - maxLogit); sumExp += host[i]; }
+        uint32_t bestIdx = 0; float bestProb = float(host[0] / sumExp);
+        for (uint32_t i = 1; i < outN; ++i) {
+            float p = float(host[i] / sumExp);
+            if (p > bestProb) { bestProb = p; bestIdx = i; }
+        }
+
+        printf("%s -> %u (prob=%.4f)\n", base, bestIdx, bestProb);
+        processed++;
+    }
+    printf("[Run] images tried=%d, processed=%d\n", attempted, processed);
 }

@@ -161,7 +161,7 @@ public:
 
 class ConvBNSwishNode : public Node
 {
-    uint32_t C, F, K;   // C: input channels, F: output channels, K: kernel width
+    uint32_t C, F, K, Stride;   // C: input channels, F: output channels, K: kernel width
 
     ComputePipeline im2col;
     ComputePipeline gemm_bn_swish;
@@ -170,7 +170,7 @@ class ConvBNSwishNode : public Node
     uint32_t gemmTileSize;
 
 public:
-    ConvBNSwishNode(uint32_t inChannels, uint32_t outChannels, uint32_t kernelWidth);
+    ConvBNSwishNode(uint32_t inChannels, uint32_t outChannels, uint32_t kernelWidth, uint32_t stride = 1);
     void prepare() override;
     void run(CommandBuffer cmdBuff) override;
 };

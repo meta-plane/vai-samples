@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <cstring>  // memcpy
 
+inline bool gNeuralNetKeepTensors = false;
 
 using namespace vk;
 
@@ -218,7 +219,7 @@ class NeuralNet
     Buffer uploadBuffer; 
     uint8_t* uploadBufferMappedAddress = nullptr;
     size_t uploadBufferOffset = 0; 
-    const size_t uploadBufferSize = 1024 * 1024 * 64; // 64 MB
+    const size_t uploadBufferSize = size_t(1024) * 1024 * 1024; // 1 GB (avoid staging overflow on full model uploads)
 
     std::vector<InputNode> _inputs;
     std::vector<OutputNode> _outputs;
@@ -507,6 +508,9 @@ inline void NeuralNet::run()
                 continue;
 
             if (slot.getValueRef().isConstant())
+                continue;
+
+            if (gNeuralNetKeepTensors)
                 continue;
 
             slot.getValueRef() = Tensor(); 

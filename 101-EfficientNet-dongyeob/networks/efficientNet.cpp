@@ -22,26 +22,23 @@ EfficientNetConfig getEfficientNetConfig(EfficientNetVersion version)
 // B0 기본 구조 (multiplier 적용 전)
 static std::vector<MBConvConfig> getB0BaseConfig()
 {
+    // 7 stages matching PyTorch EfficientNet-B0 structure
     return {
-        {32, 16, 1, 3, 1, 0.25f},       // Block 1
-        {16, 24, 6, 3, 2, 0.25f},       // Block 2
-        {24, 24, 6, 3, 1, 0.25f},       // Block 3
-        {24, 40, 6, 5, 2, 0.25f},       // Block 4
-        {40, 40, 6, 5, 1, 0.25f},       // Block 5
-        {40, 80, 6, 3, 2, 0.25f},       // Block 6
-        {80, 80, 6, 3, 1, 0.25f},       // Block 7
-        {80, 112, 6, 5, 1, 0.25f},      // Block 8
-        {112, 112, 6, 5, 1, 0.25f},     // Block 9
-        {112, 192, 6, 5, 2, 0.25f},     // Block 10
-        {192, 192, 6, 5, 1, 0.25f},     // Block 11
-        {192, 320, 6, 3, 1, 0.25f},     // Block 12
+        {32, 16, 1, 3, 1, 0.25f},       // Stage 1: MBConv1, k3x3
+        {16, 24, 6, 3, 2, 0.25f},       // Stage 2: MBConv6, k3x3
+        {24, 40, 6, 5, 2, 0.25f},       // Stage 3: MBConv6, k5x5
+        {40, 80, 6, 3, 2, 0.25f},       // Stage 4: MBConv6, k3x3
+        {80, 112, 6, 5, 1, 0.25f},      // Stage 5: MBConv6, k5x5
+        {112, 192, 6, 5, 2, 0.25f},     // Stage 6: MBConv6, k5x5
+        {192, 320, 6, 3, 1, 0.25f},     // Stage 7: MBConv6, k3x3
     };
 }
 
 // 각 블록의 반복 횟수 (B0 기준)
 static std::vector<uint32_t> getBlockRepeatCounts()
 {
-    return {1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7};
+    // Repeat counts for 7 stages (matching PyTorch structure)
+    return {1, 2, 2, 3, 3, 4, 1};
 }
 
 // 채널 수를 width multiplier로 스케일링 (8의 배수로 반올림)
@@ -100,7 +97,7 @@ EfficientNet::EfficientNet(Device& device, EfficientNetVersion version, uint32_t
 
 EfficientNet::EfficientNet(Device& device, const std::vector<MBConvConfig>& blockConfigs, uint32_t numClasses, uint32_t stemOutChannels, uint32_t headOutChannels)
 : NeuralNet(device, 1, 1)
-, stem(3, stemOutChannels, 3)
+, stem(3, stemOutChannels, 3, 2)
 , headConv(blockConfigs.empty() ? stemOutChannels : blockConfigs.back().out_channels, headOutChannels, 1)
 , globalAvgPool()
 , flatten()

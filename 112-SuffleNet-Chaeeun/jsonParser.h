@@ -4,6 +4,7 @@
 
 #include <vector>
 #include <memory>
+#include <string>
 #include <string_view>
 
 struct JsonParserImpl;
@@ -39,6 +40,10 @@ public:
     std::vector<float> parseNDArray(std::vector<uint32_t>& outShape) const;
     std::vector<float> parseNDArray() const;
 };
+
+bool writeTensorToJson(const std::vector<float>& data,
+                       const std::vector<uint32_t>& shape,
+                       const std::string& jsonFilePath);
 
 
 #endif // JSONPARSER_H

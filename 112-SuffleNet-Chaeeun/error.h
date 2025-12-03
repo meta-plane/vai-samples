@@ -54,6 +54,8 @@ inline const char* vkResult2String(VkResult errorCode)
         STR(ERROR_INCOMPATIBLE_DRIVER);
         STR(ERROR_TOO_MANY_OBJECTS);
         STR(ERROR_FORMAT_NOT_SUPPORTED);
+        STR(ERROR_OUT_OF_POOL_MEMORY);
+        STR(ERROR_FRAGMENTED_POOL);
         STR(ERROR_SURFACE_LOST_KHR);
         STR(ERROR_NATIVE_WINDOW_IN_USE_KHR);
         STR(SUBOPTIMAL_KHR);
@@ -62,6 +64,7 @@ inline const char* vkResult2String(VkResult errorCode)
         STR(ERROR_VALIDATION_FAILED_EXT);
         STR(ERROR_INVALID_SHADER_NV);
         STR(ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
+        STR(ERROR_UNKNOWN);
 #undef STR
     default:
         return "UNKNOWN_ERROR";

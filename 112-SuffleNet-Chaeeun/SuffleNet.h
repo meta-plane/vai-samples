@@ -78,7 +78,7 @@ class SELayer : public NodeGroup
     BatchNormNode bn;
     ReluNode relu;
     ConvolutionNode conv_2;
-    HSNode hs;
+    HSigmoidNode hsig;
     MultiplyNode mul;
 
 public:
@@ -87,7 +87,7 @@ public:
       aap(1), conv_1(inChannels, inChannels/4, 1),
       bn(inChannels/4), conv_2(inChannels/4, inChannels, 1)
     {
-        aap - conv_1 - bn - relu - conv_2 - hs - "atten" / mul;
+        aap - conv_1 - bn - relu - conv_2 - hsig - "atten" / mul;
         defineSlot("in0", aap.slot("in0"));
         defineSlot("in1", mul.slot("in0"));
         defineSlot("out0", mul.slot("out0"));
@@ -96,9 +96,9 @@ public:
     Tensor& operator[](const std::string& name)
     {
         // Support: conv1.*, bn.*, conv2.*
-        if (name.starts_with("conv1.")) return conv_1[name.substr(7)];
+        if (name.starts_with("conv1.")) return conv_1[name.substr(6)];
         if (name.starts_with("bn."))    return bn[name.substr(3)];
-        if (name.starts_with("conv2.")) return conv_2[name.substr(7)];
+        if (name.starts_with("conv2.")) return conv_2[name.substr(6)];
         return conv_1[name]; // fallback: weight & bias
     }
 };
@@ -247,6 +247,7 @@ public:
     Tensor& operator[](const std::string& name)
     {
         if (name.starts_with("pw1.")) return pw1[name.substr(4)];
+        if (name.starts_with("dw."))  return dw[name.substr(3)];
         if (name.starts_with("pw2.")) return pw2[name.substr(4)];
         if (name.starts_with("bn1.")) return bn1[name.substr(4)];
         if (name.starts_with("bn2.")) return bn2[name.substr(4)];
@@ -316,9 +317,10 @@ public:
     : inp(inp_), oup(oup_), mid(base_mid_channels), s(stride_), useSE(useSE_), act(activation)
     , dw1(inp_, inp_, 3, stride_, 1), bn1(inp_)
     , pw1(inp_, base_mid_channels, 1), bn1p(base_mid_channels)
-    , dw2(base_mid_channels, base_mid_channels, 3, 1, 1), bn2(base_mid_channels)
+    // Match Python Shuffle_Xception: dw1, dw2, dw3 all use `stride` as in blocks.py
+    , dw2(base_mid_channels, base_mid_channels, 3, s, 1), bn2(base_mid_channels)
     , pw2(base_mid_channels, base_mid_channels, 1), bn2p(base_mid_channels)
-    , dw3(base_mid_channels, base_mid_channels, 3, 1, 1), bn3(base_mid_channels)
+    , dw3(base_mid_channels, base_mid_channels, 3, s, 1), bn3(base_mid_channels)
     , pw3(base_mid_channels, (oup_ > inp_ ? (oup_ - inp_) : 0), 1), bn3p((oup_ > inp_ ? (oup_ - inp_) : 0))
     , dwp(inp_, inp_, 3, stride_, 1), bnp1(inp_)
     , pwp(inp_, inp_, 1), bnp2(inp_)
@@ -387,22 +389,27 @@ public:
 
     Tensor& operator[](const std::string& name)
     {
-        if (name.starts_with("dw1.")) return dw1[name.substr(4)];
-        if (name.starts_with("pw1.")) return pw1[name.substr(4)];
-        if (name.starts_with("bn1.")) return bn1[name.substr(4)];
-        if (name.starts_with("bn1p.")) return bn1p[name.substr(6)];
-        if (name.starts_with("dw2.")) return dw2[name.substr(4)];
-        if (name.starts_with("bn2.")) return bn2[name.substr(4)];
-        if (name.starts_with("pw2.")) return pw2[name.substr(4)];
-        if (name.starts_with("bn2p.")) return bn2p[name.substr(6)];
-        if (name.starts_with("dw3.")) return dw3[name.substr(4)];
-        if (name.starts_with("bn3.")) return bn3[name.substr(4)];
-        if (name.starts_with("pw3.")) return pw3[name.substr(4)];
-        if (name.starts_with("bn3p.")) return bn3p[name.substr(6)];
+        // Order matters: check more specific/longer prefixes first to avoid accidental matches
         if (name.starts_with("proj.dw.")) return dwp[name.substr(8)];
         if (name.starts_with("proj.pw.")) return pwp[name.substr(8)];
         if (name.starts_with("proj.bn1.")) return bnp1[name.substr(9)];
         if (name.starts_with("proj.bn2.")) return bnp2[name.substr(9)];
+
+        if (name.starts_with("dw3."))   return dw3[name.substr(4)];
+        if (name.starts_with("pw3."))   return pw3[name.substr(4)];
+        if (name.starts_with("bn3p."))  return bn3p[name.substr(5)];
+        if (name.starts_with("bn3."))   return bn3[name.substr(4)];
+
+        if (name.starts_with("dw2."))   return dw2[name.substr(4)];
+        if (name.starts_with("pw2."))   return pw2[name.substr(4)];
+        if (name.starts_with("bn2p."))  return bn2p[name.substr(5)];
+        if (name.starts_with("bn2."))   return bn2[name.substr(4)];
+
+        if (name.starts_with("dw1."))   return dw1[name.substr(4)];
+        if (name.starts_with("pw1."))   return pw1[name.substr(4)];
+        if (name.starts_with("bn1p."))  return bn1p[name.substr(5)];
+        if (name.starts_with("bn1."))   return bn1[name.substr(4)];
+
         if (se && name.starts_with("se.")) return (*se)[name.substr(3)];
         throw std::runtime_error("No such param in ShuffleXception: " + name);
     }
@@ -423,8 +430,8 @@ class SuffleNetV2 : public NeuralNet
     std::unique_ptr<ConvolutionNode> conv_last; // depends on last stage channels
     std::unique_ptr<BatchNormNode>   bn_last;   // 1280
     HSNode                           last_hs;
-    // head: GAP(1x1) -> SE(1280) -> Flatten -> FC(1280->1280) -> HS -> FC(1280->num_class)
-    AdaptiveAvgPoolingNode gap{1};
+    // head: AvgPool2d(7,7, no padding, tail discard) -> SE(1280) -> Flatten -> FC(1280->1280) -> HS -> FC(1280->num_class)
+    AveragePoolingNode     gap{7};
     SELayer                lastSE{1280};
     FlattenNode            flatten;
     FullyConnectedNode     fc1{1280, 1280};
@@ -496,13 +503,34 @@ public:
             // No blocks (theoretically shouldn't happen for ShuffleNetV2 Small), wire stem -> tail
             (NodeFlow)first_hs - *conv_last - *bn_last - last_hs;
         }
-        // GAP(1x1) -> SE (feed same tensor to both in0 and in1)
+        // AvgPool2d(7) -> SE (feed same tensor to both in0 and in1)
         (NodeFlow)last_hs - gap;
         (NodeFlow)gap - ("in0" / lastSE);
+        // PyTorch applies SE after global average pooling: both feature and atten are 1x1
         (NodeFlow)gap - ("in1" / lastSE);
         // Flatten -> FC -> HS -> Classifier -> output
         ("out0" / lastSE) - flatten - fc1 - fc_hs - classifier - output(0);
     }
+
+    Tensor& debug_first_hs() { return first_hs["out0"]; }
+    Tensor& debug_first_conv_out() { return first_conv["out0"]; }
+    Tensor& debug_first_bn_out() { return first_bn["out0"]; }
+    uint32_t debug_feature_count() const { return static_cast<uint32_t>(feature_order.size()); }
+    Tensor& debug_feature_out(uint32_t idx)
+    {
+        _ASSERT(idx < feature_order.size());
+        if (feature_order[idx].isXc) {
+            _ASSERT(feature_order[idx].xc);
+            return feature_order[idx].xc->slot("out0").getValueRef();
+        } else {
+            _ASSERT(feature_order[idx].su);
+            return feature_order[idx].su->slot("out0").getValueRef();
+        }
+    }
+    Tensor& debug_conv_last_out() { return (*conv_last)["out0"]; }
+    Tensor& debug_bn_last_out() { return (*bn_last)["out0"]; }
+    Tensor& debug_last_hs_out() { return last_hs["out0"]; }
+
     // Optional parameter routing
     Tensor& operator[](const std::string& name)
     {

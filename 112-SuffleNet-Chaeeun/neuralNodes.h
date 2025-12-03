@@ -109,6 +109,17 @@ public:
     void run(CommandBuffer cmdBuff) override;
 };
 
+class HSigmoidNode : public Node
+{
+    ComputePipeline hsigmoid;
+    DescriptorSet hsigmoidDescSet;
+
+public:
+    HSigmoidNode();
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
 class MultiplyNode : public Node
 {
     ComputePipeline multiply;
@@ -153,6 +164,26 @@ class ConcatNode : public Node
 
 public:
     ConcatNode();
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+// Fixed-kernel average pooling (no padding, ceil_mode=false, stride=P)
+class AveragePoolingNode : public Node
+{
+    uint32_t P;
+
+    ComputePipeline avgpool;
+    DescriptorSet avgpoolDescSet;
+
+public:
+    AveragePoolingNode(uint32_t poolSize) : P(poolSize)
+    {
+        addSlot("in0", NodeSlot::input);
+        addSlot("out0", NodeSlot::output);
+
+        // shader set in cpp (src_avgpool)
+    }
     void prepare() override;
     void run(CommandBuffer cmdBuff) override;
 };

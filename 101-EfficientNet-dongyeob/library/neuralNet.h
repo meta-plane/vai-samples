@@ -149,7 +149,13 @@ public:
 
     Tensor& operator[](const std::string& name)
     {
-        return slots.at(name).getValueRef();
+        // printf("Node[%s]::operator[](%s)\n", this->name.c_str(), name.c_str()); fflush(stdout);
+        try {
+            return slots.at(name).getValueRef();
+        } catch (...) {
+            // printf("Node[%s]::operator[](%s) FAILED\n", this->name.c_str(), name.c_str()); fflush(stdout);
+            throw;
+        }
     }
 
     const Tensor& operator[](const std::string& name) const
