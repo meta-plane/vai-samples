@@ -5,6 +5,7 @@ This creates known inputs and expected outputs for numerical verification
 
 import numpy as np
 import json
+from pathlib import Path
 
 
 def softmax(x, axis=-1):
@@ -189,10 +190,16 @@ def generate_test_case():
     }
 
     # Save to JSON
-    with open('../assets/test_data/mha_test_data.json', 'w') as f:
+    script_dir = Path(__file__).resolve().parent
+    project_root = script_dir.parent.parent
+    output_dir = project_root / "assets" / "test_data"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    output_file = output_dir / "mha_test_data.json"
+    with open(output_file, 'w') as f:
         json.dump(test_data, f, indent=2)
 
-    print("Test data saved to '../assets/test_data/mha_test_data.json'")
+    print(f"Test data saved to {output_file.absolute()}")
     print()
     print("Output shape:", output.shape)
     print("Output (first batch, first token):", output[0, 0].tolist())
