@@ -58,6 +58,7 @@ LinearNode::LinearNode(uint32_t in_features, uint32_t out_features)
 {
     addSlot("in0", NodeSlot::input);
     addSlot("weight", NodeSlot::input);  // learnable parameter
+    addSlot("bias", NodeSlot::input);    // learnable parameter (bias)
     addSlot("out0", NodeSlot::output);
 
     linearPipeline = requestPipeline(src_linear);
@@ -80,6 +81,14 @@ void LinearNode::prepare()
         weight = Tensor(out_features, in_features);
     }
 
+    Tensor& bias = (*this)["bias"];
+    if (!bias.validShape()) {
+        bias = Tensor(out_features);
+        // Initialize bias to zero if not provided
+        std::vector<float> zero_bias(out_features, 0.0f);
+        bias.set(zero_bias);
+    }
+
     (*this)["out0"] = Tensor(B, S, out_features);
 }
 
@@ -87,6 +96,7 @@ void LinearNode::run(CommandBuffer cmdBuff)
 {
     Tensor& input = (*this)["in0"];
     Tensor& weight = (*this)["weight"];
+    Tensor& bias = (*this)["bias"];
     Tensor& output = (*this)["out0"];
 
     uint32_t B = input.shape()[0];
@@ -96,7 +106,8 @@ void LinearNode::run(CommandBuffer cmdBuff)
     linearDescSet.write({
         output.buffer(),
         input.buffer(),
-        weight.buffer()
+        weight.buffer(),
+        bias.buffer()  // Add bias buffer binding
     });
 
     int constants[] = {(int)B, (int)S, (int)in_features, (int)out_features};
