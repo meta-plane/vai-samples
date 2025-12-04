@@ -35,13 +35,13 @@ add_executable(gpt2-inference
 )
 
 # ============================================================================
-# Executable 2: Test Runner (unit tests)
+# Executable 2: Test Runner (Unit tests for GPT-2 layers)
 # ============================================================================
 
-add_executable(runAllTests
-    test/runAllTests.cpp
-    test/layerTests.cpp
-    test/attentionTests.cpp
+add_executable(gpt2-unit-tests
+    test/runTests.cpp
+    test/testBase.cpp
+    test/linearTest.cpp
     ${COMMON_SOURCES}
 )
 
@@ -49,9 +49,9 @@ add_executable(runAllTests
 # Aggregate Target: Build All
 # ============================================================================
 
-# Create a target that builds both executables
+# Create a target that builds all executables
 add_custom_target(${PROJECT_NAME} ALL
-    DEPENDS gpt2-inference runAllTests
+    DEPENDS gpt2-inference gpt2-unit-tests
 )
 
 # ============================================================================
@@ -63,7 +63,7 @@ add_definitions(
 )
 
 # Apply to all targets
-foreach(target gpt2-inference runAllTests)
+foreach(target gpt2-inference gpt2-unit-tests)
     target_include_directories(${target} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${Vulkan_INCLUDE_DIRS}
@@ -84,7 +84,7 @@ endforeach()
 # ============================================================================
 
 # Install executables
-install(TARGETS gpt2-inference runAllTests
+install(TARGETS gpt2-inference gpt2-unit-tests
     RUNTIME DESTINATION bin
 )
 
@@ -96,10 +96,10 @@ message(STATUS "═════════════════════�
 message(STATUS "  Build targets:")
 message(STATUS "    ${PROJECT_NAME}         - Build all executables (default)")
 message(STATUS "    gpt2-inference          - Inference CLI only")
-message(STATUS "    runAllTests             - Unit test runner only")
+message(STATUS "    gpt2-unit-tests         - Unit test runner")
 message(STATUS "")
 message(STATUS "  Executables:")
 message(STATUS "    1. gpt2-inference       - Inference CLI (generate, compare, interactive)")
-message(STATUS "    2. runAllTests          - Unit test runner")
+message(STATUS "    2. gpt2-unit-tests      - Unit tests for GPT-2 layers")
 message(STATUS "═══════════════════════════════════════════════════════════")
 message(STATUS "")
