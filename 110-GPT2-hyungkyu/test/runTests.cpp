@@ -4,28 +4,47 @@
 
 #include "../core/globalContext.h"
 #include "../core/vulkanApp.h"
-#include "testBase.h"
-#include "linearTest.h"
-#include "layerNormTest.h"
+#include "graphTest.h"
+#include "../model/attention/attentionNode.h"
+#include "../model/transformerBlock/transformer.h"
 #include <iostream>
 #include <vector>
 #include <memory>
 
 using namespace vk;
 
-void registerTests(std::vector<std::unique_ptr<ITest>>& tests) {
-    tests.push_back(std::make_unique<LinearTest>("LinearNode - Small (2x3x4 -> 2x3x5)", 2, 3, 4, 5));
-    tests.push_back(std::make_unique<LayerNormTest>("LayerNorm - Standard (2x3x8)", 2, 3, 8));
+// Global test container
+static std::vector<std::unique_ptr<ITest>> tests;
+
+// Test registration helper function
+template<typename NodeType, typename... Args>
+void addTest(const std::string& testName, const std::string& jsonPath, Args&&... args) {
+    tests.push_back(std::make_unique<GraphTest<NodeType>>(testName, jsonPath, std::forward<Args>(args)...));
+}
+
+void registerTests() {
+    addTest<LinearNode>(
+        "Linear - Forward Pass (1x4x768 -> 1x4x3072)",
+        PROJECT_CURRENT_DIR "/assets/test_data/linear_test.json",
+        768, 3072);
+
+    addTest<LayerNormNode>(
+        "LayerNorm - Standard (2x4x768)",
+        PROJECT_CURRENT_DIR "/assets/test_data/layernorm_test.json",
+        768);
+
+    addTest<GELUNode>(
+        "GELU - Standard (2x3x8)",
+        PROJECT_CURRENT_DIR "/assets/test_data/gelu_test.json");
 }
 
 int main() {
     try {
         std::cout << "╔════════════════════════════════════════════════════════╗" << std::endl;
-        std::cout << "║  GPT-2 Unit Tests - Layer Testing                    ║" << std::endl;
+        std::cout << "║               Unit Tests - Layer Testing               ║" << std::endl;
         std::cout << "╚════════════════════════════════════════════════════════╝\n" << std::endl;
 
-        std::vector<std::unique_ptr<ITest>> tests;
-        registerTests(tests);
+        registerTests();
 
         int total_tests = 0;
         int passed_tests = 0;

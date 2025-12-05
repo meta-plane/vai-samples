@@ -40,9 +40,7 @@ add_executable(gpt2-inference
 
 add_executable(gpt2-unit-tests
     test/runTests.cpp
-    test/testBase.cpp
-    test/linearTest.cpp
-    test/layerNormTest.cpp
+    test/graphTest.cpp
     ${COMMON_SOURCES}
 )
 
