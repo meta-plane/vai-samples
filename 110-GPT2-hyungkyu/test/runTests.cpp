@@ -36,6 +36,10 @@ void registerTests() {
     addTest<GELUNode>(
         "GELU - Standard (2x3x8)",
         PROJECT_CURRENT_DIR "/assets/test_data/gelu_test.json");
+
+    addTest<AddNode>(
+        "AddNode - Residual Connection (2x4x768)",
+        PROJECT_CURRENT_DIR "/assets/test_data/add_test.json");
 }
 
 int main() {

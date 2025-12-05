@@ -38,6 +38,7 @@ public:
 
     std::vector<float> parseNDArray(std::vector<uint32_t>& outShape) const;
     std::vector<float> parseNDArray() const;
+    std::vector<std::string> getKeys() const;
 };
 
 

@@ -2,7 +2,6 @@
 #define TENSOR_H
 
 
-#include "jsonParser.h"
 #include "vulkanApp.h"
 #include "error.h"
 #include <memory>
@@ -108,12 +107,6 @@ public:
         _shape = shape;
     }
 
-    Tensor(const JsonParserRef& json) : _data(std::make_shared<TensorData>())
-    {
-        set(json.parseNDArray(_shape));
-        _isConstant = true;
-    }
-    
     Tensor() = default;
     Tensor(const Tensor&) = default;
     Tensor(Tensor&&) = default;

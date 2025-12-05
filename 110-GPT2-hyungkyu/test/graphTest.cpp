@@ -1,5 +1,5 @@
 #include "graphTest.h"
-#include "../core/jsonParser.h"
+#include "jsonParser.h"
 #include "../model/attention/attentionNode.h"
 #include "../model/transformerBlock/transformer.h"
 #include <chrono>
@@ -11,56 +11,44 @@ using namespace vk;
 // ============================================================================
 
 template<typename T>
-void GraphTest<T>::loadTestDataFromJSON() {
-    JsonParser json(jsonPath.c_str());
-
-    // Load input
+void GraphTest<T>::loadInput(JsonParser& json) {
     std::vector<uint32_t> inputShape;
     cpuInput.data = json["input"].parseNDArray(inputShape);
     cpuInput.shape = inputShape;
+}
 
-    // Load parameters (if exist)
-    // Try to load common parameter names: weight, bias
+template<typename T>
+void GraphTest<T>::loadParameters(JsonParser& json) {
     try {
-        std::vector<uint32_t> weightShape;
-        auto weightData = json["parameters"]["weight"].parseNDArray(weightShape);
-        CPUTensorData weightParam;
-        weightParam.shape = weightShape;
-        weightParam.data = weightData;
+        auto paramKeys = json["parameters"].getKeys();
+        for (const auto& key : paramKeys) {
+            std::vector<uint32_t> paramShape;
+            auto paramData = json["parameters"][key].parseNDArray(paramShape);
 
-        // Map to appropriate slot name based on node type
-        if constexpr (std::is_same_v<T, LayerNormNode>) {
-            weightParam.slotName = "scale";
-        } else {
-            weightParam.slotName = "weight";
+            CPUTensorData param;
+            param.shape = paramShape;
+            param.data = paramData;
+            param.slotName = key;
+
+            cpuParameters.push_back(param);
         }
-        cpuParameters.push_back(weightParam);
     } catch (...) {
-        // No weight parameter
     }
+}
 
-    try {
-        std::vector<uint32_t> biasShape;
-        auto biasData = json["parameters"]["bias"].parseNDArray(biasShape);
-        CPUTensorData biasParam;
-        biasParam.shape = biasShape;
-        biasParam.data = biasData;
-
-        // Map to appropriate slot name based on node type
-        if constexpr (std::is_same_v<T, LayerNormNode>) {
-            biasParam.slotName = "shift";
-        } else {
-            biasParam.slotName = "bias";
-        }
-        cpuParameters.push_back(biasParam);
-    } catch (...) {
-        // No bias parameter
-    }
-
-    // Load expected output
+template<typename T>
+void GraphTest<T>::loadExpectedOutput(JsonParser& json) {
     std::vector<uint32_t> outputShape;
     cpuExpectedOutput.data = json["output"].parseNDArray(outputShape);
     cpuExpectedOutput.shape = outputShape;
+}
+
+template<typename T>
+void GraphTest<T>::loadTestDataFromJSON() {
+    JsonParser json(jsonPath.c_str());
+    loadInput(json);
+    loadParameters(json);
+    loadExpectedOutput(json);
 }
 
 // ============================================================================
@@ -339,3 +327,4 @@ const T* GraphTest<T>::getLayer() const {
 template class GraphTest<LinearNode>;
 template class GraphTest<LayerNormNode>;
 template class GraphTest<GELUNode>;
+template class GraphTest<AddNode>;

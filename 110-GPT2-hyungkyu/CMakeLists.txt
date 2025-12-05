@@ -10,7 +10,6 @@ set(COMMON_SOURCES
     # Core
     core/vulkanApp.cpp
     core/spirvHelpers.cpp
-    core/jsonParser.cpp
     core/globalContext.cpp
 
     # Tokenizer
@@ -41,6 +40,7 @@ add_executable(gpt2-inference
 add_executable(gpt2-unit-tests
     test/runTests.cpp
     test/graphTest.cpp
+    test/jsonParser.cpp
     ${COMMON_SOURCES}
 )
 

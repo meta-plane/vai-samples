@@ -40,14 +40,15 @@ def main():
     output_data = layer_norm(input_data, gamma, beta, eps)
 
     # Export test data
+    # LayerNormNode uses "scale" and "shift" as slot names
     output_path = "../../assets/test_data/layernorm_test.json"
     export_test_data(
         output_path=output_path,
         input_data=input_data,
         output_data=output_data,
         parameters={
-            "weight": gamma,
-            "bias": beta
+            "scale": gamma,  # LayerNormNode's slot name
+            "shift": beta    # LayerNormNode's slot name
         }
     )
 

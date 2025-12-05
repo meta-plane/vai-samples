@@ -133,3 +133,16 @@ std::vector<float> JsonParserRef::parseNDArray() const
     return parseNDArray(shape);
 }
 
+
+std::vector<std::string> JsonParserRef::getKeys() const
+{
+    if (!pImpl->jsonData.is_object())
+        throw std::runtime_error("JSON value is not an object");
+
+    std::vector<std::string> keys;
+    for (auto it = pImpl->jsonData.begin(); it != pImpl->jsonData.end(); ++it) {
+        keys.push_back(it.key());
+    }
+    return keys;
+}
+

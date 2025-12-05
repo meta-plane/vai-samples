@@ -1,6 +1,7 @@
 #ifndef GRAPH_TEST_H
 #define GRAPH_TEST_H
 
+#include "jsonParser.h"
 #include "../core/neuralNet.h"
 #include "../core/vulkanApp.h"
 #include "../core/globalContext.h"
@@ -100,6 +101,9 @@ protected:
 
     // JSON loading
     void loadTestDataFromJSON();
+    void loadInput(JsonParser& json);
+    void loadParameters(JsonParser& json);
+    void loadExpectedOutput(JsonParser& json);
 
 public:
     // Constructor: takes test name, JSON path, and node constructor arguments
