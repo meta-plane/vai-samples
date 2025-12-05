@@ -13,6 +13,18 @@
 using namespace vk;
 
 /**
+ * Test Interface - For polymorphic test management
+ */
+class ITest {
+public:
+    virtual ~ITest() = default;
+    virtual bool execute() = 0;
+    virtual bool passed() const = 0;
+    virtual std::string getName() const = 0;
+    virtual std::string getError() const = 0;
+};
+
+/**
  * Test Base Class (Unified)
  *
  * Template-based test class for testing layers, NodeGroups, or entire neural networks.
@@ -26,13 +38,14 @@ using namespace vk;
  *
  * Test Lifecycle:
  * 1. createGraph() - Initialize layer/subgraph and create computation graph
- * 2. setupInputs() - Initialize test input data
- * 3. setupExpectedOutputs() - Initialize expected output data
- * 4. run() - Execute the actual computation
- * 5. verifyResults() - Compare actual outputs with expected outputs
+ * 2. setupInputs() - Initialize test input data (CPU tensors)
+ * 3. setupParameters() - Initialize parameter data like weight, bias, etc. (CPU tensors)
+ * 4. setupExpectedOutputs() - Initialize expected output data (CPU tensors)
+ * 5. run() - Convert CPU to GPU tensors, execute computation
+ * 6. verifyResults() - Compare actual outputs with expected outputs
  */
 template<typename T>
-class TestBase {
+class TestBase : public ITest {
 protected:
     std::string testName;
 
@@ -42,9 +55,18 @@ protected:
     // NeuralNet wrapper (automatically created to safely run the layer)
     std::unique_ptr<NeuralNet> network;
 
-    // Test data
-    std::vector<Tensor> inputTensors;
-    std::vector<Tensor> expectedOutputTensors;
+    // CPU-side test data (set by derived classes)
+    struct CPUTensorData {
+        std::vector<uint32_t> shape;
+        std::vector<float> data;
+        std::string slotName;  // For parameters: "weight", "bias", "scale", "shift", etc.
+    };
+
+    CPUTensorData cpuInput;
+    CPUTensorData cpuExpectedOutput;
+    std::vector<CPUTensorData> cpuParameters;  // For weight, bias, scale, shift, etc.
+
+    // GPU-side test data (actual output from network)
     std::vector<Tensor> actualOutputTensors;
 
     // Test configuration
@@ -61,25 +83,39 @@ protected:
     // Connect targetGraph to NeuralNet wrapper
     void connectToNetwork();
 
-    std::vector<float> readTensorData(const Tensor& tensor);
+    // CPU to GPU conversion helpers
+    void convertInputToGPU();
+    void convertParametersToGPU();
+    void validateExpectedOutput();
 
+    // Tensor helpers
+    std::vector<float> readTensorData(const Tensor& tensor);
     Tensor createInputTensor(const std::vector<uint32_t>& shape,
                             const std::vector<float>& data);
-
     Tensor createExpectedTensor(const std::vector<uint32_t>& shape,
                                 const std::vector<float>& data);
 
-    void assertClose(const std::vector<float>& actual,
-                     const std::vector<float>& expected,
-                     float tol,
-                     const std::string& msg = "");
+    // Verification helpers
+    struct ErrorMetrics {
+        float maxError;
+        float meanError;
+    };
 
+    ErrorMetrics assertClose(const std::vector<float>& actual,
+                             const std::vector<float>& expected,
+                             float tol,
+                             const std::string& msg = "");
     void verifyTensorOutput(const Tensor& actual,
                            const Tensor& expected,
                            const std::string& tensorName = "output");
+    void verifyResults();
 
-    void verifyAllOutputs();
-
+    // Output helpers
+    void printTestHeader();
+    void printTestConfig();
+    void printTestResult(double duration_ms);
+    void printComparisonValues(const std::vector<float>& actual, const std::vector<float>& expected);
+    void printErrorMetrics(const ErrorMetrics& metrics);
     std::string shapeToString(const std::vector<uint32_t>& shape);
 
 public:
@@ -92,8 +128,8 @@ public:
 
     virtual void createGraph() = 0;
     virtual void setupInputs() = 0;
+    virtual void setupParameters() = 0;
     virtual void setupExpectedOutputs() = 0;
-    virtual void verifyResults() = 0;
 
     // run() is now provided by TestBase (no need to override)
     void run();

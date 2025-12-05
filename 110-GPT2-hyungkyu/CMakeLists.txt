@@ -42,6 +42,7 @@ add_executable(gpt2-unit-tests
     test/runTests.cpp
     test/testBase.cpp
     test/linearTest.cpp
+    test/layerNormTest.cpp
     ${COMMON_SOURCES}
 )
 
@@ -57,6 +58,9 @@ add_custom_target(${PROJECT_NAME} ALL
 # ============================================================================
 # Common Configuration
 # ============================================================================
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_definitions(
     -DPROJECT_CURRENT_DIR="${CMAKE_CURRENT_SOURCE_DIR}"

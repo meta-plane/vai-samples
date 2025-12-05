@@ -21,8 +21,6 @@ private:
     uint32_t seqLen;
     uint32_t inFeatures;
     uint32_t outFeatures;
-    std::vector<float> inputData;   // Store input data for CPU reference
-    std::vector<float> weightData;  // Store weight data for CPU reference
 
 public:
     LinearTest(const std::string& name,
@@ -33,8 +31,8 @@ public:
 
     void createGraph() override;
     void setupInputs() override;
+    void setupParameters() override;
     void setupExpectedOutputs() override;
-    void verifyResults() override;
 };
 
 #endif // LINEAR_TEST_H
