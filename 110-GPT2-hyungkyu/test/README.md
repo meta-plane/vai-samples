@@ -34,6 +34,8 @@ test/
 
 ### 1단계: 테스트 데이터 생성 (Python)
 
+`test_data_generators/` 폴더에서 python 스크립트를 구현해서 테스트 데이터를 생성합니다. ([제네레이터 가이드 →](test_data_generators/README.md))
+
 ```python
 from json_exporter import export_test_data
 import torch
