@@ -142,24 +142,23 @@ def create_random_weights(output_path, num_classes=10):
     weights = {}
     
     # TNet1: 3 -> 64 -> 128 -> 1024, then 1024 -> 512 -> 256 -> 9
-    weights['tnet1.mlp.0.weight'] = np.random.randn(64, 3).astype(np.float32).tolist()
+    # Note: C++ expects [input, output] shape, so transpose PyTorch [output, input]
+    weights['tnet1.mlp.0.weight'] = np.random.randn(3, 64).astype(np.float32).tolist()
     weights['tnet1.mlp.0.bias'] = np.random.randn(64).astype(np.float32).tolist()
-    weights['tnet1.mlp.1.weight'] = np.random.randn(128, 64).astype(np.float32).tolist()
+    weights['tnet1.mlp.1.weight'] = np.random.randn(64, 128).astype(np.float32).tolist()
     weights['tnet1.mlp.1.bias'] = np.random.randn(128).astype(np.float32).tolist()
-    weights['tnet1.mlp.2.weight'] = np.random.randn(1024, 128).astype(np.float32).tolist()
+    weights['tnet1.mlp.2.weight'] = np.random.randn(128, 1024).astype(np.float32).tolist()
     weights['tnet1.mlp.2.bias'] = np.random.randn(1024).astype(np.float32).tolist()
     
-    weights['tnet1.fc.0.weight'] = np.random.randn(512, 1024).astype(np.float32).tolist()
+    weights['tnet1.fc.0.weight'] = np.random.randn(1024, 512).astype(np.float32).tolist()
     weights['tnet1.fc.0.bias'] = np.random.randn(512).astype(np.float32).tolist()
-    weights['tnet1.fc.1.weight'] = np.random.randn(256, 512).astype(np.float32).tolist()
+    weights['tnet1.fc.1.weight'] = np.random.randn(512, 256).astype(np.float32).tolist()
     weights['tnet1.fc.1.bias'] = np.random.randn(256).astype(np.float32).tolist()
-    weights['tnet1.fc.2.weight'] = np.random.randn(9, 256).astype(np.float32).tolist()
+    weights['tnet1.fc.2.weight'] = np.random.randn(256, 9).astype(np.float32).tolist()
     weights['tnet1.fc.2.bias'] = np.random.randn(9).astype(np.float32).tolist()
-    weights['tnet1.fc.3.weight'] = np.eye(3).flatten().astype(np.float32).tolist()  # Identity init
-    weights['tnet1.fc.3.bias'] = np.zeros(9).astype(np.float32).tolist()
     
     # MLP1: 3 -> 64 -> 64
-    weights['mlp1.0.weight'] = np.random.randn(64, 3).astype(np.float32).tolist()
+    weights['mlp1.0.weight'] = np.random.randn(3, 64).astype(np.float32).tolist()
     weights['mlp1.0.bias'] = np.random.randn(64).astype(np.float32).tolist()
     weights['mlp1.1.weight'] = np.random.randn(64, 64).astype(np.float32).tolist()
     weights['mlp1.1.bias'] = np.random.randn(64).astype(np.float32).tolist()
@@ -167,32 +166,30 @@ def create_random_weights(output_path, num_classes=10):
     # TNet2: 64 -> 64 -> 128 -> 1024, then 1024 -> 512 -> 256 -> 64*64
     weights['tnet2.mlp.0.weight'] = np.random.randn(64, 64).astype(np.float32).tolist()
     weights['tnet2.mlp.0.bias'] = np.random.randn(64).astype(np.float32).tolist()
-    weights['tnet2.mlp.1.weight'] = np.random.randn(128, 64).astype(np.float32).tolist()
+    weights['tnet2.mlp.1.weight'] = np.random.randn(64, 128).astype(np.float32).tolist()
     weights['tnet2.mlp.1.bias'] = np.random.randn(128).astype(np.float32).tolist()
-    weights['tnet2.mlp.2.weight'] = np.random.randn(1024, 128).astype(np.float32).tolist()
+    weights['tnet2.mlp.2.weight'] = np.random.randn(128, 1024).astype(np.float32).tolist()
     weights['tnet2.mlp.2.bias'] = np.random.randn(1024).astype(np.float32).tolist()
     
-    weights['tnet2.fc.0.weight'] = np.random.randn(512, 1024).astype(np.float32).tolist()
+    weights['tnet2.fc.0.weight'] = np.random.randn(1024, 512).astype(np.float32).tolist()
     weights['tnet2.fc.0.bias'] = np.random.randn(512).astype(np.float32).tolist()
-    weights['tnet2.fc.1.weight'] = np.random.randn(256, 512).astype(np.float32).tolist()
+    weights['tnet2.fc.1.weight'] = np.random.randn(512, 256).astype(np.float32).tolist()
     weights['tnet2.fc.1.bias'] = np.random.randn(256).astype(np.float32).tolist()
-    weights['tnet2.fc.2.weight'] = np.random.randn(4096, 256).astype(np.float32).tolist()
+    weights['tnet2.fc.2.weight'] = np.random.randn(256, 4096).astype(np.float32).tolist()
     weights['tnet2.fc.2.bias'] = np.random.randn(4096).astype(np.float32).tolist()
-    weights['tnet2.fc.3.weight'] = np.eye(64).flatten().astype(np.float32).tolist()  # Identity init
-    weights['tnet2.fc.3.bias'] = np.zeros(4096).astype(np.float32).tolist()
     
     # MLP2: 64 -> 128 -> 1024
-    weights['mlp2.0.weight'] = np.random.randn(128, 64).astype(np.float32).tolist()
+    weights['mlp2.0.weight'] = np.random.randn(64, 128).astype(np.float32).tolist()
     weights['mlp2.0.bias'] = np.random.randn(128).astype(np.float32).tolist()
-    weights['mlp2.1.weight'] = np.random.randn(1024, 128).astype(np.float32).tolist()
+    weights['mlp2.1.weight'] = np.random.randn(128, 1024).astype(np.float32).tolist()
     weights['mlp2.1.bias'] = np.random.randn(1024).astype(np.float32).tolist()
     
     # Segmentation head: 2048 -> 512 -> 256 -> num_classes
-    weights['segHead.0.weight'] = np.random.randn(512, 2048).astype(np.float32).tolist()
+    weights['segHead.0.weight'] = np.random.randn(2048, 512).astype(np.float32).tolist()
     weights['segHead.0.bias'] = np.random.randn(512).astype(np.float32).tolist()
-    weights['segHead.1.weight'] = np.random.randn(256, 512).astype(np.float32).tolist()
+    weights['segHead.1.weight'] = np.random.randn(512, 256).astype(np.float32).tolist()
     weights['segHead.1.bias'] = np.random.randn(256).astype(np.float32).tolist()
-    weights['segHead.2.weight'] = np.random.randn(num_classes, 256).astype(np.float32).tolist()
+    weights['segHead.2.weight'] = np.random.randn(256, num_classes).astype(np.float32).tolist()
     weights['segHead.2.bias'] = np.random.randn(num_classes).astype(np.float32).tolist()
     
     # Save to JSON
