@@ -79,6 +79,12 @@ void registerTests() {
 ### 3단계: 빌드 및 실행
 
 ```bash
+cmake --build ../build --target <your-test-target>
+../bin/debug/<your-test-executable>
+```
+
+**GPT-2 예시:**
+```bash
 cmake --build ../build --target gpt2-unit-tests
 ../bin/debug/gpt2-unit-tests.exe
 ```
