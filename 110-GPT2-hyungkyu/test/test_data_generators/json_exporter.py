@@ -29,7 +29,38 @@ def to_list(data):
         return data
 
 
-def export_test_data(output_path, input_data, output_data, parameters=None):
+def to_nested_list(tensor):
+    """
+    Convert PyTorch tensor to nested Python list (alias for compatibility)
+
+    Args:
+        tensor: torch.Tensor or numpy array
+
+    Returns:
+        Nested Python list
+    """
+    return to_list(tensor)
+
+
+def set_seed(seed=42):
+    """
+    Set random seed for reproducibility
+
+    Args:
+        seed: Random seed value
+    """
+    np.random.seed(seed)
+    try:
+        import torch
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+    except ImportError:
+        pass
+
+
+def export_test_data(output_path=None, input_data=None, output_data=None, parameters=None):
     """
     Export test data to JSON format for the test framework
 

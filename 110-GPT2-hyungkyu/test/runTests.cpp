@@ -24,9 +24,9 @@ void addTest(const std::string& testName, const std::string& jsonPath, Args&&...
 
 void registerTests() {
     addTest<LinearNode>(
-        "Linear - Forward Pass (1x4x768 -> 1x4x3072)",
+        "Linear - Forward Pass (2x4x768 -> 2x4x768)",
         PROJECT_CURRENT_DIR "/assets/test_data/linear_test.json",
-        768, 3072);
+        768, 768);
 
     addTest<LayerNormNode>(
         "LayerNorm - Standard (2x4x768)",
@@ -40,6 +40,21 @@ void registerTests() {
     addTest<AddNode>(
         "AddNode - Residual Connection (2x4x768)",
         PROJECT_CURRENT_DIR "/assets/test_data/add_test.json");
+
+    addTest<MultiHeadAttentionNode>(
+        "MultiHeadAttention - Self-Attention (1x4x768, 12 heads)",
+        PROJECT_CURRENT_DIR "/assets/test_data/attention_test.json",
+        768, 768, 12);
+
+    addTest<FeedForwardNode>(
+        "FeedForward - MLP (2x4x768, hidden=3072)",
+        PROJECT_CURRENT_DIR "/assets/test_data/feedforward_test.json",
+        768);
+
+    addTest<TransformerBlock>(
+        "TransformerBlock - Full Block (1x4x768, 12 heads)",
+        PROJECT_CURRENT_DIR "/assets/test_data/transformer_test.json",
+        768, 12);
 }
 
 int main() {

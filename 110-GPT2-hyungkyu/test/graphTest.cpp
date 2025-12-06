@@ -328,3 +328,6 @@ template class GraphTest<LinearNode>;
 template class GraphTest<LayerNormNode>;
 template class GraphTest<GELUNode>;
 template class GraphTest<AddNode>;
+template class GraphTest<MultiHeadAttentionNode>;
+template class GraphTest<FeedForwardNode>;
+template class GraphTest<TransformerBlock>;
