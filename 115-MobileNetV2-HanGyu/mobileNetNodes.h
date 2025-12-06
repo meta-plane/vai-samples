@@ -1,12 +1,9 @@
 #ifndef MOBILE_NET_NODES_H
 #define MOBILE_NET_NODES_H
-
 #include "neuralNet.h"
-
 // ============================================================================
 // Shader Source Codes
 // ============================================================================
-
 // ReLU6: clamp(x, 0, 6)
 inline const char* relu6_srcCode = R"(
 #version 450
@@ -16,14 +13,12 @@ layout(set = 0, binding = 1) buffer InBuffer { float in0[]; };
 layout(push_constant) uniform PushConstants {
     int N;
 };
-
 void main() 
 {
     int i = int(gl_GlobalInvocationID.x);
     if (i >= N) return;
     out0[i] = clamp(in0[i], 0.0, 6.0);
 })";
-
 // Element-wise Add
 inline const char* add_srcCode = R"(
 #version 450
@@ -34,14 +29,12 @@ layout(set = 0, binding = 2) buffer InBuffer1 { float in1[]; };
 layout(push_constant) uniform PushConstants {
     int N;
 };
-
 void main() 
 {
     int i = int(gl_GlobalInvocationID.x);
     if (i >= N) return;
     out0[i] = in0[i] + in1[i];
 })";
-
 // BatchNorm (inference mode): y = gamma * (x - mean) / sqrt(var + eps) + beta
 inline const char* batchnorm_srcCode = R"(
 #version 450
@@ -57,24 +50,19 @@ layout(push_constant) uniform PushConstants {
     int C;
     float eps;
 };
-
 void main() 
 {
     int i = int(gl_GlobalInvocationID.x);
     int total = HW * C;
     if (i >= total) return;
-    
     int c = i % C;  // channel index (HWC layout)
-    
     float x = in0[i];
     float mean = running_mean[c];
     float var = running_var[c];
     float g = gamma[c];
     float b = beta[c];
-    
     out0[i] = g * (x - mean) * inversesqrt(var + eps) + b;
 })";
-
 // Global Average Pooling: [H][W][C] -> [C]
 inline const char* gap_srcCode = R"(
 #version 450
@@ -84,12 +72,10 @@ layout(set = 0, binding = 1) buffer InBuffer { float in0[]; };
 layout(push_constant) uniform PushConstants {
     int H, W, C;
 };
-
 void main() 
 {
     int c = int(gl_GlobalInvocationID.x);
     if (c >= C) return;
-    
     float sum = 0.0;
     int HW = H * W;
     for (int i = 0; i < HW; ++i) {
@@ -97,7 +83,6 @@ void main()
     }
     out0[c] = sum / float(HW);
 })";
-
 // Depthwise Convolution with stride and padding
 inline const char* dwconv_srcCode = R"(
 #version 450
@@ -110,37 +95,29 @@ layout(push_constant) uniform PushConstants {
     int H_out, W_out;
     int K, stride, pad;
 };
-
 void main() 
 {
     int h_out = int(gl_GlobalInvocationID.x);
     int w_out = int(gl_GlobalInvocationID.y);
     int c = int(gl_GlobalInvocationID.z);
-    
     if (h_out >= H_out || w_out >= W_out || c >= C)
         return;
-    
     float sum = 0.0;
     int h_start = h_out * stride - pad;
     int w_start = w_out * stride - pad;
-    
     for (int kh = 0; kh < K; ++kh) {
         int h_in = h_start + kh;
         if (h_in < 0 || h_in >= H_in) continue;
-        
         for (int kw = 0; kw < K; ++kw) {
             int w_in = w_start + kw;
             if (w_in < 0 || w_in >= W_in) continue;
-            
             float val = in0[(h_in * W_in + w_in) * C + c];
             float wgt = weight[(kh * K + kw) * C + c];  // weight layout: [K][K][C]
             sum += val * wgt;
         }
     }
-    
     out0[(h_out * W_out + w_out) * C + c] = sum;
 })";
-
 // Pointwise (1x1) Convolution
 inline const char* pwconv_srcCode = R"(
 #version 450
@@ -152,26 +129,20 @@ layout(push_constant) uniform PushConstants {
     int H, W;
     int C_in, C_out;
 };
-
 void main() 
 {
     int h = int(gl_GlobalInvocationID.x);
     int w = int(gl_GlobalInvocationID.y);
     int c_out = int(gl_GlobalInvocationID.z);
-    
     if (h >= H || w >= W || c_out >= C_out)
         return;
-    
     float sum = 0.0;
     int hw_offset = (h * W + w) * C_in;
-    
     for (int c_in = 0; c_in < C_in; ++c_in) {
         sum += in0[hw_offset + c_in] * weight[c_in * C_out + c_out];
     }
-    
     out0[(h * W + w) * C_out + c_out] = sum;
 })";
-
 // Standard Convolution with stride (for first layer)
 inline const char* conv_stride_srcCode = R"(
 #version 450
@@ -185,28 +156,22 @@ layout(push_constant) uniform PushConstants {
     int H_out, W_out, C_out;
     int K, stride, pad;
 };
-
 void main() 
 {
     int h_out = int(gl_GlobalInvocationID.x);
     int w_out = int(gl_GlobalInvocationID.y);
     int c_out = int(gl_GlobalInvocationID.z);
-    
     if (h_out >= H_out || w_out >= W_out || c_out >= C_out)
         return;
-    
     float sum = bias[c_out];
     int h_start = h_out * stride - pad;
     int w_start = w_out * stride - pad;
-    
     for (int kh = 0; kh < K; ++kh) {
         int h_in = h_start + kh;
         if (h_in < 0 || h_in >= H_in) continue;
-        
         for (int kw = 0; kw < K; ++kw) {
             int w_in = w_start + kw;
             if (w_in < 0 || w_in >= W_in) continue;
-            
             for (int c_in = 0; c_in < C_in; ++c_in) {
                 float val = in0[(h_in * W_in + w_in) * C_in + c_in];
                 int w_idx = ((c_out * C_in + c_in) * K + kh) * K + kw;
@@ -214,53 +179,40 @@ void main()
             }
         }
     }
-    
     out0[(h_out * W_out + w_out) * C_out + c_out] = sum;
 })";
-
-
 // ============================================================================
 // Use existing global Device and Descriptor Pool from neuralNodes.h
 // ============================================================================
-
 // Note: gDevice and gDestSetPool are defined in neuralNodes.h
 // We'll use them here as extern references
-
-
 // ============================================================================
 // Node Implementations
 // ============================================================================
-
 class Relu6Node : public Node
 {
     ComputePipeline pipeline;
     DescriptorSet descSet;
-
 public:
     Relu6Node()
     {
         slots.try_emplace("in0", NodeSlot::input, this);
         slots.try_emplace("out0", NodeSlot::output, this);
-
         pipeline = gDevice.createComputePipeline({ relu6_srcCode });
         descSet = pipeline.descSetLayout(0).newDescSet(gDestSetPool);
     }
-
     void prepare() override
     {
         _ASSERT((*this)["in0"].validShape());
         (*this)["out0"] = Tensor((*this)["in0"].shape());
     }
-
     void run(CommandBuffer cmdBuff) override
     {
         int N = (*this)["in0"].numElements();
-
         descSet.write({
             (*this)["out0"].buffer(),
             (*this)["in0"].buffer(),
             });
-
         cmdBuff
             .bindPipeline(pipeline)
             .bindDescSets({ descSet })
@@ -273,40 +225,32 @@ public:
             );
     }
 };
-
-
 class AddNode : public Node
 {
     ComputePipeline pipeline;
     DescriptorSet descSet;
-
 public:
     AddNode()
     {
         slots.try_emplace("in0", NodeSlot::input, this);
         slots.try_emplace("in1", NodeSlot::input, this);
         slots.try_emplace("out0", NodeSlot::output, this);
-
         pipeline = gDevice.createComputePipeline({ add_srcCode });
         descSet = pipeline.descSetLayout(0).newDescSet(gDestSetPool);
     }
-
     void prepare() override
     {
         _ASSERT((*this)["in0"].validShape());
         (*this)["out0"] = Tensor((*this)["in0"].shape());
     }
-
     void run(CommandBuffer cmdBuff) override
     {
         int N = (*this)["in0"].numElements();
-
         descSet.write({
             (*this)["out0"].buffer(),
             (*this)["in0"].buffer(),
             (*this)["in1"].buffer(),
             });
-
         cmdBuff
             .bindPipeline(pipeline)
             .bindDescSets({ descSet })
@@ -319,15 +263,12 @@ public:
             );
     }
 };
-
-
 class BatchNormNode : public Node
 {
     uint32_t C;
     float eps;
     ComputePipeline pipeline;
     DescriptorSet descSet;
-
 public:
     BatchNormNode(uint32_t channels, float epsilon = 1e-5f)
         : C(channels), eps(epsilon)
@@ -338,11 +279,9 @@ public:
         slots.try_emplace("beta", NodeSlot::input, this);
         slots.try_emplace("running_mean", NodeSlot::input, this);
         slots.try_emplace("running_var", NodeSlot::input, this);
-
         pipeline = gDevice.createComputePipeline({ batchnorm_srcCode });
         descSet = pipeline.descSetLayout(0).newDescSet(gDestSetPool);
     }
-
     void prepare() override
     {
         _ASSERT((*this)["in0"].validShape());
@@ -350,17 +289,14 @@ public:
         _ASSERT((*this)["beta"].isShapeOf(C));
         _ASSERT((*this)["running_mean"].isShapeOf(C));
         _ASSERT((*this)["running_var"].isShapeOf(C));
-
         (*this)["out0"] = Tensor((*this)["in0"].shape());
     }
-
     void run(CommandBuffer cmdBuff) override
     {
         const auto& shape = (*this)["in0"].shape();
         int HW = 1;
         for (size_t i = 0; i < shape.size() - 1; ++i)
             HW *= shape[i];
-
         descSet.write({
             (*this)["out0"].buffer(),
             (*this)["in0"].buffer(),
@@ -369,9 +305,7 @@ public:
             (*this)["running_mean"].buffer(),
             (*this)["running_var"].buffer(),
             });
-
         struct { int HW, C; float eps; } constants = { HW, (int)C, eps };
-
         cmdBuff
             .bindPipeline(pipeline)
             .bindDescSets({ descSet })
@@ -384,42 +318,33 @@ public:
             );
     }
 };
-
-
 class GlobalAvgPoolNode : public Node
 {
     ComputePipeline pipeline;
     DescriptorSet descSet;
-
 public:
     GlobalAvgPoolNode()
     {
         slots.try_emplace("in0", NodeSlot::input, this);
         slots.try_emplace("out0", NodeSlot::output, this);
-
         pipeline = gDevice.createComputePipeline({ gap_srcCode });
         descSet = pipeline.descSetLayout(0).newDescSet(gDestSetPool);
     }
-
     void prepare() override
     {
         const auto& shape = (*this)["in0"].shape();
         _ASSERT(shape.size() == 3);
         (*this)["out0"] = Tensor(shape[2]);  // [C]
     }
-
     void run(CommandBuffer cmdBuff) override
     {
         const auto& shape = (*this)["in0"].shape();
         uint32_t H = shape[0], W = shape[1], C = shape[2];
-
         descSet.write({
             (*this)["out0"].buffer(),
             (*this)["in0"].buffer(),
             });
-
         uint32_t constants[] = { H, W, C };
-
         cmdBuff
             .bindPipeline(pipeline)
             .bindDescSets({ descSet })
@@ -432,14 +357,11 @@ public:
             );
     }
 };
-
-
 class DepthwiseConvNode : public Node
 {
     uint32_t C, K, stride, pad;
     ComputePipeline pipeline;
     DescriptorSet descSet;
-
 public:
     DepthwiseConvNode(uint32_t channels, uint32_t kernelSize = 3,
         uint32_t stride = 1, uint32_t padding = 1)
@@ -448,36 +370,29 @@ public:
         slots.try_emplace("in0", NodeSlot::input, this);
         slots.try_emplace("out0", NodeSlot::output, this);
         slots.try_emplace("weight", NodeSlot::input, this);
-
         pipeline = gDevice.createComputePipeline({ dwconv_srcCode });
         descSet = pipeline.descSetLayout(0).newDescSet(gDestSetPool);
     }
-
     void prepare() override
     {
         const auto& inShape = (*this)["in0"].shape();
         _ASSERT(inShape.size() == 3);
         _ASSERT(inShape[2] == C);
         _ASSERT((*this)["weight"].isShapeOf(K * K, C));
-
         uint32_t H_in = inShape[0], W_in = inShape[1];
         uint32_t H_out = (H_in + 2 * pad - K) / stride + 1;
         uint32_t W_out = (W_in + 2 * pad - K) / stride + 1;
-
         (*this)["out0"] = Tensor(H_out, W_out, C);
     }
-
     void run(CommandBuffer cmdBuff) override
     {
         const auto& inShape = (*this)["in0"].shape();
         const auto& outShape = (*this)["out0"].shape();
-
         descSet.write({
             (*this)["out0"].buffer(),
             (*this)["in0"].buffer(),
             (*this)["weight"].buffer(),
             });
-
         struct {
             int H_in, W_in, C;
             int H_out, W_out;
@@ -487,7 +402,6 @@ public:
             (int)outShape[0], (int)outShape[1],
             (int)K, (int)stride, (int)pad
         };
-
         cmdBuff
             .bindPipeline(pipeline)
             .bindDescSets({ descSet })
@@ -500,14 +414,11 @@ public:
             );
     }
 };
-
-
 class PointwiseConvNode : public Node
 {
     uint32_t C_in, C_out;
     ComputePipeline pipeline;
     DescriptorSet descSet;
-
 public:
     PointwiseConvNode(uint32_t inChannels, uint32_t outChannels)
         : C_in(inChannels), C_out(outChannels)
@@ -515,34 +426,27 @@ public:
         slots.try_emplace("in0", NodeSlot::input, this);
         slots.try_emplace("out0", NodeSlot::output, this);
         slots.try_emplace("weight", NodeSlot::input, this);
-
         pipeline = gDevice.createComputePipeline({ pwconv_srcCode });
         descSet = pipeline.descSetLayout(0).newDescSet(gDestSetPool);
     }
-
     void prepare() override
     {
         const auto& inShape = (*this)["in0"].shape();
         _ASSERT(inShape.size() == 3);
         _ASSERT(inShape[2] == C_in);
         _ASSERT((*this)["weight"].isShapeOf(C_in, C_out));
-
         (*this)["out0"] = Tensor(inShape[0], inShape[1], C_out);
     }
-
     void run(CommandBuffer cmdBuff) override
     {
         const auto& inShape = (*this)["in0"].shape();
         uint32_t H = inShape[0], W = inShape[1];
-
         descSet.write({
             (*this)["out0"].buffer(),
             (*this)["in0"].buffer(),
             (*this)["weight"].buffer(),
             });
-
         uint32_t constants[] = { H, W, C_in, C_out };
-
         cmdBuff
             .bindPipeline(pipeline)
             .bindDescSets({ descSet })
@@ -555,21 +459,17 @@ public:
             );
     }
 };
-
-
 // Conv + BatchNorm + ReLU6 combined node (for first layer)
 class ConvBnRelu6Node : public Node
 {
     uint32_t C_in, C_out, K, stride, pad;
     float eps;
-
     ComputePipeline convPipeline;
     ComputePipeline bnPipeline;
     ComputePipeline relu6Pipeline;
     DescriptorSet convDescSet;
     DescriptorSet bnDescSet;
     DescriptorSet relu6DescSet;
-
 public:
     ConvBnRelu6Node(uint32_t inChannels, uint32_t outChannels,
         uint32_t kernelSize = 3, uint32_t stride = 1, uint32_t padding = 1,
@@ -580,45 +480,37 @@ public:
         slots.try_emplace("out0", NodeSlot::output, this);
         slots.try_emplace("conv_out", NodeSlot::internal, this);
         slots.try_emplace("bn_out", NodeSlot::internal, this);
-
         slots.try_emplace("conv_weight", NodeSlot::input, this);
         slots.try_emplace("conv_bias", NodeSlot::input, this);
         slots.try_emplace("bn_gamma", NodeSlot::input, this);
         slots.try_emplace("bn_beta", NodeSlot::input, this);
         slots.try_emplace("bn_mean", NodeSlot::input, this);
         slots.try_emplace("bn_var", NodeSlot::input, this);
-
         convPipeline = gDevice.createComputePipeline({ conv_stride_srcCode });
         bnPipeline = gDevice.createComputePipeline({ batchnorm_srcCode });
         relu6Pipeline = gDevice.createComputePipeline({ relu6_srcCode });
-
         convDescSet = convPipeline.descSetLayout(0).newDescSet(gDestSetPool);
         bnDescSet = bnPipeline.descSetLayout(0).newDescSet(gDestSetPool);
         relu6DescSet = relu6Pipeline.descSetLayout(0).newDescSet(gDestSetPool);
     }
-
     void prepare() override
     {
         const auto& inShape = (*this)["in0"].shape();
         _ASSERT(inShape.size() == 3);
         _ASSERT(inShape[2] == C_in);
-
         uint32_t H_in = inShape[0], W_in = inShape[1];
         uint32_t H_out = (H_in + 2 * pad - K) / stride + 1;
         uint32_t W_out = (W_in + 2 * pad - K) / stride + 1;
-
         (*this)["conv_out"] = Tensor(H_out, W_out, C_out);
         (*this)["bn_out"] = Tensor(H_out, W_out, C_out);
         (*this)["out0"] = Tensor(H_out, W_out, C_out);
     }
-
     void run(CommandBuffer cmdBuff) override
     {
         const auto& inShape = (*this)["in0"].shape();
         const auto& outShape = (*this)["out0"].shape();
         uint32_t H_in = inShape[0], W_in = inShape[1];
         uint32_t H_out = outShape[0], W_out = outShape[1];
-
         // Conv
         convDescSet.write({
             (*this)["conv_out"].buffer(),
@@ -626,7 +518,6 @@ public:
             (*this)["conv_weight"].buffer(),
             (*this)["conv_bias"].buffer(),
             });
-
         struct {
             int H_in, W_in, C_in;
             int H_out, W_out, C_out;
@@ -636,7 +527,6 @@ public:
             (int)H_out, (int)W_out, (int)C_out,
             (int)K, (int)stride, (int)pad
         };
-
         cmdBuff
             .bindPipeline(convPipeline)
             .bindDescSets({ convDescSet })
@@ -647,7 +537,6 @@ public:
                 / (*this)["conv_out"].buffer()
                 / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
             );
-
         // BatchNorm
         bnDescSet.write({
             (*this)["bn_out"].buffer(),
@@ -657,9 +546,7 @@ public:
             (*this)["bn_mean"].buffer(),
             (*this)["bn_var"].buffer(),
             });
-
         struct { int HW, C; float eps; } bnConstants = { (int)(H_out * W_out), (int)C_out, eps };
-
         cmdBuff
             .bindPipeline(bnPipeline)
             .bindDescSets({ bnDescSet })
@@ -670,14 +557,12 @@ public:
                 / (*this)["bn_out"].buffer()
                 / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
             );
-
         // ReLU6
         int N = H_out * W_out * C_out;
         relu6DescSet.write({
             (*this)["out0"].buffer(),
             (*this)["bn_out"].buffer(),
             });
-
         cmdBuff
             .bindPipeline(relu6Pipeline)
             .bindDescSets({ relu6DescSet })
@@ -690,21 +575,17 @@ public:
             );
     }
 };
-
-
 // Depthwise Conv + BatchNorm + ReLU6 combined node
 class DwConvBnRelu6Node : public Node
 {
     uint32_t C, K, stride, pad;
     float eps;
-
     ComputePipeline dwconvPipeline;
     ComputePipeline bnPipeline;
     ComputePipeline relu6Pipeline;
     DescriptorSet dwconvDescSet;
     DescriptorSet bnDescSet;
     DescriptorSet relu6DescSet;
-
 public:
     DwConvBnRelu6Node(uint32_t channels, uint32_t kernelSize = 3,
         uint32_t stride = 1, uint32_t padding = 1, float epsilon = 1e-5f)
@@ -714,51 +595,42 @@ public:
         slots.try_emplace("out0", NodeSlot::output, this);
         slots.try_emplace("dw_out", NodeSlot::internal, this);
         slots.try_emplace("bn_out", NodeSlot::internal, this);
-
         slots.try_emplace("dw_weight", NodeSlot::input, this);
         slots.try_emplace("bn_gamma", NodeSlot::input, this);
         slots.try_emplace("bn_beta", NodeSlot::input, this);
         slots.try_emplace("bn_mean", NodeSlot::input, this);
         slots.try_emplace("bn_var", NodeSlot::input, this);
-
         dwconvPipeline = gDevice.createComputePipeline({ dwconv_srcCode });
         bnPipeline = gDevice.createComputePipeline({ batchnorm_srcCode });
         relu6Pipeline = gDevice.createComputePipeline({ relu6_srcCode });
-
         dwconvDescSet = dwconvPipeline.descSetLayout(0).newDescSet(gDestSetPool);
         bnDescSet = bnPipeline.descSetLayout(0).newDescSet(gDestSetPool);
         relu6DescSet = relu6Pipeline.descSetLayout(0).newDescSet(gDestSetPool);
     }
-
     void prepare() override
     {
         const auto& inShape = (*this)["in0"].shape();
         _ASSERT(inShape.size() == 3);
         _ASSERT(inShape[2] == C);
-
         uint32_t H_in = inShape[0], W_in = inShape[1];
         uint32_t H_out = (H_in + 2 * pad - K) / stride + 1;
         uint32_t W_out = (W_in + 2 * pad - K) / stride + 1;
-
         (*this)["dw_out"] = Tensor(H_out, W_out, C);
         (*this)["bn_out"] = Tensor(H_out, W_out, C);
         (*this)["out0"] = Tensor(H_out, W_out, C);
     }
-
     void run(CommandBuffer cmdBuff) override
     {
         const auto& inShape = (*this)["in0"].shape();
         const auto& outShape = (*this)["out0"].shape();
         uint32_t H_in = inShape[0], W_in = inShape[1];
         uint32_t H_out = outShape[0], W_out = outShape[1];
-
         // Depthwise Conv
         dwconvDescSet.write({
             (*this)["dw_out"].buffer(),
             (*this)["in0"].buffer(),
             (*this)["dw_weight"].buffer(),
             });
-
         struct {
             int H_in, W_in, C;
             int H_out, W_out;
@@ -768,7 +640,6 @@ public:
             (int)H_out, (int)W_out,
             (int)K, (int)stride, (int)pad
         };
-
         cmdBuff
             .bindPipeline(dwconvPipeline)
             .bindDescSets({ dwconvDescSet })
@@ -779,7 +650,6 @@ public:
                 / (*this)["dw_out"].buffer()
                 / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
             );
-
         // BatchNorm
         bnDescSet.write({
             (*this)["bn_out"].buffer(),
@@ -789,9 +659,7 @@ public:
             (*this)["bn_mean"].buffer(),
             (*this)["bn_var"].buffer(),
             });
-
         struct { int HW, C; float eps; } bnConstants = { (int)(H_out * W_out), (int)C, eps };
-
         cmdBuff
             .bindPipeline(bnPipeline)
             .bindDescSets({ bnDescSet })
@@ -802,14 +670,12 @@ public:
                 / (*this)["bn_out"].buffer()
                 / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
             );
-
         // ReLU6
         int N = H_out * W_out * C;
         relu6DescSet.write({
             (*this)["out0"].buffer(),
             (*this)["bn_out"].buffer(),
             });
-
         cmdBuff
             .bindPipeline(relu6Pipeline)
             .bindDescSets({ relu6DescSet })
@@ -822,19 +688,15 @@ public:
             );
     }
 };
-
-
 // Pointwise Conv + BatchNorm (no activation) - for projection layer
 class PwConvBnNode : public Node
 {
     uint32_t C_in, C_out;
     float eps;
-
     ComputePipeline pwconvPipeline;
     ComputePipeline bnPipeline;
     DescriptorSet pwconvDescSet;
     DescriptorSet bnDescSet;
-
 public:
     PwConvBnNode(uint32_t inChannels, uint32_t outChannels, float epsilon = 1e-5f)
         : C_in(inChannels), C_out(outChannels), eps(epsilon)
@@ -842,44 +704,35 @@ public:
         slots.try_emplace("in0", NodeSlot::input, this);
         slots.try_emplace("out0", NodeSlot::output, this);
         slots.try_emplace("pw_out", NodeSlot::internal, this);
-
         slots.try_emplace("pw_weight", NodeSlot::input, this);
         slots.try_emplace("bn_gamma", NodeSlot::input, this);
         slots.try_emplace("bn_beta", NodeSlot::input, this);
         slots.try_emplace("bn_mean", NodeSlot::input, this);
         slots.try_emplace("bn_var", NodeSlot::input, this);
-
         pwconvPipeline = gDevice.createComputePipeline({ pwconv_srcCode });
         bnPipeline = gDevice.createComputePipeline({ batchnorm_srcCode });
-
         pwconvDescSet = pwconvPipeline.descSetLayout(0).newDescSet(gDestSetPool);
         bnDescSet = bnPipeline.descSetLayout(0).newDescSet(gDestSetPool);
     }
-
     void prepare() override
     {
         const auto& inShape = (*this)["in0"].shape();
         _ASSERT(inShape.size() == 3);
         _ASSERT(inShape[2] == C_in);
-
         (*this)["pw_out"] = Tensor(inShape[0], inShape[1], C_out);
         (*this)["out0"] = Tensor(inShape[0], inShape[1], C_out);
     }
-
     void run(CommandBuffer cmdBuff) override
     {
         const auto& inShape = (*this)["in0"].shape();
         uint32_t H = inShape[0], W = inShape[1];
-
         // Pointwise Conv
         pwconvDescSet.write({
             (*this)["pw_out"].buffer(),
             (*this)["in0"].buffer(),
             (*this)["pw_weight"].buffer(),
             });
-
         uint32_t pwConstants[] = { H, W, C_in, C_out };
-
         cmdBuff
             .bindPipeline(pwconvPipeline)
             .bindDescSets({ pwconvDescSet })
@@ -890,7 +743,6 @@ public:
                 / (*this)["pw_out"].buffer()
                 / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
             );
-
         // BatchNorm
         bnDescSet.write({
             (*this)["out0"].buffer(),
@@ -900,9 +752,7 @@ public:
             (*this)["bn_mean"].buffer(),
             (*this)["bn_var"].buffer(),
             });
-
         struct { int HW, C; float eps; } bnConstants = { (int)(H * W), (int)C_out, eps };
-
         cmdBuff
             .bindPipeline(bnPipeline)
             .bindDescSets({ bnDescSet })
@@ -915,21 +765,17 @@ public:
             );
     }
 };
-
-
 // Pointwise Conv + BatchNorm + ReLU6 - for expansion layer
 class PwConvBnRelu6Node : public Node
 {
     uint32_t C_in, C_out;
     float eps;
-
     ComputePipeline pwconvPipeline;
     ComputePipeline bnPipeline;
     ComputePipeline relu6Pipeline;
     DescriptorSet pwconvDescSet;
     DescriptorSet bnDescSet;
     DescriptorSet relu6DescSet;
-
 public:
     PwConvBnRelu6Node(uint32_t inChannels, uint32_t outChannels, float epsilon = 1e-5f)
         : C_in(inChannels), C_out(outChannels), eps(epsilon)
@@ -938,47 +784,38 @@ public:
         slots.try_emplace("out0", NodeSlot::output, this);
         slots.try_emplace("pw_out", NodeSlot::internal, this);
         slots.try_emplace("bn_out", NodeSlot::internal, this);
-
         slots.try_emplace("pw_weight", NodeSlot::input, this);
         slots.try_emplace("bn_gamma", NodeSlot::input, this);
         slots.try_emplace("bn_beta", NodeSlot::input, this);
         slots.try_emplace("bn_mean", NodeSlot::input, this);
         slots.try_emplace("bn_var", NodeSlot::input, this);
-
         pwconvPipeline = gDevice.createComputePipeline({ pwconv_srcCode });
         bnPipeline = gDevice.createComputePipeline({ batchnorm_srcCode });
         relu6Pipeline = gDevice.createComputePipeline({ relu6_srcCode });
-
         pwconvDescSet = pwconvPipeline.descSetLayout(0).newDescSet(gDestSetPool);
         bnDescSet = bnPipeline.descSetLayout(0).newDescSet(gDestSetPool);
         relu6DescSet = relu6Pipeline.descSetLayout(0).newDescSet(gDestSetPool);
     }
-
     void prepare() override
     {
         const auto& inShape = (*this)["in0"].shape();
         _ASSERT(inShape.size() == 3);
         _ASSERT(inShape[2] == C_in);
-
         (*this)["pw_out"] = Tensor(inShape[0], inShape[1], C_out);
         (*this)["bn_out"] = Tensor(inShape[0], inShape[1], C_out);
         (*this)["out0"] = Tensor(inShape[0], inShape[1], C_out);
     }
-
     void run(CommandBuffer cmdBuff) override
     {
         const auto& inShape = (*this)["in0"].shape();
         uint32_t H = inShape[0], W = inShape[1];
-
         // Pointwise Conv
         pwconvDescSet.write({
             (*this)["pw_out"].buffer(),
             (*this)["in0"].buffer(),
             (*this)["pw_weight"].buffer(),
             });
-
         uint32_t pwConstants[] = { H, W, C_in, C_out };
-
         cmdBuff
             .bindPipeline(pwconvPipeline)
             .bindDescSets({ pwconvDescSet })
@@ -989,7 +826,6 @@ public:
                 / (*this)["pw_out"].buffer()
                 / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
             );
-
         // BatchNorm
         bnDescSet.write({
             (*this)["bn_out"].buffer(),
@@ -999,9 +835,7 @@ public:
             (*this)["bn_mean"].buffer(),
             (*this)["bn_var"].buffer(),
             });
-
         struct { int HW, C; float eps; } bnConstants = { (int)(H * W), (int)C_out, eps };
-
         cmdBuff
             .bindPipeline(bnPipeline)
             .bindDescSets({ bnDescSet })
@@ -1012,14 +846,12 @@ public:
                 / (*this)["bn_out"].buffer()
                 / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
             );
-
         // ReLU6
         int N = H * W * C_out;
         relu6DescSet.write({
             (*this)["out0"].buffer(),
             (*this)["bn_out"].buffer(),
             });
-
         cmdBuff
             .bindPipeline(relu6Pipeline)
             .bindDescSets({ relu6DescSet })
@@ -1032,12 +864,9 @@ public:
             );
     }
 };
-
-
 // ============================================================================
 // Inverted Residual Block - Core building block of MobileNetV2
 // ============================================================================
-
 /*
 Inverted Residual Block (MBConv):
   Input (H▼W▼C_in)
@@ -1049,24 +878,20 @@ Inverted Residual Block (MBConv):
       戍式式 [Projection] PwConv 1▼1 (C_in▼t ⊥ C_out) + BN (No activation!)
       弛
       戌式式 [Residual] Add (if stride=1 && C_in==C_out)
-
   Output (H'▼W'▼C_out)
 */
-
 class InvertedResidualBlock : public Node
 {
     uint32_t C_in, C_out, expandRatio, stride;
     uint32_t hiddenDim;
     bool useResidual;
     float eps;
-
     // Pipelines
     ComputePipeline pwconvPipeline;
     ComputePipeline dwconvPipeline;
     ComputePipeline bnPipeline;
     ComputePipeline relu6Pipeline;
     ComputePipeline addPipeline;
-
     // Descriptor sets for each stage
     DescriptorSet expandPwDescSet;
     DescriptorSet expandBnDescSet;
@@ -1077,7 +902,6 @@ class InvertedResidualBlock : public Node
     DescriptorSet projPwDescSet;
     DescriptorSet projBnDescSet;
     DescriptorSet addDescSet;
-
 public:
     InvertedResidualBlock(uint32_t inChannels, uint32_t outChannels,
         uint32_t expandRatio = 6, uint32_t stride = 1,
@@ -1087,11 +911,9 @@ public:
     {
         hiddenDim = C_in * expandRatio;
         useResidual = (stride == 1 && C_in == C_out);
-
         // Input/Output slots
         slots.try_emplace("in0", NodeSlot::input, this);
         slots.try_emplace("out0", NodeSlot::output, this);
-
         // Internal tensors
         if (expandRatio != 1) {
             slots.try_emplace("expand_pw_out", NodeSlot::internal, this);
@@ -1103,7 +925,6 @@ public:
         slots.try_emplace("dw_relu6_out", NodeSlot::internal, this);
         slots.try_emplace("proj_pw_out", NodeSlot::internal, this);
         slots.try_emplace("proj_bn_out", NodeSlot::internal, this);
-
         // Weight slots - Expansion layer (only if expand ratio > 1)
         if (expandRatio != 1) {
             slots.try_emplace("expand_pw_weight", NodeSlot::input, this);
@@ -1112,28 +933,24 @@ public:
             slots.try_emplace("expand_bn_mean", NodeSlot::input, this);
             slots.try_emplace("expand_bn_var", NodeSlot::input, this);
         }
-
         // Weight slots - Depthwise layer
         slots.try_emplace("dw_weight", NodeSlot::input, this);
         slots.try_emplace("dw_bn_gamma", NodeSlot::input, this);
         slots.try_emplace("dw_bn_beta", NodeSlot::input, this);
         slots.try_emplace("dw_bn_mean", NodeSlot::input, this);
         slots.try_emplace("dw_bn_var", NodeSlot::input, this);
-
         // Weight slots - Projection layer
         slots.try_emplace("proj_pw_weight", NodeSlot::input, this);
         slots.try_emplace("proj_bn_gamma", NodeSlot::input, this);
         slots.try_emplace("proj_bn_beta", NodeSlot::input, this);
         slots.try_emplace("proj_bn_mean", NodeSlot::input, this);
         slots.try_emplace("proj_bn_var", NodeSlot::input, this);
-
         // Create pipelines
         pwconvPipeline = gDevice.createComputePipeline({ pwconv_srcCode });
         dwconvPipeline = gDevice.createComputePipeline({ dwconv_srcCode });
         bnPipeline = gDevice.createComputePipeline({ batchnorm_srcCode });
         relu6Pipeline = gDevice.createComputePipeline({ relu6_srcCode });
         addPipeline = gDevice.createComputePipeline({ add_srcCode });
-
         // Create descriptor sets
         if (expandRatio != 1) {
             expandPwDescSet = pwconvPipeline.descSetLayout(0).newDescSet(gDestSetPool);
@@ -1149,17 +966,14 @@ public:
             addDescSet = addPipeline.descSetLayout(0).newDescSet(gDestSetPool);
         }
     }
-
     void prepare() override
     {
         const auto& inShape = (*this)["in0"].shape();
         _ASSERT(inShape.size() == 3);
         _ASSERT(inShape[2] == C_in);
-
         uint32_t H_in = inShape[0], W_in = inShape[1];
         uint32_t H_out = (H_in + 2 * 1 - 3) / stride + 1;  // K=3, pad=1
         uint32_t W_out = (W_in + 2 * 1 - 3) / stride + 1;
-
         if (expandRatio != 1) {
             (*this)["expand_pw_out"] = Tensor(H_in, W_in, hiddenDim);
             (*this)["expand_bn_out"] = Tensor(H_in, W_in, hiddenDim);
@@ -1172,17 +986,14 @@ public:
         (*this)["proj_bn_out"] = Tensor(H_out, W_out, C_out);
         (*this)["out0"] = Tensor(H_out, W_out, C_out);
     }
-
     void run(CommandBuffer cmdBuff) override
     {
         const auto& inShape = (*this)["in0"].shape();
         uint32_t H_in = inShape[0], W_in = inShape[1];
         uint32_t H_out = (*this)["dw_out"].shape()[0];
         uint32_t W_out = (*this)["dw_out"].shape()[1];
-
         Buffer currentInput = (*this)["in0"].buffer();
         uint32_t currentH = H_in, currentW = W_in, currentC = C_in;
-
         // ========== Expansion Layer (if t > 1) ==========
         if (expandRatio != 1) {
             // Pointwise Conv: C_in -> hiddenDim
@@ -1200,7 +1011,6 @@ public:
                 .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
                     / (*this)["expand_pw_out"].buffer()
                     / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
-
             // BatchNorm
             expandBnDescSet.write({
                 (*this)["expand_bn_out"].buffer(),
@@ -1219,7 +1029,6 @@ public:
                 .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
                     / (*this)["expand_bn_out"].buffer()
                     / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
-
             // ReLU6
             int N = H_in * W_in * hiddenDim;
             expandRelu6DescSet.write({
@@ -1234,11 +1043,9 @@ public:
                 .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
                     / (*this)["expand_relu6_out"].buffer()
                     / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
-
             currentInput = (*this)["expand_relu6_out"].buffer();
             currentC = hiddenDim;
         }
-
         // ========== Depthwise Layer ==========
         // Depthwise Conv
         dwDescSet.write({
@@ -1268,7 +1075,6 @@ public:
             .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
                 / (*this)["dw_out"].buffer()
                 / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
-
         // BatchNorm
         dwBnDescSet.write({
             (*this)["dw_bn_out"].buffer(),
@@ -1287,7 +1093,6 @@ public:
             .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
                 / (*this)["dw_bn_out"].buffer()
                 / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
-
         // ReLU6
         int dwN = H_out * W_out * hiddenDim;
         dwRelu6DescSet.write({
@@ -1302,7 +1107,6 @@ public:
             .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
                 / (*this)["dw_relu6_out"].buffer()
                 / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
-
         // ========== Projection Layer ==========
         // Pointwise Conv: hiddenDim -> C_out
         projPwDescSet.write({
@@ -1319,7 +1123,6 @@ public:
             .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
                 / (*this)["proj_pw_out"].buffer()
                 / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
-
         // BatchNorm (no activation after projection!)
         projBnDescSet.write({
             (*this)["proj_bn_out"].buffer(),
@@ -1338,7 +1141,6 @@ public:
             .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
                 / (*this)["proj_bn_out"].buffer()
                 / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
-
         // ========== Residual Add (if applicable) ==========
         if (useResidual) {
             int addN = H_out * W_out * C_out;
@@ -1357,33 +1159,18 @@ public:
                     / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
         }
         else {
-            // No residual - copy proj_bn_out to out0
-            // For simplicity, we'll use a copy operation
-            int copyN = H_out * W_out * C_out;
-            // Reuse relu6 pipeline with a workaround (or add copy pipeline)
-            // Actually, we can just share the buffer
-            // But for safety, let's do element-wise copy using add with zero
-            // Better approach: just use proj_bn_out as out0
-            // This requires changing tensor assignment...
-            // For now, we'll add input with zero effect by using proj_bn_out directly
-
-            // Simplest fix: use Add with itself * 0.5 + itself * 0.5... 
-            // Actually no, let's just do a proper copy
-            // Use relu6 with a big clamp to effectively copy
-            // ReLU6 will clamp to [0,6] which might alter values...
-
-            // Better: we need a copy shader. Let's reuse from neuralNodes.h
-            // For now, share tensor reference (they share same buffer)
-            // This is a workaround - in production we'd have a copy node
+            // No residual path: copy projection output forward
+            cmdBuff
+                .copyBuffer((*this)["out0"].buffer(), (*this)["proj_bn_out"].buffer())
+                .barrier((PIPELINE_STAGE::TRANSFER, ACCESS::TRANSFER_WRITE)
+                    / (*this)["out0"].buffer()
+                    / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
         }
     }
 };
-
-
 // ============================================================================
 // Fully Connected Node (similar to neuralNodes.h but independent)
 // ============================================================================
-
 inline const char* fc_mobilenet_srcCode = R"(
 #version 450
 layout(local_size_x = 64, local_size_y = 16) in;
@@ -1391,34 +1178,27 @@ layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };
 layout(set = 0, binding = 1) buffer InBuffer { float in0[]; };
 layout(set = 0, binding = 2) buffer Weight { float weight[]; };
 layout(set = 0, binding = 3) buffer Bias { float bias[]; };
-
 layout(push_constant) uniform PushConstants {
     int N;  // batch size (1 for now)
     int I;  // input features
     int O;  // output features
 };
-
 void main() 
 {
     int n = int(gl_GlobalInvocationID.x); 
     int o = int(gl_GlobalInvocationID.y); 
     if (n >= N || o >= O) 
         return;
-
     float sum = bias[o];
     for (int i = 0; i < I; ++i)
         sum += in0[n * I + i] * weight[i * O + o];
-
     out0[n * O + o] = sum;
 })";
-
-
 class FCMobileNetNode : public Node
 {
     uint32_t I, O;
     ComputePipeline pipeline;
     DescriptorSet descSet;
-
 public:
     FCMobileNetNode(uint32_t inFeatures, uint32_t outFeatures)
         : I(inFeatures), O(outFeatures)
@@ -1427,11 +1207,9 @@ public:
         slots.try_emplace("out0", NodeSlot::output, this);
         slots.try_emplace("weight", NodeSlot::input, this);
         slots.try_emplace("bias", NodeSlot::input, this);
-
         pipeline = gDevice.createComputePipeline({ fc_mobilenet_srcCode });
         descSet = pipeline.descSetLayout(0).newDescSet(gDestSetPool);
     }
-
     void prepare() override
     {
         _ASSERT((*this)["in0"].isShapeOf(I));
@@ -1439,7 +1217,6 @@ public:
         _ASSERT((*this)["bias"].isShapeOf(O));
         (*this)["out0"] = Tensor(O);
     }
-
     void run(CommandBuffer cmdBuff) override
     {
         descSet.write({
@@ -1448,9 +1225,7 @@ public:
             (*this)["weight"].buffer(),
             (*this)["bias"].buffer(),
             });
-
         uint32_t constants[] = { 1, I, O };
-
         cmdBuff
             .bindPipeline(pipeline)
             .bindDescSets({ descSet })
@@ -1463,6 +1238,4 @@ public:
             );
     }
 };
-
-
 #endif // MOBILE_NET_NODES_H

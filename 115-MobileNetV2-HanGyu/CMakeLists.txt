@@ -10,7 +10,8 @@ add_executable(${PROJECT_NAME}
     spirvHelpers.cpp
     stb_image.cpp
     jsonParser.cpp
-)
+    safeTensorsParser.cpp
+ )
 
 add_definitions(
     -DPROJECT_CURRENT_DIR="${CMAKE_CURRENT_SOURCE_DIR}"

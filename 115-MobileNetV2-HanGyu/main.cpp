@@ -25,6 +25,7 @@ int main()
 
     //glfwDestroyWindow(window);
     //glfwTerminate();
+    
     // MobileNetV2 Å×½ºÆ®
     void test_mobilenet();
     test_mobilenet();

@@ -159,8 +159,8 @@ void main()
 
 inline static Device gDevice = VulkanApp::get().createDevice({.supportPresent = false});
 inline static DescriptorPool gDestSetPool = gDevice.createDescriptorPool({
-    .maxTypes = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER <= 200}, 
-    .maxSets = 100
+    .maxTypes = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER <= 10000}, 
+    .maxSets = 5000
 });
 
 class ConvolutionNode : public Node
