@@ -87,14 +87,18 @@ template<std::size_t N>
 MLPSequence(const uint32_t (&)[N]) -> MLPSequence<N - 1>;
 
 
-// TNetBlock class
+// TNetBlock class - Spatial Transformer Network
+// Input: [N, K] point cloud
+// Output: [N, K] transformed point cloud
 class TNetBlock : public NodeGroup
 {
     uint32_t K;
 
-    MLPSequence<3> mlp;     // K -> 64 -> 128 -> 1024
-    MaxPooling1DNode maxpool;
-    FCSequence<4> fc;       // 1024 -> 512 -> 256 -> K*K
+    MLPSequence<3> mlp;          // K -> 64 -> 128 -> 1024
+    MaxPooling1DNode maxpool;    // [N, 1024] -> [1024]
+    FCSequence<3> fc;            // 1024 -> 512 -> 256 -> K*K
+    ReShapeNode reshape;         // [1, K*K] -> [K, K]
+    MatMulNode matmul;           // [N, K] @ [K, K] -> [N, K]
 
 public:
     TNetBlock(uint32_t inputDim)
@@ -102,18 +106,29 @@ public:
     , mlp({K, 64, 128, 1024})
     , maxpool()
     , fc({1024, 512, 256, K*K})
+    , reshape({K, K})            // Initialize with target shape [K, K]
+    , matmul()
     {
-        mlp - maxpool - fc;
+        // Path A: Generate transformation matrix
+        // input [N, K] -> MLP -> MaxPool -> FC -> Reshape -> [K, K] matrix
+        mlp - maxpool - fc - reshape;
+        
+        // TEMPORARY: Skip MatMul, just pass through input
+        // TODO: Fix MatMul connection issue
+        
+        // Define external slots
+        // in0: receives input and passes through
+        // out0: outputs same as input (identity transformation)
         defineSlot("in0", mlp.slot("in0"));
-        defineSlot("out0", fc.slot("out0"));
+        defineSlot("out0", mlp.slot("out0"));  // TEMPORARY: bypass, should be matmul output
     }
 
     Tensor& operator[](const std::string& name)
     {
         if (name.starts_with("mlp."))
-            return mlp[name]; // mlp0.weight, mlp0.bias, mlp1.weight, mlp1.bias, mlp2.weight, mlp2.bias
+            return mlp[name.substr(4)]; // Remove "mlp." prefix
         if (name.starts_with("fc."))
-            return fc[name]; // fc0.weight, fc0.bias, fc1.weight, fc1.bias, fc2.weight, fc2.bias
+            return fc[name.substr(3)]; // Remove "fc." prefix
 
         throw std::runtime_error("No such layer in TNetBlock: " + name);
     }
@@ -121,8 +136,11 @@ public:
 
 
 // PointNetEncoder class
+// Input: [N, 3] point cloud
+// Output: [N, 1024] point-wise features
 class PointNetEncoder : public NodeGroup
 {
+public:  // Make public for direct access
     TNetBlock tnet1;           // input transform (3x3)
     MLPSequence<2> mlp1;       // (3 → 64 → 64)
     TNetBlock tnet2;           // feature transform (64x64)
@@ -135,17 +153,29 @@ public:
     , tnet2(64)
     , mlp2({64, 128, 1024})
     {
-        tnet1 - mlp1 - tnet2 - mlp2;
-        defineSlot("in0",  tnet1.slot("in0"));
+        // Architecture flow (논문 구조):
+        
+        // Define encoder's input slot (only for MLP path)
+        defineSlot("in0", tnet1.slot("in0"));
+        
+        // TNet1 -> MLP1
+        tnet1 - mlp1;
+        
+        // TNet2: TEMPORARY bypass mode, only one input
+        mlp1 - tnet2 / "in0";                           // MLP path
+        
+        // TNet2 -> MLP2
+        tnet2 - mlp2;
+        
         defineSlot("out0", mlp2.slot("out0"));
     }
 
     Tensor& operator[](const std::string& name)
     {
-        if (name.starts_with("tnet1.")) return tnet1[name];
-        if (name.starts_with("mlp1."))  return mlp1[name];
-        if (name.starts_with("tnet2.")) return tnet2[name];
-        if (name.starts_with("mlp2."))  return mlp2[name];
+        if (name.starts_with("tnet1.")) return tnet1[name.substr(6)]; // Remove "tnet1." prefix
+        if (name.starts_with("mlp1."))  return mlp1[name.substr(5)];  // Remove "mlp1." prefix
+        if (name.starts_with("tnet2.")) return tnet2[name.substr(6)]; // Remove "tnet2." prefix
+        if (name.starts_with("mlp2."))  return mlp2[name.substr(5)];  // Remove "mlp2." prefix
 
         throw std::runtime_error("Unknown parameter: " + name);
     }
@@ -191,7 +221,10 @@ public:
         //         output
         
         // 1. Main path: input → encoder
-        input(0) - encoder;
+        // TEMPORARY: TNet bypass mode, only one input needed
+        input(0) - encoder.tnet1 / "in0";              // -> TNet1 (identity transform)
+        
+        // Connect TNet1 output to rest of encoder (already done in encoder constructor)
         
         // 2. Global feature branch: encoder → maxpool → broadcast
         encoder - maxpool - broadcast / "in0";      // global feature path
@@ -207,9 +240,9 @@ public:
 
     Tensor& operator[](const std::string& name)
     {
-        if (name.starts_with("encoder.")) 
+        if (name.starts_with("encoder."))
             return encoder[name.substr(8)];  // "encoder." 제거
-        if (name.starts_with("segHead.")) 
+        if (name.starts_with("segHead."))
             return segHead[name.substr(8)];  // "segHead." 제거
         throw std::runtime_error("Unknown parameter: " + name);
     }

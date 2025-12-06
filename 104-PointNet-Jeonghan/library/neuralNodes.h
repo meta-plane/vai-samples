@@ -29,9 +29,30 @@ class PointWiseMLPNode : public Node
 
     ComputePipeline gemm;
     DescriptorSet gemmDesc;
+    
+    ComputePipeline batchnorm;
+    DescriptorSet batchnormDesc;
+    
+    ComputePipeline relu;
+    DescriptorSet reluDesc;
 
 public:
     PointWiseMLPNode(uint32_t inDim, uint32_t outDim);
+
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+
+class BatchNorm1DNode : public Node
+{
+    uint32_t C;  // channels
+
+    ComputePipeline batchnorm;
+    DescriptorSet batchnormDesc;
+
+public:
+    BatchNorm1DNode(uint32_t channels);
 
     void prepare() override;
     void run(CommandBuffer cmdBuff) override;
@@ -135,6 +156,31 @@ public:
     void run(CommandBuffer cmdBuff) override;
 };
 
+class ReShapeNode : public Node
+{
+    ComputePipeline copy;
+    DescriptorSet copyDescSet;
+    std::vector<uint32_t> targetShape;
+
+public:
+    ReShapeNode();
+    ReShapeNode(std::vector<uint32_t> shape);
+    void setTargetShape(std::vector<uint32_t> shape);
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+// Matrix multiplication: [N, K] @ [K, M] -> [N, M]
+class MatMulNode : public Node
+{
+    ComputePipeline matmul;
+    DescriptorSet matmulDescSet;
+
+public:
+    MatMulNode();
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
 
 extern Device netGlobalDevice; // Global device for neural network operations
 

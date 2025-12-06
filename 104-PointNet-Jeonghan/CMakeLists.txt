@@ -2,17 +2,52 @@ cmake_minimum_required(VERSION 3.16)
 
 project(104-PointNet-Jeonghan)
 
-add_executable(${PROJECT_NAME} 
-    main.cpp
+# Testing option (default: OFF)
+option(BUILD_TESTING "Build tests" OFF)
+
+add_library(VAI_LIBRARY
     library/vulkanApp.cpp
     library/neuralNodes.cpp
     library/spirvHelpers.cpp
     library/stb_image.cpp
     library/jsonParser.cpp
     library/safeTensorsParser.cpp
+)
+
+# Set include directories and link libraries for VAI_LIBRARY
+target_include_directories(VAI_LIBRARY PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/library
+    ${Vulkan_INCLUDE_DIRS}
+)
+
+target_link_libraries(VAI_LIBRARY PUBLIC
+    glfw
+    spirv-reflect-static
+    ${Vulkan_LIBRARIES}
+    glslang
+    glslang-default-resource-limits
+    nlohmann_json
+)
+
+add_library(POINTNET_LIBRARY
     networks/src/pointnet.cpp
     networks/src/inference.cpp
     networks/src/weights.cpp
+)
+
+target_include_directories(POINTNET_LIBRARY PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/networks/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/library
+    ${Vulkan_INCLUDE_DIRS}
+)
+
+target_link_libraries(POINTNET_LIBRARY PUBLIC
+    VAI_LIBRARY
+)
+
+# Main executable
+add_executable(${PROJECT_NAME} 
+    main.cpp
 )
 
 add_definitions(
@@ -30,10 +65,152 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
-    glfw
-    spirv-reflect-static
-    ${Vulkan_LIBRARIES}
-    glslang
-    glslang-default-resource-limits
-    nlohmann_json
+    VAI_LIBRARY
+    POINTNET_LIBRARY
 )
+
+# Enable testing only if BUILD_TESTING is ON
+if(BUILD_TESTING)
+    enable_testing()
+
+    set(TEST_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/bin/debug")
+    file(MAKE_DIRECTORY "${TEST_OUTPUT_DIR}")
+
+    # Test: BatchNorm1D
+    add_executable(test_batchnorm
+        test/batchnorm/test_batchnorm.cpp
+    )
+
+    target_include_directories(test_batchnorm PRIVATE 
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/library
+        ${Vulkan_INCLUDE_DIRS}
+    )
+
+    target_link_libraries(test_batchnorm PRIVATE
+        VAI_LIBRARY
+    )
+    
+    # Relative output directory (creates at ../../bin/debug/ from build/104-PointNet-Jeonghan)
+    set_target_properties(test_batchnorm PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+    )
+    
+    # Add test - use TARGET_FILE generator expression to get the actual output path
+    add_test(NAME BatchNorm1D COMMAND $<TARGET_FILE:test_batchnorm>)
+    
+    # Test: PointWiseMLP
+    add_executable(test_mlp
+        test/mlp/test_mlp.cpp
+    )
+
+    target_include_directories(test_mlp PRIVATE 
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/library
+        ${Vulkan_INCLUDE_DIRS}
+    )
+
+    target_link_libraries(test_mlp PRIVATE
+        VAI_LIBRARY
+    )
+    
+    set_target_properties(test_mlp PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+    )
+    
+    add_test(NAME PointWiseMLP COMMAND $<TARGET_FILE:test_mlp>)
+    
+    # Test: FullyConnected
+    add_executable(test_fc
+        test/fc/test_fc.cpp
+    )
+
+    target_include_directories(test_fc PRIVATE 
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/library
+        ${Vulkan_INCLUDE_DIRS}
+    )
+
+    target_link_libraries(test_fc PRIVATE
+        VAI_LIBRARY
+    )
+    
+    set_target_properties(test_fc PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+    )
+    
+    add_test(NAME FullyConnected COMMAND $<TARGET_FILE:test_fc>)
+    
+    # Test: FCSequence (chain of FC layers)
+    add_executable(test_fcseq
+        test/fcseq/test_fcseq.cpp
+    )
+
+    target_include_directories(test_fcseq PRIVATE 
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/library
+        ${CMAKE_CURRENT_SOURCE_DIR}/networks/include
+        ${Vulkan_INCLUDE_DIRS}
+    )
+
+    target_link_libraries(test_fcseq PRIVATE
+        VAI_LIBRARY
+        POINTNET_LIBRARY
+    )
+    
+    set_target_properties(test_fcseq PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+    )
+    
+    add_test(NAME FCSequence COMMAND $<TARGET_FILE:test_fcseq>)
+    
+    # MLPSequence test
+    add_executable(test_mlpseq
+        test/mlpseq/test_mlpseq.cpp
+    )
+
+    target_include_directories(test_mlpseq PRIVATE 
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/library
+        ${CMAKE_CURRENT_SOURCE_DIR}/networks/include
+        ${Vulkan_INCLUDE_DIRS}
+    )
+
+    target_link_libraries(test_mlpseq PRIVATE
+        VAI_LIBRARY
+        POINTNET_LIBRARY
+    )
+    
+    set_target_properties(test_mlpseq PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+    )
+    
+    add_test(NAME MLPSequence COMMAND $<TARGET_FILE:test_mlpseq>)
+    
+    # MatMul test
+    add_executable(test_matmul
+        test/matmul/test_matmul.cpp
+    )
+
+    target_include_directories(test_matmul PRIVATE 
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/library
+        ${Vulkan_INCLUDE_DIRS}
+    )
+
+    target_link_libraries(test_matmul PRIVATE
+        VAI_LIBRARY
+    )
+    
+    set_target_properties(test_matmul PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+    )
+    
+    add_test(NAME MatMul COMMAND $<TARGET_FILE:test_matmul>)
+    
+else()
+    message(STATUS "✗ Tests disabled")
+    message(STATUS "  Enable with: cmake -DBUILD_TESTING=ON ..")
+endif()
+
+

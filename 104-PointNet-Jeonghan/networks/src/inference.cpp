@@ -78,9 +78,16 @@ SegmentationResult segment(
         // Run inference with timing
         auto start = std::chrono::high_resolution_clock::now();
         
+        std::cout << "DEBUG: About to run model inference..." << std::endl;
+        std::cout << "DEBUG: Input tensor shape = [" << input_tensor.shape()[0] << ", " << input_tensor.shape()[1] << "]" << std::endl;
+        
         Tensor output;
         for (uint32_t i = 0; i < config.num_iterations; ++i) {
-            output = model(input_tensor)[0];
+            std::cout << "DEBUG: Calling model (iteration " << i << ")..." << std::endl;
+            auto outputs = model(input_tensor);
+            std::cout << "DEBUG: Model call complete, outputs size = " << outputs.size() << std::endl;
+            output = outputs[0];
+            std::cout << "DEBUG: Output tensor shape = [" << output.shape()[0] << ", " << output.shape()[1] << "]" << std::endl;
         }
         
         auto end = std::chrono::high_resolution_clock::now();

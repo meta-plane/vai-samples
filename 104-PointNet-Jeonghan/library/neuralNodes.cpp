@@ -1,5 +1,6 @@
 #include "neuralNodes.h"
 #include <unordered_map>
+#include <iostream>
 #define CEIL_DIV(M, N) (((M) + (N)-1) / (N))
 
 
@@ -17,6 +18,36 @@ void main()
     int o = int(gl_GlobalInvocationID.x);
     if (o >= O) return;
     out0[o] = max(in0[o], 0.0f);
+})";
+
+static const char* src_batchnorm1d = R"(
+#version 450
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0) buffer OutBuffer { float out_data[]; };
+layout(set = 0, binding = 1) buffer InBuffer { float in_data[]; };
+layout(set = 0, binding = 2) buffer MeanBuffer { float mean[]; };
+layout(set = 0, binding = 3) buffer VarBuffer { float var[]; };
+layout(set = 0, binding = 4) buffer GammaBuffer { float gamma[]; };
+layout(set = 0, binding = 5) buffer BetaBuffer { float beta[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint N;       // num_points
+    uint C;       // channels
+    float eps;    // epsilon (1e-5)
+};
+
+void main() 
+{
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = N * C;
+    if (idx >= total) return;
+    
+    uint c = idx % C;  // channel index
+    
+    // BatchNorm: out = gamma * (in - mean) / sqrt(var + eps) + beta
+    float x = in_data[idx];
+    float normalized = (x - mean[c]) / sqrt(var[c] + eps);
+    out_data[idx] = gamma[c] * normalized + beta[c];
 })";
 
 static const char* src_copy = R"(
@@ -615,12 +646,43 @@ void main() {
 }
 )";
 
+// Matrix multiplication shader: C[N, M] = A[N, K] @ B[K, M]
+// No bias addition (pure matrix multiplication)
+static const char* src_matmul = R"(
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(set = 0, binding = 0) buffer OutBuffer { float C[]; };  // [N, M]
+layout(set = 0, binding = 1) buffer InBuffer  { float A[]; };  // [N, K]
+layout(set = 0, binding = 2) buffer Weight    { float B[]; };  // [K, M]
+
+layout(push_constant) uniform PushConstants {
+    int N;  // # of rows in A
+    int K;  // # of cols in A, rows in B
+    int M;  // # of cols in B
+};
+
+void main() 
+{
+    int n = int(gl_GlobalInvocationID.y); 
+    int m = int(gl_GlobalInvocationID.x); 
+
+    if (n >= N || m >= M) 
+        return;
+
+    float sum = 0.0;
+    for (int k = 0; k < K; ++k)
+        sum += A[n * K + k] * B[k * M + m];
+
+    C[n * M + m] = sum;
+}
+)";
+
 
 Device netGlobalDevice = VulkanApp::get().device();
 
 static DescriptorPool gDestSetPool = netGlobalDevice.createDescriptorPool({
-    .maxTypes = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER <= 200}, 
-    .maxSets = 100
+    .maxTypes = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER <= 20000}, 
+    .maxSets = 100000
 });
 
 
@@ -645,6 +707,7 @@ static std::map<const char*, uint32_t> gGemmTileSize =
 void loadShaders()
 {
     requestPipeline(src_relu);
+    requestPipeline(src_batchnorm1d);
     // requestPipeline(src_copy);
     requestPipeline(src_setZero);
     requestPipeline(src_maxpool);
@@ -742,19 +805,39 @@ void ConvolutionNode::run(CommandBuffer cmdBuff)
 
 
 /////////////////////////////////////////////////////////////////////////////////////////
-// TNetNode
+// PointWiseMLPNode (Conv1x1 + BatchNorm1D + ReLU)
 /////////////////////////////////////////////////////////////////////////////////////////
 PointWiseMLPNode::PointWiseMLPNode(uint32_t inDim, uint32_t outDim)
 : Cin(inDim)
 , Cout(outDim)
 {
+    // Slots for full MLP chain
     addSlot("in0", NodeSlot::input);      // [N, Cin]
     addSlot("out0", NodeSlot::output);    // [N, Cout]
+    
+    // Conv weights
     addSlot("weight", NodeSlot::input);   // [Cin, Cout]
     addSlot("bias", NodeSlot::input);     // [Cout]
+    
+    // BatchNorm parameters
+    addSlot("bn_mean", NodeSlot::input);  // [Cout]
+    addSlot("bn_var", NodeSlot::input);   // [Cout]
+    addSlot("bn_gamma", NodeSlot::input); // [Cout]
+    addSlot("bn_beta", NodeSlot::input);  // [Cout]
+    
+    // Intermediate tensors for pipeline stages
+    addSlot("conv_out", NodeSlot::internal);  // After Conv
+    addSlot("bn_out", NodeSlot::internal);    // After BatchNorm
 
+    // Create pipelines for each stage
     gemm = requestPipeline(src_gemm_shared);
     gemmDesc = gemm.descSetLayout(0).newDescSet(gDestSetPool);
+    
+    batchnorm = requestPipeline(src_batchnorm1d);
+    batchnormDesc = batchnorm.descSetLayout(0).newDescSet(gDestSetPool);
+    
+    relu = requestPipeline(src_relu);
+    reluDesc = relu.descSetLayout(0).newDescSet(gDestSetPool);
 }
 
 void PointWiseMLPNode::prepare()
@@ -764,6 +847,26 @@ void PointWiseMLPNode::prepare()
     _ASSERT(inShape[1] == Cin);
 
     (*this)["out0"] = Tensor(inShape[0], Cout);
+    (*this)["conv_out"] = Tensor(inShape[0], Cout);
+    (*this)["bn_out"] = Tensor(inShape[0], Cout);
+    
+    // Set default BatchNorm parameters if not provided
+    if (!(*this)["bn_mean"].validShape()) {
+        std::vector<float> zeros(Cout, 0.0f);
+        (*this)["bn_mean"] = Tensor(Cout).set(zeros);
+    }
+    if (!(*this)["bn_var"].validShape()) {
+        std::vector<float> ones(Cout, 1.0f);
+        (*this)["bn_var"] = Tensor(Cout).set(ones);
+    }
+    if (!(*this)["bn_gamma"].validShape()) {
+        std::vector<float> ones(Cout, 1.0f);
+        (*this)["bn_gamma"] = Tensor(Cout).set(ones);
+    }
+    if (!(*this)["bn_beta"].validShape()) {
+        std::vector<float> zeros(Cout, 0.0f);
+        (*this)["bn_beta"] = Tensor(Cout).set(zeros);
+    }
 }
 
 void PointWiseMLPNode::run(CommandBuffer cmdBuff)
@@ -771,14 +874,15 @@ void PointWiseMLPNode::run(CommandBuffer cmdBuff)
     const auto& inShape = (*this)["in0"].shape();
     uint32_t N = inShape[0];
 
+    // Stage 1: Conv1x1 (GEMM)
     gemmDesc.write({
-        (*this)["out0"].buffer(),
+        (*this)["conv_out"].buffer(),
         (*this)["in0"].buffer(),
         (*this)["weight"].buffer(),
         (*this)["bias"].buffer(),
     });
 
-    uint32_t pc[] = {
+    uint32_t pc_gemm[] = {
         N,        // M
         Cin,      // K
         Cout      // N
@@ -786,8 +890,50 @@ void PointWiseMLPNode::run(CommandBuffer cmdBuff)
     cmdBuff
         .bindPipeline(gemm)
         .bindDescSets({gemmDesc})
-        .setPushConstants(0, sizeof(pc), pc)
+        .setPushConstants(0, sizeof(pc_gemm), pc_gemm)
         .dispatch0(CEIL_DIV(Cout, 32), CEIL_DIV(N, 32))
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["conv_out"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+
+    // Stage 2: BatchNorm1D
+    batchnormDesc.write({
+        (*this)["bn_out"].buffer(),
+        (*this)["conv_out"].buffer(),
+        (*this)["bn_mean"].buffer(),
+        (*this)["bn_var"].buffer(),
+        (*this)["bn_gamma"].buffer(),
+        (*this)["bn_beta"].buffer()
+    });
+
+    float eps = 1e-5f;
+    uint32_t pc_bn[] = { N, Cout };
+    cmdBuff
+        .bindPipeline(batchnorm)
+        .bindDescSets({batchnormDesc})
+        .setPushConstants(0, sizeof(pc_bn), pc_bn)
+        .setPushConstants(sizeof(pc_bn), sizeof(float), &eps)
+        .dispatch0(CEIL_DIV(N * Cout, 256))
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["bn_out"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+
+    // Stage 3: ReLU
+    reluDesc.write({
+        (*this)["out0"].buffer(),
+        (*this)["bn_out"].buffer()
+    });
+
+    int total = N * Cout;
+    cmdBuff
+        .bindPipeline(relu)
+        .setPushConstants(0, sizeof(int), &total)
+        .bindDescSets({reluDesc})
+        .dispatch(total)
         .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["out0"].buffer()
@@ -838,6 +984,62 @@ void ReluNode::run(CommandBuffer cmdBuff)
             / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
         );
 }  
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// BatchNorm1DNode
+/////////////////////////////////////////////////////////////////////////////////////////
+BatchNorm1DNode::BatchNorm1DNode(uint32_t channels)
+: C(channels)
+{
+    addSlot("in0", NodeSlot::input);        // [N, C]
+    addSlot("out0", NodeSlot::output);      // [N, C]
+    addSlot("mean", NodeSlot::input);       // [C] running_mean
+    addSlot("var", NodeSlot::input);        // [C] running_var
+    addSlot("gamma", NodeSlot::input);      // [C] weight (scale)
+    addSlot("beta", NodeSlot::input);       // [C] bias (shift)
+
+    batchnorm = requestPipeline(src_batchnorm1d);
+    batchnormDesc = batchnorm.descSetLayout(0).newDescSet(gDestSetPool);
+}
+
+void BatchNorm1DNode::prepare()
+{
+    const auto& inShape = (*this)["in0"].shape();
+    _ASSERT(inShape.size() == 2);
+    _ASSERT(inShape[1] == C);
+
+    (*this)["out0"] = Tensor(inShape);
+}
+
+void BatchNorm1DNode::run(CommandBuffer cmdBuff)
+{
+    const auto& inShape = (*this)["in0"].shape();
+    uint32_t N = inShape[0];
+    uint32_t total = N * C;
+    
+    batchnormDesc.write({
+        (*this)["out0"].buffer(),
+        (*this)["in0"].buffer(),
+        (*this)["mean"].buffer(),
+        (*this)["var"].buffer(),
+        (*this)["gamma"].buffer(),
+        (*this)["beta"].buffer(),
+    });
+    
+    struct { uint32_t N, C; float eps; } pc = {N, C, 1e-5f};
+    
+    cmdBuff
+        .bindPipeline(batchnorm)
+        .bindDescSets({batchnormDesc})
+        .setPushConstants(0, sizeof(pc), &pc)
+        .dispatch(CEIL_DIV(total, 256))
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["out0"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
 
 
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -980,7 +1182,7 @@ FullyConnectedNode::FullyConnectedNode(uint32_t inDim, uint32_t outDim)
     setZeroDescSet = setZero.descSetLayout(0).newDescSet(gDestSetPool);
 }
 
-void FullyConnectedNode::prepare() 
+void FullyConnectedNode::prepare()
 {
     _ASSERT((*this)["in0"].isShapeOf(I));
     _ASSERT((*this)["weight"].isShapeOf(I, O));
@@ -1151,3 +1353,116 @@ void ConcatNode::run(CommandBuffer cmdBuff)
             / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
         );
 }  
+
+ReShapeNode::ReShapeNode()
+{
+    addSlot("in0", NodeSlot::input);
+    addSlot("out0", NodeSlot::output);
+}
+
+ReShapeNode::ReShapeNode(std::vector<uint32_t> shape)
+: targetShape(shape)
+{
+    addSlot("in0", NodeSlot::input);
+    addSlot("out0", NodeSlot::output);
+}
+
+void ReShapeNode::setTargetShape(std::vector<uint32_t> shape)
+{
+    targetShape = shape;
+}
+
+void ReShapeNode::prepare()
+{
+    _ASSERT((*this)["in0"].validShape());
+    Tensor& outTensor = (*this)["out0"] = (*this)["in0"];
+    
+    // If target shape is specified, reshape to it
+    if (!targetShape.empty()) {
+        // Verify total elements match
+        uint32_t totalElements = 1;
+        for (auto dim : targetShape) {
+            totalElements *= dim;
+        }
+        _ASSERT(outTensor.numElements() == totalElements);
+        
+        // Apply reshape
+        if (targetShape.size() == 1) {
+            outTensor.reshape(targetShape[0]);
+        } else if (targetShape.size() == 2) {
+            outTensor.reshape(targetShape[0], targetShape[1]);
+        } else if (targetShape.size() == 3) {
+            outTensor.reshape(targetShape[0], targetShape[1], targetShape[2]);
+        } else if (targetShape.size() == 4) {
+            outTensor.reshape(targetShape[0], targetShape[1], targetShape[2], targetShape[3]);
+        }
+    }
+}
+
+void ReShapeNode::run(CommandBuffer cmdBuff) 
+{
+    // No-op: reshape is just a metadata change, no GPU work needed
+}
+
+
+//==============================================================================
+// MatMulNode Implementation
+//==============================================================================
+
+MatMulNode::MatMulNode()
+{
+    addSlot("in0", NodeSlot::input);   // [N, K]
+    addSlot("in1", NodeSlot::input);   // [K, M]
+    addSlot("out0", NodeSlot::output); // [N, M]
+    
+    matmul = requestPipeline(src_matmul);
+    matmulDescSet = matmul.descSetLayout(0).newDescSet(gDestSetPool);
+}
+
+void MatMulNode::prepare()
+{
+    Tensor& in0 = (*this)["in0"];
+    Tensor& in1 = (*this)["in1"];
+    
+    _ASSERT(in0.validShape() && in1.validShape());
+    _ASSERT(in0.shape().size() == 2);
+    _ASSERT(in1.shape().size() == 2);
+    _ASSERT(in0.shape()[1] == in1.shape()[0]); // K must match
+    
+    uint32_t N = in0.shape()[0];
+    uint32_t K = in0.shape()[1];
+    uint32_t M = in1.shape()[1];
+    
+    // Output shape: [N, M]
+    (*this)["out0"] = Tensor(N, M);
+}
+
+void MatMulNode::run(CommandBuffer cmdBuff)
+{
+    Tensor& in0 = (*this)["in0"];   // [N, K]
+    Tensor& in1 = (*this)["in1"];   // [K, M]
+    Tensor& out0 = (*this)["out0"]; // [N, M]
+    
+    uint32_t N = in0.shape()[0];
+    uint32_t K = in0.shape()[1];
+    uint32_t M = in1.shape()[1];
+    
+    matmulDescSet.write({
+        out0.buffer(),
+        in0.buffer(),
+        in1.buffer()
+    });
+    
+    uint32_t pc[] = {N, K, M};
+    
+    cmdBuff
+        .bindPipeline(matmul)
+        .bindDescSets({matmulDescSet})
+        .setPushConstants(0, sizeof(pc), pc)
+        .dispatch0((M + 15) / 16, (N + 15) / 16, 1)
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / out0.buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
