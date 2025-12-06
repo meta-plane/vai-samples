@@ -112,6 +112,8 @@ layout(push_constant) uniform PushConstants {
     int W;
     int C;
     int K;
+    int S;
+    int pad;
 };
 
 void main() 
@@ -120,18 +122,19 @@ void main()
     int j = int(gl_GlobalInvocationID.y); 
     int KK = K * K;
     int CKK = C * KK;
-    if (i >= H * W || j >= CKK) 
+    int H_ = (H + 2 * pad - K) / S + 1;
+    int W_ = (W + 2 * pad - K) / S + 1;
+    if (i >= H_ * W_ || j >= CKK) 
         return;
 
-    int h = i / W;          // image center row
-    int w = i % W;          // image center col
+    int h_ = i / W_;
+    int w_ = i % W_;
     int c = j / KK;         // image channel
-    int K_2 = K / 2;
     int k = j % KK;
 
     float value = 0.0;
-    h += k / K - K_2;  
-    w += k % K - K_2;   
+    int h = h_ * S + k / K - pad;  
+    int w = w_ * S + k % K - pad;   
     if (0 <= h && h < H && 0 <= w && w < W) 
         value = in0[((h * W) + w) * C + c];
 
@@ -571,8 +574,8 @@ void main()
 Device netGlobalDevice = VulkanApp::get().device();
 
 static DescriptorPool gDestSetPool = netGlobalDevice.createDescriptorPool({
-    .maxTypes = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER <= 200}, 
-    .maxSets = 100
+    .maxTypes = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER <= 2000000}, 
+    .maxSets = 100000
 });
 
 
@@ -611,8 +614,8 @@ void loadShaders()
 /////////////////////////////////////////////////////////////////////////////////////////
 // ConvolutionNode
 /////////////////////////////////////////////////////////////////////////////////////////
-ConvolutionNode::ConvolutionNode(uint32_t inChannels, uint32_t outChannels, uint32_t kernelWidth)
-:  C(inChannels), F(outChannels), K(kernelWidth)
+ConvolutionNode::ConvolutionNode(uint32_t inChannels, uint32_t outChannels, uint32_t kernelWidth, uint32_t stride, uint32_t padding)
+:  C(inChannels), F(outChannels), K(kernelWidth), S(stride), padding(padding)
 {
     _ASSERT(K % 2 == 1);
     addSlot("in0", NodeSlot::input);
@@ -638,14 +641,19 @@ void ConvolutionNode::prepare()
     _ASSERT((*this)["bias"].isShapeOf(F));
 
     const auto& inShape = (*this)["in0"].shape();
-    (*this)["im2colOut"] = Tensor(inShape[0], inShape[1], C*K*K);
-    (*this)["out0"] = Tensor(inShape[0], inShape[1], F);
+    uint32_t H = inShape[0], W = inShape[1];
+    uint32_t H_ = (H + 2 * padding - K) / S + 1;
+    uint32_t W_ = (W + 2 * padding - K) / S + 1;
+    (*this)["im2colOut"] = Tensor(H_, W_, C*K*K);
+    (*this)["out0"] = Tensor(H_, W_, F);
 }
 
 void ConvolutionNode::run(CommandBuffer cmdBuff)
 {
     const auto& inShape = (*this)["in0"].shape();
     uint32_t H = inShape[0], W = inShape[1];
+    uint32_t H_ = (H + 2 * padding - K) / S + 1;
+    uint32_t W_ = (W + 2 * padding - K) / S + 1;
 
     im2colDescSet.write({
         (*this)["im2colOut"].buffer(),
@@ -659,10 +667,10 @@ void ConvolutionNode::run(CommandBuffer cmdBuff)
         (*this)["bias"].buffer(),
     });
 
-    uint32_t im2colConstants[] = {H, W, C, K};
+    uint32_t im2colConstants[] = {H, W, C, K, S, padding};
     // uint32_t gemmConstants[] = {H * W, C * K * K, F};
 
-    uint32_t M = H * W;         // N
+    uint32_t M = H_ * W_;       // N
     uint32_t K_ = C * K * K;    // I
     uint32_t N = F;             // O
     uint32_t gemmConstants[] = {M, K_, N};
@@ -671,7 +679,7 @@ void ConvolutionNode::run(CommandBuffer cmdBuff)
         .bindPipeline(im2col)
         .bindDescSets({im2colDescSet})
         .setPushConstants(0, sizeof(im2colConstants), im2colConstants)
-        .dispatch(H * W, C * K * K)
+        .dispatch(H_ * W_, C * K * K)
         .barrier( 
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["im2colOut"].buffer()

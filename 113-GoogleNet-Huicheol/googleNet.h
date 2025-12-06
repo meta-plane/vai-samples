@@ -27,6 +27,9 @@ public:
 // Inception Block Node
 class InceptionBlockNode : public NodeGroup
 {
+    // Fan-out for input so all branches receive the same tensor
+    std::unique_ptr<IdentityNode> inputFan;
+
     uint32_t inChannels;
     uint32_t ch1x1Out;
     uint32_t ch3x3redOut;

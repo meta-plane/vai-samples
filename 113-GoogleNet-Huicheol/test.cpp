@@ -7,6 +7,11 @@
 #include <iostream>
 #include <memory>
 #include <tuple>
+#include <algorithm>
+#include <numeric>
+#include <cmath>
+#include <fstream>
+#include <string>
 
 // Helper to read image (simplified from 11-mnist-refactor)
 template<uint32_t Channels>
@@ -29,6 +34,33 @@ auto readImage(const char* filename)
     return std::make_tuple(srcImage, (uint32_t)w, (uint32_t)h);
 }
 
+std::vector<std::string> loadLabels(const char* path, size_t expect)
+{
+    std::ifstream ifs(path);
+    if (!ifs.is_open())
+        return {};
+
+    std::vector<std::string> labels;
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back(); // handle CRLF
+        if (line.empty()) continue; // skip blank lines
+        labels.push_back(line);
+    }
+
+    // Some label files include a background class; drop it if count == expect+1
+    if (expect && labels.size() == expect + 1) {
+        if (labels.front() == "background" || labels.front() == "BACKGROUND")
+            labels.erase(labels.begin());
+    }
+
+    if (!expect || labels.size() == expect)
+        return labels;
+
+    std::cerr << "Label count mismatch (" << labels.size() << " vs " << expect << "), ignoring labels.\n";
+    return {};
+}
+
 void test()
 {
     auto runStage = [](const char* label, auto&& fn)
@@ -46,13 +78,15 @@ void test()
 
     // Load image
     const uint32_t channels = 3;
-    uint32_t H = 32, W = 32;    // original: 224 x 224
+    uint32_t H = 32, W = 32;    // fallback
     std::vector<uint8_t> srcImage;
     try
     {
         auto loaded = readImage<channels>(PROJECT_ROOT_DIR"/113-GoogleNet-Huicheol/data/cat.jpg");
         srcImage = std::get<0>(loaded);
-        std::cout << "Loaded cat.jpg (" << std::get<1>(loaded) << "x" << std::get<2>(loaded) << ")" << std::endl;
+        W = std::get<1>(loaded);
+        H = std::get<2>(loaded);
+        std::cout << "Loaded cat.jpg (" << W << "x" << H << ")" << std::endl;
     }
     catch (const std::exception& e)
     {
@@ -98,6 +132,9 @@ void test()
     // We don't have weights, so we just run the graph to verify structure
     std::cout << "Graph constructed. Running inference..." << std::endl;
     
+    // Optional label map (one label per line)
+    auto labels = loadLabels(PROJECT_ROOT_DIR"/113-GoogleNet-Huicheol/imagenet_labels.txt", 1000);
+
     runStage("inference", [&]{
         auto results = googleNet(inputTensor);
         Tensor& result = results[0];
@@ -124,8 +161,34 @@ void test()
             .wait();
 
         const float* data = reinterpret_cast<const float*>(hostBuffer.map());
+        const size_t N = result.numElements();
+
         std::cout << "First 10 output values: ";
-        for(int i=0; i<10 && i<result.numElements(); ++i) std::cout << data[i] << " ";
+        for (size_t i = 0; i < 10 && i < N; ++i) std::cout << data[i] << " ";
+        std::cout << std::endl;
+
+        // Softmax + Top-5 (CPU-side)
+        std::vector<float> logits(data, data + N);
+        float maxLogit = *std::max_element(logits.begin(), logits.end());
+        float denom = 0.0f;
+        for (float& v : logits) { v = std::exp(v - maxLogit); denom += v; }
+        for (float& v : logits) v /= denom;
+
+        std::vector<size_t> indices(N);
+        std::iota(indices.begin(), indices.end(), 0);
+        const size_t k = std::min<size_t>(5, N);
+        std::partial_sort(indices.begin(), indices.begin() + k, indices.end(),
+            [&](size_t a, size_t b){ return logits[a] > logits[b]; });
+
+        std::cout << "Top-" << k << " predictions (idx: prob";
+        if (!labels.empty()) std::cout << " / label";
+        std::cout << "): ";
+        for (size_t i = 0; i < k; ++i) {
+            size_t idx = indices[i];
+            std::cout << idx << ":" << logits[idx];
+            if (!labels.empty()) std::cout << " (" << labels[idx] << ")";
+            std::cout << " ";
+        }
         std::cout << std::endl;
     });
 

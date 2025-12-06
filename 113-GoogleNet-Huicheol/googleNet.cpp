@@ -16,13 +16,25 @@ Tensor loadConvWeight(const JsonParser* json, const SafeTensorsParser* st, const
 {
     if (st)
     {
-        try { return Tensor((*st)[key]).reshape(outC, inC, K * K).permute(1, 2, 0).reshape(inC * K * K, outC); }
-        catch (const std::exception& e) { std::cerr << "[SafeTensors] fallback to zeros for " << key << ": " << e.what() << std::endl; }
+        try {
+            Tensor t((*st)[key]);
+            const auto elems = t.numElements();
+            const auto expect = size_t(outC) * inC * K * K;
+            if (elems != expect)
+                throw std::runtime_error("shape mismatch: elems=" + std::to_string(elems) + " expect=" + std::to_string(expect));
+            return t.reshape(outC, inC, K * K).permute(1, 2, 0).reshape(inC * K * K, outC);
+        } catch (const std::exception& e) { std::cerr << "[SafeTensors] fallback to zeros for " << key << ": " << e.what() << std::endl; }
     }
     if (json)
     {
-        try { return Tensor((*json)[key]).reshape(outC, inC, K * K).permute(1, 2, 0).reshape(inC * K * K, outC); }
-        catch (const std::exception& e) { std::cerr << "[JSON] fallback to zeros for " << key << ": " << e.what() << std::endl; }
+        try {
+            Tensor t((*json)[key]);
+            const auto elems = t.numElements();
+            const auto expect = size_t(outC) * inC * K * K;
+            if (elems != expect)
+                throw std::runtime_error("shape mismatch: elems=" + std::to_string(elems) + " expect=" + std::to_string(expect));
+            return t.reshape(outC, inC, K * K).permute(1, 2, 0).reshape(inC * K * K, outC);
+        } catch (const std::exception& e) { std::cerr << "[JSON] fallback to zeros for " << key << ": " << e.what() << std::endl; }
     }
     return zeroTensor({inC * K * K, outC});
 }
@@ -46,13 +58,25 @@ Tensor loadFCWeight(const JsonParser* json, const SafeTensorsParser* st, const s
 {
     if (st)
     {
-        try { return Tensor((*st)[key]).reshape(outDim, inDim).permute(1, 0); }
-        catch (const std::exception& e) { std::cerr << "[SafeTensors] fallback to zeros for " << key << ": " << e.what() << std::endl; }
+        try {
+            Tensor t((*st)[key]);
+            const auto elems = t.numElements();
+            const auto expect = size_t(outDim) * inDim;
+            if (elems != expect)
+                throw std::runtime_error("shape mismatch: elems=" + std::to_string(elems) + " expect=" + std::to_string(expect));
+            return t.reshape(outDim, inDim).permute(1, 0);
+        } catch (const std::exception& e) { std::cerr << "[SafeTensors] fallback to zeros for " << key << ": " << e.what() << std::endl; }
     }
     if (json)
     {
-        try { return Tensor((*json)[key]).reshape(outDim, inDim).permute(1, 0); }
-        catch (const std::exception& e) { std::cerr << "[JSON] fallback to zeros for " << key << ": " << e.what() << std::endl; }
+        try {
+            Tensor t((*json)[key]);
+            const auto elems = t.numElements();
+            const auto expect = size_t(outDim) * inDim;
+            if (elems != expect)
+                throw std::runtime_error("shape mismatch: elems=" + std::to_string(elems) + " expect=" + std::to_string(expect));
+            return t.reshape(outDim, inDim).permute(1, 0);
+        } catch (const std::exception& e) { std::cerr << "[JSON] fallback to zeros for " << key << ": " << e.what() << std::endl; }
     }
     return zeroTensor({inDim, outDim});
 }
@@ -206,6 +230,8 @@ InceptionBlockNode::InceptionBlockNode(uint32_t inChannels, uint32_t ch1x1, uint
     , ch5x5Out(ch5x5)
     , poolProjOut(poolProj)
 {
+    inputFan = std::make_unique<IdentityNode>();
+
     // 1x1 branch
     conv1x1 = std::make_unique<ConvolutionNode>(inChannels, ch1x1, 1);
     relu1x1 = std::make_unique<ReluNode>();
@@ -213,21 +239,29 @@ InceptionBlockNode::InceptionBlockNode(uint32_t inChannels, uint32_t ch1x1, uint
     // 3x3 branch
     conv3x3_reduce = std::make_unique<ConvolutionNode>(inChannels, ch3x3red, 1);
     relu3x3_reduce = std::make_unique<ReluNode>();
-    conv3x3 = std::make_unique<ConvolutionNode>(ch3x3red, ch3x3, 3);
+    conv3x3 = std::make_unique<ConvolutionNode>(ch3x3red, ch3x3, 3, 1, 1);
     relu3x3 = std::make_unique<ReluNode>();
 
     // 5x5 branch
     conv5x5_reduce = std::make_unique<ConvolutionNode>(inChannels, ch5x5red, 1);
     relu5x5_reduce = std::make_unique<ReluNode>();
-    conv5x5 = std::make_unique<ConvolutionNode>(ch5x5red, ch5x5, 5);
+    // torchvision GoogLeNet uses 3x3 here (5x5 path factorized), keep name for consistency
+    conv5x5 = std::make_unique<ConvolutionNode>(ch5x5red, ch5x5, 3, 1, 1);
     relu5x5 = std::make_unique<ReluNode>();
 
     // Pooling branch
-    pool = std::make_unique<MaxPoolingNode>(3); // 3x3 pooling
+    pool = std::make_unique<MaxPoolingNode>(3, 1, 1); // preserve H/W
     pool_proj = std::make_unique<ConvolutionNode>(inChannels, poolProj, 1);
     relu_pool = std::make_unique<ReluNode>();
 
     concat = std::make_unique<ConcatenationNode>(4);
+
+    // Fan-out input to all branches
+    defineSlot("in0", inputFan->slot("in0"));
+    *inputFan - *conv1x1;
+    inputFan->slot("out0") - conv3x3_reduce->slot("in0");
+    inputFan->slot("out0") - conv5x5_reduce->slot("in0");
+    inputFan->slot("out0") - pool->slot("in0");
 
     // Connect 1x1
     *conv1x1 - *relu1x1;
@@ -248,10 +282,6 @@ InceptionBlockNode::InceptionBlockNode(uint32_t inChannels, uint32_t ch1x1, uint
     relu_pool->slot("out0") - concat->slot("in3");
 
     // Expose slots
-    // We expose conv1x1's input as the block's input.
-    // Note: The caller must manually connect this input to other branches if NodeGroup doesn't support 1-to-many internal routing automatically.
-    // However, for this skeleton, we assume the user will handle the wiring or we rely on shared tensor assignment.
-    defineSlot("in0", conv1x1->slot("in0")); 
     defineSlot("out0", concat->slot("out0"));
 }
 
@@ -279,7 +309,7 @@ void InceptionBlockNode::loadWeights(const JsonParser* json, const SafeTensorsPa
     loadConv(*conv3x3_reduce, inChannels, ch3x3redOut, 1, "3x3_reduce");
     loadConv(*conv3x3, ch3x3redOut, ch3x3Out, 3, "3x3");
     loadConv(*conv5x5_reduce, inChannels, ch5x5redOut, 1, "5x5_reduce");
-    loadConv(*conv5x5, ch5x5redOut, ch5x5Out, 5, "5x5");
+    loadConv(*conv5x5, ch5x5redOut, ch5x5Out, 3, "5x5");
     loadConv(*pool_proj, inChannels, poolProjOut, 1, "pool_proj");
 }
 
@@ -290,16 +320,16 @@ void InceptionBlockNode::loadWeights(const JsonParser* json, const SafeTensorsPa
 GoogleNet::GoogleNet(Device& device, uint32_t numClasses)
     : NeuralNet(device)
     , numClasses(numClasses)
-    , conv1(3, 64, 7)
+    , conv1(3, 64, 7, 2, 3) // stride 2, pad 3
     , relu1()
-    , pool1(3)
+    , pool1(3, 2, 1)
     , conv2_reduce(64, 64, 1)
     , relu2_reduce()
-    , conv2(64, 192, 3)
+    , conv2(64, 192, 3, 1, 1) // pad 1
     , relu2()
-    , pool2(3)
-    , pool3(3)
-    , pool4(3)
+    , pool2(3, 2, 1)
+    , pool3(3, 2, 1)
+    , pool4(3, 2, 1)
     , avgPool()
     , flatten()
     , fc(1024, numClasses)
