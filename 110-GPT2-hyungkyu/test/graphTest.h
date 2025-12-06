@@ -131,4 +131,7 @@ public:
     const T* getLayer() const;
 };
 
+// Include template implementation
+#include "graphTest.inl"
+
 #endif // GRAPH_TEST_H

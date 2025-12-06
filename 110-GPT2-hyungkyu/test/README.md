@@ -15,14 +15,20 @@
 ```
 test/
 ├── README.md                      # 이 문서
-├── graphTest.h                    # 테스트 프레임워크 템플릿
-├── graphTest.cpp                  # 구현
+├── graphTest.h                    # 테스트 프레임워크 선언
+├── graphTest.inl                  # 템플릿 구현 (header-only)
 ├── runTests.cpp                   # 테스트 실행기
 ├── jsonParser.h/cpp               # JSON 파싱 유틸리티
 └── test_data_generators/          # 테스트 데이터 생성기
     ├── json_exporter.py           # 공통 유틸리티
     └── <model_name>/              # 모델별 생성기
 ```
+
+**파일 설명:**
+- `graphTest.h`: GraphTest 템플릿 클래스 선언, 마지막에 `graphTest.inl` include
+- `graphTest.inl`: 모든 템플릿 메서드 구현 (inline implementation)
+- Header-only 방식이므로 별도의 `.cpp` 파일 불필요
+- 새로운 노드 타입 추가 시 템플릿 인스턴스화 코드 작성 불필요
 
 ## 🚀 새로운 테스트 추가 방법
 
@@ -66,15 +72,9 @@ void registerTests() {
 }
 ```
 
-### 3단계: 템플릿 인스턴스화 (새로운 노드 타입인 경우)
+**중요**: Header-only 템플릿 방식이므로 `graphTest.cpp`에 템플릿 인스턴스화를 추가할 필요가 없습니다!
 
-`graphTest.cpp` 끝부분에 추가:
-
-```cpp
-template class GraphTest<YourNewNode>;
-```
-
-### 4단계: 빌드 및 실행
+### 3단계: 빌드 및 실행
 
 ```bash
 cmake --build ../build --target gpt2-unit-tests
@@ -108,6 +108,7 @@ cmake --build ../build --target gpt2-unit-tests
 ### 핵심 기능
 
 ```cpp
+// graphTest.h - 템플릿 선언
 template<typename NodeType>
 class GraphTest : public ITest {
 public:
@@ -119,7 +120,17 @@ public:
 
     bool execute() override;
 };
+
+// graphTest.inl - 템플릿 구현 (header-only)
+#include "graphTest.inl"
 ```
+
+**Header-only 템플릿 방식:**
+- 템플릿 선언은 `graphTest.h`에 위치
+- 템플릿 구현은 `graphTest.inl`에 위치
+- `graphTest.h` 끝에서 `graphTest.inl`을 include
+- 컴파일러가 사용 시점에 자동으로 템플릿 인스턴스화
+- **별도의 `.cpp` 파일 불필요, 명시적 템플릿 인스턴스화 불필요**
 
 **자동으로 처리:**
 - ✅ JSON에서 입력/출력/파라미터 로딩
@@ -271,21 +282,6 @@ void registerTests() {
 }
 ```
 
-### 템플릿 인스턴스화
-
-`graphTest.cpp` 끝부분:
-
-```cpp
-// 템플릿 명시적 인스턴스화
-template class GraphTest<LinearNode>;
-template class GraphTest<LayerNormNode>;
-template class GraphTest<GELUNode>;
-template class GraphTest<AddNode>;
-template class GraphTest<MultiHeadAttentionNode>;
-template class GraphTest<FeedForwardNode>;
-template class GraphTest<TransformerBlock>;
-```
-
 ### 실행 결과
 
 ```
@@ -371,8 +367,7 @@ JSON의 파라미터 이름이 노드의 슬롯 이름과 일치하는지 확인
 새로운 테스트 추가 시:
 
 - [ ] Python으로 테스트 데이터 생성
-- [ ] C++ 레이어 `operator[]` 구현
+- [ ] C++ 레이어 `operator[]` 구현 (파라미터가 있는 경우)
 - [ ] `runTests.cpp`에 `addTest` 추가
-- [ ] `graphTest.cpp`에 템플릿 인스턴스화 (신규 타입인 경우)
 - [ ] 빌드 및 실행
 - [ ] PASS 확인

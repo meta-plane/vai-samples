@@ -1,10 +1,12 @@
-#include "graphTest.h"
-#include "jsonParser.h"
-#include "../model/attention/attentionNode.h"
-#include "../model/transformerBlock/transformer.h"
-#include <chrono>
+// ============================================================================
+// GraphTest Template Implementation
+//
+// This file contains the implementation of GraphTest template methods.
+// It is included at the end of graphTest.h to enable header-only templates.
+// ============================================================================
 
-using namespace vk;
+#include "jsonParser.h"
+#include <chrono>
 
 // ============================================================================
 // JSON Loading
@@ -319,15 +321,3 @@ template<typename T>
 const T* GraphTest<T>::getLayer() const {
     return targetGraph.get();
 }
-
-// ============================================================================
-// Template Instantiations
-// ============================================================================
-
-template class GraphTest<LinearNode>;
-template class GraphTest<LayerNormNode>;
-template class GraphTest<GELUNode>;
-template class GraphTest<AddNode>;
-template class GraphTest<MultiHeadAttentionNode>;
-template class GraphTest<FeedForwardNode>;
-template class GraphTest<TransformerBlock>;

@@ -39,7 +39,6 @@ add_executable(gpt2-inference
 
 add_executable(gpt2-unit-tests
     test/runTests.cpp
-    test/graphTest.cpp
     test/jsonParser.cpp
     ${COMMON_SOURCES}
 )
