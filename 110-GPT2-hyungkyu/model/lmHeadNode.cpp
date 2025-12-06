@@ -1,4 +1,5 @@
 #include "lmHeadNode.h"
+#include "../core/globalContext.h"
 #include "../core/error.h"
 #include <unordered_map>
 #include <iostream>
@@ -7,20 +8,9 @@ using namespace vk;
 
 #define CEIL_DIV(M, N) (((M) + (N)-1) / (N))
 
-// Helper function to cache pipelines
-static ComputePipeline requestPipeline(const char* src)
-{
-    static std::unordered_map<const char*, ComputePipeline> pipelineCache;
-
-    auto [it, inserted] = pipelineCache.try_emplace(src);
-    if (inserted)
-        it->second = netGlobalDevice.createComputePipeline({src});
-    return it->second;
-}
-
 // Shader for LM head matrix multiplication
 // logits[b,s,v] = sum_d(hidden[b,s,d] * weight[v,d])
-static const char* src_lm_head = R"(
+const char* src_lm_head = R"(
 #version 450
 layout(local_size_x = 16, local_size_y = 16) in;
 

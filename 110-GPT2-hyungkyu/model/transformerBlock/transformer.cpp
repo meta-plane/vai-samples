@@ -1,4 +1,5 @@
 #include "transformer.h"
+#include "../../core/globalContext.h"
 #include "../attention/attentionNode.h"
 #include "../../core/error.h"
 #include <cmath>
@@ -8,21 +9,12 @@ using namespace vk;
 
 #define CEIL_DIV(M, N) (((M) + (N)-1) / (N))
 
-static ComputePipeline requestPipeline(const char* src)
-{
-    static std::unordered_map<const char*, ComputePipeline> pipelineCache;
-
-    auto [it, inserted] = pipelineCache.try_emplace(src);
-    if (inserted)
-        it->second = netGlobalDevice.createComputePipeline({src});
-    return it->second;
-}
 
 // ============================================================================
 // LayerNormNode: output = scale * (x - mean) / sqrt(var + eps) + shift
 // ============================================================================
 
-static const char* src_layer_norm = R"(
+const char* src_layer_norm = R"(
 #version 450
 layout(local_size_x = 256) in;
 
@@ -148,7 +140,7 @@ void LayerNormNode::run(CommandBuffer cmdBuff)
 // GELUNode: GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
 // ============================================================================
 
-static const char* src_gelu = R"(
+const char* src_gelu = R"(
 #version 450
 layout(local_size_x = 256) in;
 
@@ -225,7 +217,7 @@ void GELUNode::run(CommandBuffer cmdBuff)
 // FeedForwardNode: Linear(d -> 4d) -> GELU -> Linear(4d -> d)
 // ============================================================================
 
-static const char* src_linear_ff = R"(
+const char* src_linear_ff = R"(
 #version 450
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -445,7 +437,7 @@ void IdentityNode::run(CommandBuffer cmdBuff)
 // AddNode: Element-wise addition for residual connections
 // ============================================================================
 
-static const char* src_add = R"(
+const char* src_add = R"(
 #version 450
 layout(local_size_x = 256) in;
 

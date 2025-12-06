@@ -10,4 +10,12 @@ extern vk::Device netGlobalDevice;
 // Configured to support large models with multiple layers
 extern vk::DescriptorPool gDestSetPool;
 
+// Global shader pipeline cache and management
+// Caches compiled compute pipelines to avoid redundant compilations
+vk::ComputePipeline requestPipeline(const char* src);
+
+// Pre-compile all shaders used in GPT-2 model
+// Call this at startup to eliminate runtime compilation latency
+void loadAllShaders();
+
 #endif // GLOBAL_CONTEXT_H

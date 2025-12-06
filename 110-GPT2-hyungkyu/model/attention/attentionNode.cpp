@@ -1,27 +1,17 @@
 #include "attentionNode.h"
 #include "../../core/error.h"
+#include "../../core/globalContext.h"
 #include <cmath>
-#include <unordered_map>
 
 using namespace vk;
 
 #define CEIL_DIV(M, N) (((M) + (N)-1) / (N))
 
-static ComputePipeline requestPipeline(const char* src)
-{
-    static std::unordered_map<const char*, ComputePipeline> pipelineCache;
-
-    auto [it, inserted] = pipelineCache.try_emplace(src);
-    if (inserted)
-        it->second = netGlobalDevice.createComputePipeline({src});
-    return it->second;
-}
-
 // ============================================================================
 // LinearNode: Y = X @ W^T
 // ============================================================================
 
-static const char* src_linear = R"(
+const char* src_linear = R"(
 #version 450
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -128,7 +118,7 @@ void LinearNode::run(CommandBuffer cmdBuff)
 // SoftmaxNode: Numerically stable softmax
 // ============================================================================
 
-static const char* src_softmax = R"(
+const char* src_softmax = R"(
 #version 450
 layout(local_size_x = 64) in;
 
@@ -219,7 +209,7 @@ void SoftmaxNode::run(CommandBuffer cmdBuff)
 // ============================================================================
 
 // Shader 1: Project input to Q, K, V (3 separate linear projections)
-static const char* src_qkv_projection = R"(
+const char* src_qkv_projection = R"(
 #version 450
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -272,7 +262,7 @@ void main() {
 // Shader 2: Compute attention scores: Q @ K^T / sqrt(head_dim)
 // Input Q, K: [B, S, d_in] where d_in = H * HD
 // Output scores: [B, H, S, S]
-static const char* src_attention_scores = R"(
+const char* src_attention_scores = R"(
 #version 450
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -316,7 +306,7 @@ void main() {
 // Input Q: [B, H, S_q, HD] (reshaped from flat)
 // Input K: [B, H, S_kv, HD] (concatenated cache + new)
 // Output scores: [B, H, S_q, S_kv]
-static const char* src_attention_scores_cached = R"(
+const char* src_attention_scores_cached = R"(
 #version 450
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -352,7 +342,7 @@ void main() {
 )";
 
 // Shader 3: Apply causal mask (set upper triangle to -inf)
-static const char* src_causal_mask = R"(
+const char* src_causal_mask = R"(
 #version 450
 layout(local_size_x = 256) in;
 
@@ -385,7 +375,7 @@ void main() {
 // When using cache, Q has S_q tokens and K has S_kv tokens
 // The causal mask logic: query token at position (cache_len + sq) can attend to keys at positions [0, cache_len + sq]
 // So: if skv > (cache_len + sq), mask it
-static const char* src_causal_mask_cached = R"(
+const char* src_causal_mask_cached = R"(
 #version 450
 layout(local_size_x = 256) in;
 
@@ -421,7 +411,7 @@ void main() {
 // Shader 4: Weighted sum: context = attn_weights @ V
 // Input V: [B, S, d_in] where d_in = H * HD
 // Output context: [B, H, S, HD]
-static const char* src_weighted_sum = R"(
+const char* src_weighted_sum = R"(
 #version 450
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -462,7 +452,7 @@ void main() {
 // Input V: [B, H, S_kv, HD] (concatenated cache + new)
 // Input attn: [B, H, S_q, S_kv]
 // Output context: [B, H, S_q, HD]
-static const char* src_weighted_sum_cached = R"(
+const char* src_weighted_sum_cached = R"(
 #version 450
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -498,7 +488,7 @@ void main() {
 // Shader 5: Combine heads and reshape
 // Input: [B, H, S, HD]
 // Output: [B, S, d_in] where d_in = H * HD
-static const char* src_combine_heads = R"(
+const char* src_combine_heads = R"(
 #version 450
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -537,7 +527,7 @@ void main() {
  * Input: [B, S, D] where D = H * HD (flat format)
  * Output: [B, H, S, HD] (multi-head format)
  */
-static const char* src_reshape_to_heads = R"(
+const char* src_reshape_to_heads = R"(
 #version 450
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -586,7 +576,7 @@ void main() {
  *
  * The new data is written at offset [cache_offset : cache_offset + new_len]
  */
-static const char* src_update_cache = R"(
+const char* src_update_cache = R"(
 #version 450
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -641,7 +631,7 @@ void main() {
  * This shader copies cached data first, then appends new data.
  * Used during autoregressive generation with KV caching.
  */
-static const char* src_concatenate_kv = R"(
+const char* src_concatenate_kv = R"(
 #version 450
 layout(local_size_x = 16, local_size_y = 16) in;
 

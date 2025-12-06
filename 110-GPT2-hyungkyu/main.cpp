@@ -73,6 +73,9 @@ void printUsage(const char* program_name) {
 
 int main(int argc, char* argv[]) {
     try {
+        // Pre-compile all shaders at startup to eliminate runtime compilation latency
+        loadAllShaders();
+
         // Default values
         std::string mode = "generate";
         std::string prompt = "The future of artificial intelligence is";

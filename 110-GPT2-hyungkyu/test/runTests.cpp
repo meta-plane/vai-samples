@@ -63,6 +63,11 @@ int main() {
         std::cout << "║               Unit Tests - Layer Testing               ║" << std::endl;
         std::cout << "╚════════════════════════════════════════════════════════╝\n" << std::endl;
 
+        // Pre-compile all shaders to eliminate runtime compilation latency
+        std::cout << "Loading shaders..." << std::endl;
+        loadAllShaders();
+        std::cout << "All shaders loaded.\n" << std::endl;
+
         registerTests();
 
         int total_tests = 0;

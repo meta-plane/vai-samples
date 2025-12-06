@@ -1,4 +1,5 @@
 #include "embeddingNode.h"
+#include "../../core/globalContext.h"
 #include "../../core/error.h"
 #include <unordered_map>
 #define CEIL_DIV(M, N) (((M) + (N)-1) / (N))
@@ -8,7 +9,7 @@ using namespace vk;
 // ==================== GLSL Shaders ====================
 
 // Token Embedding Lookup Shader
-static const char* src_token_embedding = R"(
+const char* src_token_embedding = R"(
 #version 450
 layout(local_size_x = 64) in;
 layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };      // [B*S*E]
@@ -35,7 +36,7 @@ void main()
 
 
 // Positional Embedding Shader
-static const char* src_positional_embedding = R"(
+const char* src_positional_embedding = R"(
 #version 450
 layout(local_size_x = 64) in;
 layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };      // [B*S*E]
@@ -65,7 +66,7 @@ void main()
 
 
 // Add Embeddings Shader
-static const char* src_add_embeddings = R"(
+const char* src_add_embeddings = R"(
 #version 450
 layout(local_size_x = 256) in;
 layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };       // [B*S*E]
@@ -85,18 +86,6 @@ void main()
 
 
 // ==================== Global Variables ====================
-
-#include "../../core/globalContext.h"
-
-static ComputePipeline requestPipeline(const char* src)
-{
-    static std::unordered_map<const char*, ComputePipeline> pipelineCache;
-
-    auto [it, inserted] = pipelineCache.try_emplace(src);
-    if (inserted)
-        it->second = netGlobalDevice.createComputePipeline({src});
-    return it->second;
-}
 
 
 // ==================== TokenEmbeddingNode ====================
