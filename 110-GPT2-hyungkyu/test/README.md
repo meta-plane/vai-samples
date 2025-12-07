@@ -63,14 +63,14 @@ export_test_data(
 void registerTests() {
     // 생성자 인자가 없는 노드
     addTest<GELUNode>(
-        "GELU - Standard (2x3x8)",
-        PROJECT_CURRENT_DIR "/assets/test_data/gelu_test.json");
+        "GELU - Standard (2x3x8)",                               // 테스트 이름
+        PROJECT_CURRENT_DIR "/assets/test_data/gelu_test.json"); // 데이터 json 파일 위치
 
     // 생성자 인자가 있는 노드
     addTest<LinearNode>(
-        "Linear - Forward Pass",
-        PROJECT_CURRENT_DIR "/assets/test_data/linear_test.json",
-        768, 3072);  // in_features, out_features
+        "Linear - Forward Pass",                                    // 테스트 이름
+        PROJECT_CURRENT_DIR "/assets/test_data/linear_test.json",   // 데이터 json 파일 위치
+        768, 3072);                                                 // 생성자 인자(in_features, out_features)
 }
 ```
 
