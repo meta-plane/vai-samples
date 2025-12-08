@@ -4,12 +4,13 @@ project(103-MobileNetV2-SangIn)
 
 add_executable(${PROJECT_NAME} 
     main.cpp
-    test.cpp
-    vulkanApp.cpp
-    neuralNodes.cpp
-    spirvHelpers.cpp
-    stb_image.cpp
-    jsonParser.cpp
+    test.cpp    
+    models/MobileNetV2.cpp
+    library/vulkanApp.cpp
+    library/neuralNodes.cpp
+    library/spirvHelpers.cpp
+    library/jsonParser.cpp
+    library/safeTensorsParser.cpp
 )
 
 add_definitions(

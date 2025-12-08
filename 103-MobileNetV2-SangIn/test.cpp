@@ -3,13 +3,15 @@
 #include "library/safeTensorsParser.h"
 #include "library/vulkanApp.h"
 #include "library/timeChecker.hpp"
-#include "networks/MobileNetV2.h"
+#include "models/MobileNetV2.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb/stb_image.h>
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 
 #include <cstring>
+#include <iostream>
+#include <filesystem>
 
 
 template<uint32_t Channels>
@@ -33,32 +35,135 @@ auto readImage(const char* filename)
     return std::make_tuple(srcImage, (uint32_t)w, (uint32_t)h);
 }
 
+std::vector<float> preprocess(const std::vector<uint8_t>& image, int w, int h) {
+    std::vector<float> result(w * h * 3);
+    const float mean[] = { 0.485f, 0.456f, 0.406f };
+    const float std[] = { 0.229f, 0.224f, 0.225f };
+
+    for (int i = 0; i < w * h; ++i) {
+        for (int c = 0; c < 3; ++c) {
+            float val = image[i * 3 + c] / 255.0f;
+            result[i * 3 + c] = (val - mean[c]) / std[c];
+        }
+    }
+    return result;
+}
+
 void loadWeights(MobileNetV2& net, const SafeTensorsParser& weights)
 {
-    // // MobileNetV2의 각 레이어에 대해 가중치 로드
-    // for (uint32_t i = 0; i < net.numInvertedBottlenecks(); ++i)
-    // {
-    //     auto& ib = net.invertedBottleneck(i);
-    //     ib["expand.weight"] = Tensor(weights["features." + std::to_string(i) + ".0.weight"]).permute(1, 0);
-    //     ib["depthwise.weight"] = Tensor(weights["features." + std::to_string(i) + ".1.weight"]);
-    //     ib["project.weight"] = Tensor(weights["features." + std::to_string(i) + ".2.weight"]).permute(1, 0);
-    //     ib["project.bias"] = Tensor(weights["features." + std::to_string(i) + ".2.bias"]);
-    // }
+    std::cout << "Loading weights into MobileNetV2..." << std::endl;
 
-    // // 초기 conv 레이어
-    // net["conv1.weight"] = Tensor(weights["features.0.0.weight"]).permute(1, 0);
-    // net["conv1.bias"] = Tensor(weights["features.0.0.bias"]);
+    // Helper lambda to load tensor by name
+    auto loadTensor = [&](const std::string& cppName, const std::string& ptName)
+    {
+        try {
+            auto ref = weights[ptName];
+            Tensor tensor(ref);
+            auto shape = tensor.shape();
+            
+            // find는 문자열 내에서 특정 부분 문자열의 위치를 반환, 없으면 npos 반환
+            if (cppName.find("depthwise.weight") != std::string::npos) {
+                if (shape.size() == 4 && shape[1] == 1) {
+                    tensor.reshape(shape[0], shape[2], shape[3]); // [C_out, 1, K, K] -> [C_out, K, K]
+                }
+            }
+            else if (cppName.find(".weight") != std::string::npos) {
+                if (shape.size() == 4) {
+                    tensor.permute(1, 2, 3, 0); // [C_out, C_in, K, K] -> [C_in, K, K, C_out]
+                    const auto& newShape = tensor.shape();
+                    tensor.reshape(newShape[0] * newShape[1] * newShape[2], newShape[3]); // [C_in, K, K, C_out] -> [C_in * K * K, C_out]
+                }
+                else if (shape.size() == 2) {
+                    tensor.permute(1, 0); // [C_out, C_in] -> [C_in, C_out]
+                }
+            }
+            
+            net[cppName] = std::move(tensor);
+            
+            #if 1
+            // Debug info
+            const auto& finalShape = net[cppName].shape();
+            printf("✓ Loaded %-40s <- %-40s shape=[", cppName.c_str(), ptName.c_str());
+            for(size_t i=0; i<finalShape.size(); ++i) {
+                printf("%d%s", finalShape[i], i<finalShape.size()-1?"x":"");
+            }
+            printf("]\n");
+            #endif
 
-    // // 최종 fc 레이어
-    // net["fc.weight"] = Tensor(weights["classifier.1.weight"]).permute(1, 0);
-    // net["fc.bias"] = Tensor(weights["classifier.1.bias"]);
+        } catch (const std::exception& e) {
+            std::cerr << "[Failed to load] " << cppName << " <- " << ptName << ": " << e.what() << std::endl;
+        } catch (...) {
+            std::cerr << "[Failed to load] " << cppName << " to " << ptName << " (unknown error)" << std::endl;
+        }
+    };
+     
+    auto loadBN = [&](const std::string& cppPrefix, const std::string& ptPrefix)
+    {
+        loadTensor(cppPrefix + ".mean", ptPrefix + ".running_mean");
+        loadTensor(cppPrefix + ".variance", ptPrefix + ".running_var");
+        loadTensor(cppPrefix + ".gamma", ptPrefix + ".weight");
+        loadTensor(cppPrefix + ".beta", ptPrefix + ".bias");
+    };
+
+    auto loadIRB = [&](int blockIdx)
+    {
+        const int ptFeatIdx = blockIdx + 1;  // PyTorch features 인덱스
+        const std::string cppBase = "features." + std::to_string(blockIdx);
+        const std::string ptBase  = "features." + std::to_string(ptFeatIdx) + ".conv";
+
+        // 첫 번째 IRB (features.1): expand 없음
+        if (ptFeatIdx == 1)
+        {
+            // depthwise: conv.0.(0=conv,1=bn)
+            loadTensor(cppBase + ".dwConvBNReLU6.depthwiseConv.weight", ptBase  + ".0.0.weight");
+            loadBN(cppBase + ".dwConvBNReLU6.bn", ptBase + ".0.1");
+
+            // pointwise: conv.1.(1=conv,2=bn)
+            loadTensor(cppBase + ".pwConvBN.pointwiseConv.weight", ptBase  + ".1.weight");
+            loadBN(cppBase + ".pwConvBN.bn", ptBase + ".2");
+        }
+
+        // 나머지 IRB들 (expand_ratio > 1): expand + depthwise + project
+        else
+        {             
+            // expand: conv.0.(0=conv,1=bn)
+            loadTensor(cppBase + ".pwConvBNReLU6.pointwiseConv.weight", ptBase  + ".0.0.weight");
+            loadBN(cppBase + ".pwConvBNReLU6.bn", ptBase + ".0.1");
+
+            // depthwise: conv.1.(0=conv,1=bn)
+            loadTensor(cppBase + ".dwConvBNReLU6.depthwiseConv.weight", ptBase  + ".1.0.weight");
+            loadBN(cppBase + ".dwConvBNReLU6.bn", ptBase + ".1.1");
+
+            // project(pointwise): conv.2, conv.3(BN)
+            loadTensor(cppBase + ".pwConvBN.pointwiseConv.weight", ptBase  + ".2.weight");
+            loadBN(cppBase + ".pwConvBN.bn", ptBase + ".3");
+        }
+    };
+
+    // 1) Stem
+    loadTensor("stem.conv.weight", "features.0.0.weight");
+    loadBN("stem.bn", "features.0.1");
+
+    // 2) Inverted Residual Blocks (net.invertedResidualBlocks.size() == #IRB)
+    for (size_t i = 0; i < net.blocks().size(); ++i) {
+        loadIRB(i);
+    }
+
+    // 3) Final layers
+    loadTensor("finalConv.pointwiseConv.weight", "features.18.0.weight");
+    loadBN("finalConv.bn", "features.18.1");
+
+    loadTensor("classifier.weight", "classifier.1.weight");
+    loadTensor("classifier.bias", "classifier.1.bias");
+
+    std::cout << "Weights loading completed." << std::endl;
 }
 
 Tensor eval_ImageNet(const std::vector<float>& srcImage, uint32_t W, uint32_t H, const SafeTensorsParser* weights, uint8_t iter)
 {
-    auto device = VulkanApp::getGlobalDevice();
+    auto device = VulkanApp::get().device();
 
-    std:cout << "Creating MobileNetV2..." << std::endl;
+    std::cout << "Creating MobileNetV2..." << std::endl;
     MobileNetV2 mobileNetV2(device);
     std::cout << "MobileNetV2 created." << std::endl;
 
@@ -66,8 +171,6 @@ Tensor eval_ImageNet(const std::vector<float>& srcImage, uint32_t W, uint32_t H,
     {
         loadWeights(mobileNetV2, *weights);
     }
-
-
     
     Tensor inputTensor(H, W, 3); // srcImage layout: [H][W][C]
     inputTensor.set(srcImage);   // 데이터 복사
@@ -84,37 +187,68 @@ Tensor eval_ImageNet(const std::vector<float>& srcImage, uint32_t W, uint32_t H,
     return result;
 }
 
+std::vector<float> downloadTensor(const Tensor& tensor)
+{
+    if (!tensor.numElements())
+        return {};
+
+    auto device = VulkanApp::get().device();
+    const size_t byteSize = tensor.numElements() * sizeof(float);
+
+    Buffer staging = device.createBuffer({
+        .size = byteSize,
+        .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .reqMemProps = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    });
+
+    device.newCommandBuffer(queue_compute)
+        .begin()
+        .copyBuffer(staging, tensor.buffer())
+        .end()
+        .submit()
+        .wait();
+
+    std::vector<float> host(tensor.numElements());
+    std::memcpy(host.data(), staging.map(), byteSize);
+    staging.unmap();
+
+    return host;
+}
+
 // smart pointer를 사용하여 SafeTensorsParser 객체를 반환하거나, 실패 시 nullptr를 반환
 // smart pointer : 소유권 관리가 자동으로 이루어져 메모리 누수를 방지(명시적으로 메모리를 해제할 필요가 없음)
 std::unique_ptr<SafeTensorsParser> tryLoadWeights(const std::string& path)
 {
-    std::ifstream file(path, std::ios::binary); // check if file exists
-    if (!file.good())
-        return nullptr;
+    namespace fs = std::filesystem;
 
-    file.close();
-    try
-    {
-        printf("✓ SafeTensors file found: %s\n", path.c_str());
-        return std::make_unique<SafeTensorsParser>(path.c_str()); // smart pointer 반환
+    if (!fs::exists(path)) {
+        std::cerr << "[Warn] Weight file not found: " << path << "\n";
+        return nullptr;
     }
-    catch (const std::exception& e)
-    {
-        std::cerr << "[Warn] Failed to parse weights at " << path << ": " << e.what() << std::endl;
+
+    try {
+        std::cout << "✓ SafeTensors file found: " << path << "\n";
+        return std::make_unique<SafeTensorsParser>(path.c_str());
     }
-    catch (...)
-    {
-        std::cerr << "[Warn] Unknown error while parsing weights at " << path << std::endl;
+    catch (const std::exception& e) {
+        std::cerr << "[Warn] Failed to parse weights at " << path
+            << ": " << e.what() << "\n";
+    }
+    catch (...) {
+        std::cerr << "[Warn] Unknown error while parsing weights at "
+            << path << "\n";
     }
     return nullptr;
 }
+
+
 void test()
 {
     void loadShaders();
     loadShaders();
 
     // Load model weights
-    std::string weightsPath = std::string(PROJECT_CURRENT_DIR) + "/weights/mobelenet_v2_imagenet1k.safetensors";
+    std::string weightsPath = std::string(PROJECT_CURRENT_DIR) + "/weights/mobilenet_v2_imagenet1k.safetensors";
 
     auto weights = tryLoadWeights(weightsPath);
     if (weights)
@@ -126,13 +260,13 @@ void test()
     const uint8_t channels = 3U;
     const uint32_t resolution = 224U;
     std::string imagePath = std::string(PROJECT_CURRENT_DIR) + "/utils/shark.png";
+
     std::cout << "Loading image from " << imagePath << "..." << std::endl;
-    auto [srcImage, width, height] = readImage<channels>(imagePath.c_str(), resolution, resolution); // (H, W, C) == (224, 224, 3)
+    auto [srcImage, width, height] = readImage<channels>(imagePath.c_str()); // (H, W, C) == (224, 224, 3)
+    std::cout << "Image Size: " << width << "x" << height << std::endl;
+    _ASSERT(width == resolution && height == resolution);
 
-    std::vector<float> inputData(width * height * channels);
-    for (size_t i = 0; i < srcImage.size(); ++i)
-        inputData[i] = srcImage[i] / 255.0f;
-
+    auto inputData = preprocess(srcImage, resolution, resolution);
 
     // Eval MobileNetV2
     const uint8_t iter = 1U;
@@ -143,32 +277,26 @@ void test()
     auto logits = downloadTensor(output);
     std::cout << "downloadTensor returned." << std::endl;
 
-
-    uint32_t iter = 1;
-    Tensor eval;
-
+    if (logits.empty())
     {
-        TimeChecker timer("(VAI) MNIST evaluation: {} iterations", iter);
-        eval = eval_ImageNet(inputData, json, iter);
+        std::cout << "No output data returned.\n";
+    }
+    else
+    {
+        // show top-5 idx and logit
+        std::vector<std::pair<int, float>> idxLogits;
+        for (size_t i = 0; i < logits.size(); ++i) {
+            idxLogits.push_back({i, logits[i]});
+        }
+        std::sort(idxLogits.begin(), idxLogits.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+        
+        std::cout << "Top-5 Results:\n";
+        for (int i = 0; i < 5 && i < (int)idxLogits.size(); ++i) {
+            std::cout << "  " << i+1 << ". Class " << idxLogits[i].first 
+                  << ": " << idxLogits[i].second << "\n";
+        }
     }
 
-    vk::Buffer outBuffer = netGlobalDevice.createBuffer({
-        10 * sizeof(float),
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT, 
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-    });
-
-    vk::Buffer evalBuffer = eval.buffer();
-    netGlobalDevice.newCommandBuffer(queue_compute)
-        .begin()
-        .copyBuffer(outBuffer, evalBuffer)
-        .end()
-        .submit()
-        .wait();
-
-    // float data[10];
-    // memcpy(data, outBuffer.map(), 10 * sizeof(float));
-
-    // for(int i=0; i<10; ++i)
-    //     printf("data[%d] = %f\n", i, data[i]);
+    std::cout << "Done." << std::endl;
 }
