@@ -34,7 +34,7 @@ VAI (Vulkan AI) - Vulkan 컴퓨트 셰이더를 사용하는 경량 딥러닝 �
   * Windows라면 VK_LAYER_PATH 설정, Linux/macOS는 LD_LIBRARY_PATH 설정 여부 점검
 
 # 전체 흐름 요약
-![전체 흐름 요약](images/sequence1.png)
+![전체 흐름 요약](images/Sequence1.png)
 
 # VAI 실행 구조
 
