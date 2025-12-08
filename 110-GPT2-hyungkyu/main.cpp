@@ -35,6 +35,7 @@ void printUsage(const char* program_name) {
     std::cout << "\n═══ Options ═══" << std::endl;
     std::cout << "  -h, --help                   Show this help message" << std::endl;
     std::cout << "  --no-cache                   Disable KV cache (slower)" << std::endl;
+    std::cout << "  --profile                    Enable performance profiling output" << std::endl;
     std::cout << "  --temperature <float>        Sampling temperature (default: 0.8)" << std::endl;
     std::cout << "  --top-k <int>                Top-k sampling (default: 40)" << std::endl;
     std::cout << "  --seed <int>                 Random seed for reproducibility (default: 42)" << std::endl;
@@ -58,6 +59,8 @@ void printUsage(const char* program_name) {
     std::cout << "  " << program_name << " interactive" << std::endl;
     std::cout << "\n  # Advanced: Temperature and top-k" << std::endl;
     std::cout << "  " << program_name << " --temperature 1.0 --top-k 50 generate \"Hello\" 30" << std::endl;
+    std::cout << "\n  # Performance profiling" << std::endl;
+    std::cout << "  " << program_name << " --profile generate \"Hello\" 200" << std::endl;
 
     std::cout << "\n═══ Notes ═══" << std::endl;
     std::cout << "  • KV cache is ENABLED by default for faster generation" << std::endl;
@@ -98,6 +101,10 @@ int main(int argc, char* argv[]) {
             }
             else if (arg == "--no-cache") {
                 config.use_cache = false;
+                i++;
+            }
+            else if (arg == "--profile") {
+                config.enable_profiling = true;
                 i++;
             }
             else if (arg == "--temperature") {

@@ -83,7 +83,8 @@ GenerationResult generate(
         if (config.use_cache) {
             generated_ids = generate_gpt2_with_cache(
                 model, prompt_ids, max_tokens,
-                config.temperature, config.top_k, config.seed
+                config.temperature, config.top_k, config.seed,
+                config.enable_profiling
             );
         } else {
             generated_ids = generate_gpt2(

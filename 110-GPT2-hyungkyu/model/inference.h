@@ -30,6 +30,7 @@ struct InferenceConfig {
     int top_k = 40;
     int seed = 42;
     bool use_cache = true;
+    bool enable_profiling = false;  // Enable performance profiling output
 };
 
 /**

@@ -10,6 +10,7 @@
 #include <iostream>
 #include <iomanip>
 #include <cstring>  // memcpy
+#include <chrono>   // profiling
 
 /**
  * Sample a token from logits using temperature and top-k sampling
@@ -244,7 +245,8 @@ inline std::vector<int> generate_gpt2_with_cache(
     uint32_t max_new_tokens,
     float temperature = 1.0f,
     int top_k = 0,
-    int seed = -1)
+    int seed = -1,
+    bool enable_profiling = false)
 {
     const GPT2Config& config = gpt2Net.getConfig();
     Device& device = netGlobalDevice;
@@ -378,6 +380,12 @@ inline std::vector<int> generate_gpt2_with_cache(
     // ========================================================================
     std::cout << "\n[Generation Phase] Generating remaining tokens with cache..." << std::endl;
 
+    // Profiling counters
+    double total_forward_ms = 0.0;
+    double total_wait_ms = 0.0;
+    double total_memcpy_ms = 0.0;
+    double total_sampling_ms = 0.0;
+
     for (uint32_t i = 1; i < max_new_tokens; ++i) {
         // Process only the last token (cache has all previous tokens)
         int last_token = generated.back();
@@ -389,27 +397,37 @@ inline std::vector<int> generate_gpt2_with_cache(
         uint32_t current_cache_len = gpt2Net.getCacheLength();
         gpt2Net.setPositionOffset(current_cache_len);
 
-        // Forward pass - uses cache, much faster!
+        // 1. Forward pass - uses cache, much faster!
+        auto t0 = std::chrono::high_resolution_clock::now();
         std::vector<Tensor> outputs = gpt2Net(inputTensor);
         Tensor logits = outputs[0];
+        auto t1 = std::chrono::high_resolution_clock::now();
+        total_forward_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
 
         // Update cache length
         gpt2Net.updateCacheLength(1);
 
-        // Copy logits to CPU
+        // 2. Copy logits to CPU
         uint32_t logits_size = 1 * config.vocab_size * sizeof(float);
         Buffer gpu_buffer = logits.buffer();
 
+        auto t2 = std::chrono::high_resolution_clock::now();
         device.newCommandBuffer(queue_compute)
             .begin()
             .copyBuffer(cpu_buffer, gpu_buffer)
             .end()
             .submit()
             .wait();
+        auto t3 = std::chrono::high_resolution_clock::now();
+        total_wait_ms += std::chrono::duration<double, std::milli>(t3 - t2).count();
 
+        // 3. Memcpy GPU → CPU
+        auto t4 = std::chrono::high_resolution_clock::now();
         std::vector<float> last_token_logits(config.vocab_size);
         memcpy(last_token_logits.data(), cpu_buffer.map(), logits_size);
         cpu_buffer.unmap();
+        auto t5 = std::chrono::high_resolution_clock::now();
+        total_memcpy_ms += std::chrono::duration<double, std::milli>(t5 - t4).count();
 
         // Debug: Print logits for second generation token
         if (i == 1) {
@@ -439,15 +457,59 @@ inline std::vector<int> generate_gpt2_with_cache(
             std::cout << "\n" << std::endl;
         }
 
-        // Sample next token
+        // 4. Sample next token
+        auto t6 = std::chrono::high_resolution_clock::now();
         int next_token = sampleToken(last_token_logits, temperature, top_k);
         generated.push_back(next_token);
+        auto t7 = std::chrono::high_resolution_clock::now();
+        total_sampling_ms += std::chrono::duration<double, std::milli>(t7 - t6).count();
 
-        std::cout << "  Generated " << (i + 1) << "/" << max_new_tokens << " tokens (cache_len=" << gpt2Net.getCacheLength() << ")..." << std::endl;
+        // Print per-token timing for analysis (every 50 tokens)
+        if (enable_profiling && ((i + 1) % 50 == 0 || i == 1)) {
+            double token_time = std::chrono::duration<double, std::milli>(t7 - t0).count();
+            std::cout << "  Token " << (i + 1) << "/" << max_new_tokens
+                      << " (cache_len=" << gpt2Net.getCacheLength() << ")"
+                      << " - Time: " << std::fixed << std::setprecision(2) << token_time << " ms" << std::endl;
+        } else {
+            std::cout << "  Generated " << (i + 1) << "/" << max_new_tokens << " tokens (cache_len=" << gpt2Net.getCacheLength() << ")..." << std::endl;
+        }
     }
 
     std::cout << "  Generation complete! Total tokens: " << generated.size() << std::endl;
     std::cout << "  Final cache length: " << gpt2Net.getCacheLength() << std::endl;
+
+    // Print profiling results (only if enabled)
+    if (enable_profiling) {
+        uint32_t num_profile_tokens = max_new_tokens - 1;  // Excluding first token (prompt phase)
+        std::cout << "\n╔════════════════════════════════════════════════════════╗" << std::endl;
+        std::cout << "║              Performance Breakdown                     ║" << std::endl;
+        std::cout << "╚════════════════════════════════════════════════════════╝" << std::endl;
+        std::cout << "Total tokens profiled: " << num_profile_tokens << std::endl;
+        std::cout << std::fixed << std::setprecision(2);
+        std::cout << "\n1. Forward Pass (GPU execution):" << std::endl;
+        std::cout << "   Total: " << total_forward_ms << " ms" << std::endl;
+        std::cout << "   Avg:   " << (total_forward_ms / num_profile_tokens) << " ms/token" << std::endl;
+        std::cout << "   %:     " << (total_forward_ms / (total_forward_ms + total_wait_ms + total_memcpy_ms + total_sampling_ms) * 100) << "%" << std::endl;
+
+        std::cout << "\n2. GPU Sync (.wait()):" << std::endl;
+        std::cout << "   Total: " << total_wait_ms << " ms" << std::endl;
+        std::cout << "   Avg:   " << (total_wait_ms / num_profile_tokens) << " ms/token" << std::endl;
+        std::cout << "   %:     " << (total_wait_ms / (total_forward_ms + total_wait_ms + total_memcpy_ms + total_sampling_ms) * 100) << "%" << std::endl;
+
+        std::cout << "\n3. Memcpy (GPU→CPU):" << std::endl;
+        std::cout << "   Total: " << total_memcpy_ms << " ms" << std::endl;
+        std::cout << "   Avg:   " << (total_memcpy_ms / num_profile_tokens) << " ms/token" << std::endl;
+        std::cout << "   %:     " << (total_memcpy_ms / (total_forward_ms + total_wait_ms + total_memcpy_ms + total_sampling_ms) * 100) << "%" << std::endl;
+
+        std::cout << "\n4. CPU Sampling (softmax+top-k):" << std::endl;
+        std::cout << "   Total: " << total_sampling_ms << " ms" << std::endl;
+        std::cout << "   Avg:   " << (total_sampling_ms / num_profile_tokens) << " ms/token" << std::endl;
+        std::cout << "   %:     " << (total_sampling_ms / (total_forward_ms + total_wait_ms + total_memcpy_ms + total_sampling_ms) * 100) << "%" << std::endl;
+
+        double total_profiled = total_forward_ms + total_wait_ms + total_memcpy_ms + total_sampling_ms;
+        std::cout << "\nTotal profiled time: " << total_profiled << " ms" << std::endl;
+        std::cout << "════════════════════════════════════════════════════════\n" << std::endl;
+    }
 
     return generated;
 }
