@@ -6,13 +6,13 @@ VAI (Vulkan AI) - Vulkan 컴퓨트 셰이더를 사용하는 경량 딥러닝 �
 
 ![CUDA vs VAI 계층 비교](images/cuda_comparison.png)
 
-| 레이어      | CUDA                                           | VAI (Vulkan)                                                          |
-|-------------|------------------------------------------------|-----------------------------------------------------------------------|
-| App         | cuda*/cu* 호출로 런타임/드라이버 API 요청    | `operator()(inputs)`로 그래프 실행 요청                                       |
+| 레이어      | CUDA                                           | VAI (Vulkan)                                                        |
+|-------------|------------------------------------------------|---------------------------------------------------------------------|
+| App         | cuda*/cu* 호출로 런타임/드라이버 API 요청    | operator()(inputs)로 그래프 실행 요청                                       |
 | Framework   | 모듈 로드/메모리/인수 설정 후 Driver API(cuLaunchKernel 등)로 런치 요청 | 노드 그래프를 커맨드 버퍼에 기록<br/> (bindPipeline/DescSets/pushConst/dispatch/barrier) |
-| API         | CUDA Driver API → 드라이버로 커맨드 제출       | Vulkan(loader/ICD) → vkQueueSubmit로 드라이버에 제출                          |
-| GPU Driver  | NVIDIA GPU Driver                              | GPU Driver (Vulkan ICD)                                               |
-| GPU         | 커널 실행                                      | 커맨드 실행                                                                |
+| API         | CUDA Driver API → 드라이버로 커맨드 제출       | Vulkan(loader/ICD) → vkQueueSubmit로 드라이버에 제출                        |
+| GPU Driver  | NVIDIA GPU Driver                              | GPU Driver (Vulkan ICD)                                             |
+| GPU         | 커널 실행                                      | 커맨드 실행                                                              |
 
 
 ## File Tree
