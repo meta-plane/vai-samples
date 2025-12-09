@@ -182,6 +182,20 @@ public:
     void run(CommandBuffer cmdBuff) override;
 };
 
+// AddIdentityNode - Adds identity matrix to input [K, K]
+// Used in TNet to add identity to transformation matrix
+class AddIdentityNode : public Node
+{
+    ComputePipeline addIdentity;
+    DescriptorSet addIdentityDescSet;
+    uint32_t K;
+
+public:
+    AddIdentityNode();
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
 extern Device netGlobalDevice; // Global device for neural network operations
 
 

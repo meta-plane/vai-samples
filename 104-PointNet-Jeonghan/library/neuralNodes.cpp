@@ -1466,3 +1466,80 @@ void MatMulNode::run(CommandBuffer cmdBuff)
             / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
         );
 }
+
+//==============================================================================
+// AddIdentityNode Implementation
+//==============================================================================
+
+static const char* src_add_identity = R"(
+#version 450
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer OutBuffer { float out_data[]; };
+layout(set = 0, binding = 1) buffer InBuffer { float in_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint K;  // Matrix dimension (K x K)
+};
+
+void main() 
+{
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = K * K;
+    if (idx >= total) return;
+    
+    uint row = idx / K;
+    uint col = idx % K;
+    
+    // Add identity matrix: out[i][j] = in[i][j] + (i == j ? 1.0 : 0.0)
+    float identity = (row == col) ? 1.0 : 0.0;
+    out_data[idx] = in_data[idx] + identity;
+}
+)";
+
+AddIdentityNode::AddIdentityNode()
+{
+    addSlot("in0", NodeSlot::input);   // [K, K]
+    addSlot("out0", NodeSlot::output); // [K, K]
+    
+    addIdentity = requestPipeline(src_add_identity);
+    addIdentityDescSet = addIdentity.descSetLayout(0).newDescSet(gDestSetPool);
+}
+
+void AddIdentityNode::prepare()
+{
+    Tensor& in0 = (*this)["in0"];
+    
+    _ASSERT(in0.validShape());
+    _ASSERT(in0.shape().size() == 2);
+    _ASSERT(in0.shape()[0] == in0.shape()[1]); // Must be square matrix
+    
+    K = in0.shape()[0];
+    
+    // Output shape: same as input [K, K]
+    (*this)["out0"] = Tensor(K, K);
+}
+
+void AddIdentityNode::run(CommandBuffer cmdBuff)
+{
+    Tensor& in0 = (*this)["in0"];
+    Tensor& out0 = (*this)["out0"];
+    
+    addIdentityDescSet.write({
+        out0.buffer(),
+        in0.buffer()
+    });
+    
+    uint32_t pc[] = {K};
+    
+    cmdBuff
+        .bindPipeline(addIdentity)
+        .bindDescSets({addIdentityDescSet})
+        .setPushConstants(0, sizeof(pc), pc)
+        .dispatch0(CEIL_DIV(K * K, 256), 1, 1)
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / out0.buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
