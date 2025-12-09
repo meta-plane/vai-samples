@@ -342,6 +342,52 @@ if(BUILD_TESTING)
     
     add_test(NAME FCBNSequence COMMAND $<TARGET_FILE:test_fcbn_seq>)
     
+    # Test: MLP + MaxPool + FC (T-Net path without reshape/identity/matmul)
+    add_executable(test_mlp_maxpool_fc
+        test/mlp_maxpool_fc/test_mlp_maxpool_fc.cpp
+    )
+
+    target_include_directories(test_mlp_maxpool_fc PRIVATE 
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/library
+        ${CMAKE_CURRENT_SOURCE_DIR}/networks/include
+        ${Vulkan_INCLUDE_DIRS}
+    )
+
+    target_link_libraries(test_mlp_maxpool_fc PRIVATE
+        VAI_LIBRARY
+        POINTNET_LIBRARY
+    )
+    
+    set_target_properties(test_mlp_maxpool_fc PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+    )
+    
+    add_test(NAME MLPMaxPoolFC COMMAND $<TARGET_FILE:test_mlp_maxpool_fc>)
+    
+    # Test: Transform Path (MLP -> MaxPool -> FC -> Reshape -> AddIdentity)
+    add_executable(test_transform_path
+        test/tnet_transform_path/test_transform_path.cpp
+    )
+
+    target_include_directories(test_transform_path PRIVATE 
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/library
+        ${CMAKE_CURRENT_SOURCE_DIR}/networks/include
+        ${Vulkan_INCLUDE_DIRS}
+    )
+
+    target_link_libraries(test_transform_path PRIVATE
+        VAI_LIBRARY
+        POINTNET_LIBRARY
+    )
+    
+    set_target_properties(test_transform_path PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+    )
+    
+    add_test(NAME TransformPath COMMAND $<TARGET_FILE:test_transform_path>)
+    
 else()
     message(STATUS "✗ Tests disabled")
     message(STATUS "  Enable with: cmake -DBUILD_TESTING=ON ..")

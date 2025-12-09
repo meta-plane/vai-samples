@@ -1033,7 +1033,7 @@ void BatchNorm1DNode::run(CommandBuffer cmdBuff)
         .bindPipeline(batchnorm)
         .bindDescSets({batchnormDesc})
         .setPushConstants(0, sizeof(pc), &pc)
-        .dispatch(CEIL_DIV(total, 256))
+        .dispatch(total)  // dispatch(numThreads) auto-calculates work groups
         .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["out0"].buffer()
@@ -1170,10 +1170,10 @@ FullyConnectedNode::FullyConnectedNode(uint32_t inDim, uint32_t outDim)
     addSlot("weight", NodeSlot::input);
     addSlot("bias", NodeSlot::input);
 
-    /*const char* gemmSrc = src_gemm_naive;
-    gemmTileSize = gGemmTileSize.at(gemmSrc);*/
+    const char* gemmSrc = src_gemm_naive;
+    //gemmTileSize = gGemmTileSize.at(gemmSrc);
 
-    const char* gemmSrc = src_gemm_kSplit;
+    //const char* gemmSrc = src_gemm_kSplit;
 
     gemm = requestPipeline(gemmSrc);
     gemmDescSet = gemm.descSetLayout(0).newDescSet(gDestSetPool);
@@ -1196,9 +1196,6 @@ void FullyConnectedNode::run(CommandBuffer cmdBuff)
     uint32_t K = (*this)["in0"].shape()[0];
     uint32_t N = (*this)["out0"].shape()[0];
     
-    setZeroDescSet.write({
-        (*this)["out0"].buffer(),
-    });
     gemmDescSet.write({
         (*this)["out0"].buffer(),
         (*this)["in0"].buffer(),
@@ -1206,25 +1203,13 @@ void FullyConnectedNode::run(CommandBuffer cmdBuff)
         (*this)["bias"].buffer(),
     });
 
-	uint32_t setZeroConstants[] = { N };
     uint32_t gemmConstants[] = {M, K, N};
 
     cmdBuff
-		.bindPipeline(setZero)
-		.bindDescSets({setZeroDescSet})
-		.setPushConstants(0, sizeof(setZeroConstants), setZeroConstants)
-		.dispatch(N)
-        .barrier(
-            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
-            / (*this)["out0"].buffer()
-            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
-        )
-
         .bindPipeline(gemm)
         .bindDescSets({gemmDescSet})
         .setPushConstants(0, sizeof(gemmConstants), gemmConstants)
-        .dispatch0(CEIL_DIV(N, 32), M, CEIL_DIV(K, 16))
-        //.dispatch0(CEIL_DIV(N, gemmTileSize), CEIL_DIV(M, gemmTileSize))
+        .dispatch0(CEIL_DIV(N, 32), CEIL_DIV(M, 32))
         .barrier( 
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["out0"].buffer()

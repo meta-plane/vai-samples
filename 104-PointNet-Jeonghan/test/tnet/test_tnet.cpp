@@ -11,6 +11,7 @@
 #include <iostream>
 #include <iomanip>
 #include <cmath>
+#include <utility>
 #include "neuralNet.h"
 #include "vulkanApp.h"
 #include "jsonParser.h"
@@ -54,7 +55,7 @@ public:
 };/**
  * Run TNetBlock inference
  */
-Tensor eval_tnet(uint32_t N, uint32_t K,
+std::pair<Tensor, Tensor> eval_tnet(uint32_t N, uint32_t K,
                  const std::vector<float>& input_data,
                  JsonParser& json) {
     std::cout << "Creating TNetTestNet...\n";
@@ -175,8 +176,8 @@ Tensor eval_tnet(uint32_t N, uint32_t K,
     // result[0] = transformed points [N, K]
     // result[1] = transformation matrix [K, K]
     
-    // Return both outputs for verification
-    return result[0];  // For now, return transformed points
+    // Return both outputs as a pair
+    return std::make_pair(result[0], result[1]);
 }
 
 void test() {
@@ -205,11 +206,55 @@ void test() {
     // Parse input and expected output
     std::vector<float> input_data = json["input"].parseNDArray();
     std::vector<float> expected = json["output"].parseNDArray();
+    std::vector<float> expected_transform = json["transform"].parseNDArray();
     
     std::cout << "Running TNetBlock on GPU...\n";
     
     // Run inference
-    Tensor result = eval_tnet(N, K, input_data, json);
+    auto [result, transform] = eval_tnet(N, K, input_data, json);
+    
+    // Download transform matrix from GPU
+    Buffer transformBuf = netGlobalDevice.createBuffer({
+        .size = K * K * sizeof(float),
+        .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .reqMemProps = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+    });
+    
+    netGlobalDevice.newCommandBuffer(queue_compute)
+        .begin()
+        .copyBuffer(transformBuf, transform.buffer())
+        .end()
+        .submit()
+        .wait();
+    
+    float* transform_output = (float*)transformBuf.map();
+    
+    // Compare transform matrix
+    std::cout << "\n============================================================\n";
+    std::cout << "Transform Matrix Comparison (K=" << K << "):\n";
+    std::cout << "============================================================\n\n";
+    std::cout << "Expected:\n";
+    for (uint32_t i = 0; i < K; ++i) {
+        for (uint32_t j = 0; j < K; ++j) {
+            std::cout << std::setw(10) << std::fixed << std::setprecision(6) << expected_transform[i*K + j] << " ";
+        }
+        std::cout << "\n";
+    }
+    
+    std::cout << "\nGot (GPU):\n";
+    for (uint32_t i = 0; i < K; ++i) {
+        for (uint32_t j = 0; j < K; ++j) {
+            std::cout << std::setw(10) << std::fixed << std::setprecision(6) << transform_output[i*K + j] << " ";
+        }
+        std::cout << "\n";
+    }
+    
+    float transform_max_diff = 0.0f;
+    for (uint32_t i = 0; i < K * K; ++i) {
+        float diff = std::abs(transform_output[i] - expected_transform[i]);
+        transform_max_diff = std::max(transform_max_diff, diff);
+    }
+    std::cout << "\nTransform Max Diff: " << std::fixed << std::setprecision(6) << transform_max_diff << "\n";
     
     // Download result from GPU
     Buffer outBuf = netGlobalDevice.createBuffer({
@@ -241,7 +286,7 @@ void test() {
     // - BatchNorm uses epsilon=1e-5, which can amplify differences
     // - MaxPooling can amplify errors from MLP stage
     // - Empirically, max diff ~0.22, avg ~0.09 for correct implementation
-    const float tolerance = 0.3f;
+    const float tolerance = 0.001f;  // Strict tolerance to find bugs
     uint32_t mismatches = 0;
     float max_diff = 0.0f;
     float sum_diff = 0.0f;

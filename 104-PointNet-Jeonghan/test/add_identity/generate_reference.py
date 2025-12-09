@@ -37,7 +37,7 @@ def main():
         print(f"  {output[i].tolist()}")
     
     data = {
-        'K': float(K),
+        'K': [float(K)],  # Wrap in array for parseNDArray()
         'input': x.numpy().flatten().tolist(),
         'output': output.numpy().flatten().tolist(),
     }
