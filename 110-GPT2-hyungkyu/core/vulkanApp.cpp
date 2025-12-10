@@ -10,6 +10,7 @@
 #include "error.h"
 #include "templateHelper.h"
 #include "vulkanApp.h"
+#include "globalContext.h"
 
 // Helper for dependent false in static_assert
 template<typename T>
@@ -101,6 +102,26 @@ static void printGpuInfo(uint32_t order, VkPhysicalDevice physicalDevice)
             props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? "Discrete GPU" :
                 props.deviceType == VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU ? "Virtual GPU" :
                     props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ? "CPU" : "Other");
+}
+
+static void detectSubgroupProperties(VkPhysicalDevice physicalDevice)
+{
+    VkPhysicalDeviceSubgroupProperties subgroupProps = {};
+    subgroupProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+
+    VkPhysicalDeviceProperties2 props2 = {};
+    props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    props2.pNext = &subgroupProps;
+
+    vkGetPhysicalDeviceProperties2(physicalDevice, &props2);
+
+    // Update global subgroup size with detected hardware value
+    gSubgroupSize = subgroupProps.subgroupSize;
+
+    printf("[GPU Hardware Detection] Subgroup size: %u threads (Subgroup operations: %s)\n",
+        gSubgroupSize,
+        (subgroupProps.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) ? "Supported" : "Not supported");
+    fflush(stdout);
 }
 
 static bool deviceSupportsExtensions(
@@ -550,6 +571,9 @@ bool VulkanApp::initDevice(uint32_t gpuIndex, DeviceSettings settings)
 {
     _ASSERT(gpuIndex < impl->physicalDevices.size());
     VkPhysicalDevice physicalDevice = impl->physicalDevices[gpuIndex];
+
+    // Detect GPU hardware capabilities
+    detectSubgroupProperties(physicalDevice);
 
     const std::vector<VkQueueFamilyProperties>& qfProps = impl->qfProps[physicalDevice];
     const std::vector<bool>& qfSupportPresent = impl->qfSupportPresent[physicalDevice];
