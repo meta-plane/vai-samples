@@ -7,20 +7,41 @@
 #include <memory>
 
 
+// Inverted Residual Blocks configuration
+struct IRBConfig {
+    uint32_t outChannels;
+    uint32_t expansionFactor;
+    uint32_t stride;
+};
+
 class MobileNetV2 : public NeuralNet
 {
-    std::unique_ptr<ConvBN> initialConv;                                        // Initial Conv-BN layer
-    std::vector<std::unique_ptr<InvertedResidualBlock>> invertedResidualBlocks; // Inverted Residual Blocks
-    std::unique_ptr<GlobalAvgPoolNode> globalAvgPool;                           // Global Average Pooling layer
-    std::unique_ptr<FullyConnectedNode> fc;                                     // Fully Connected layer for classification
+    // Stem layer
+    ConvBNReLU6 stem;
+
+    // Inverted Residual Blocks
+    std::vector<std::unique_ptr<InvertedResidualBlock>> invertedResidualBlocks;
+
+    // Final layers
+    PWConvBNReLU6 finalConv;
+    GlobalAvgPoolNode globalAvgPool;
+    FlattenNode flatten;
+    FullyConnectedNode classifier;
 
 public:
     MobileNetV2(Device& device, uint32_t numClasses = 1000);
 
-    Tensor& operator[](const std::string& name) override;
-    Tensor& getInputTensor();
-    Tensor& getOutputTensor();
-};
+    Tensor& operator[](const std::string& name);
+    Tensor& getInputTensor() { return stem.slot("in0").getValueRef(); };
+    Tensor& getOutputTensor() { return output(0).slot("out0").getValueRef(); }
 
+    std::vector<std::unique_ptr<InvertedResidualBlock>>& blocks() {
+        return invertedResidualBlocks;
+    }
+
+    const std::vector<std::unique_ptr<InvertedResidualBlock>>& blocks() const {
+        return invertedResidualBlocks;
+    }
+};
 
 #endif // MOBILENETV2_H

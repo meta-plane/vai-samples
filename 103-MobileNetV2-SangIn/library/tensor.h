@@ -2,6 +2,7 @@
 #define TENSOR_H
 
 
+#include "safeTensorsParser.h"
 #include "jsonParser.h"
 #include "vulkanApp.h"
 #include "error.h"

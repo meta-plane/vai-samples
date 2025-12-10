@@ -665,6 +665,28 @@ void main()
 }
 )";
 
+static const char* src_relu6 = R"(
+#version 450
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };
+layout(set = 0, binding = 1) buffer InBuffer { float in0[]; };
+
+layout(push_constant) uniform PushConstants {
+    int O;   // total number of elements
+};
+
+void main()
+{
+    int o = int(gl_GlobalInvocationID.x);
+    if (o >= O) return;
+
+    float x = in0[o];
+    // ReLU6(x) = min(max(x, 0.0), 6.0)
+    out0[o] = min(max(x, 0.0), 6.0);
+}
+)";
+
 
 Device netGlobalDevice = VulkanApp::get().device();
 
@@ -679,8 +701,8 @@ DescriptorPool : DescriptorSet을 대량으로 생성하기 위한 GPU-side 메�
  - DescriptorSet을 생성/해제할 때 DescriptorPool을 사용
 */
 static DescriptorPool gDestSetPool = netGlobalDevice.createDescriptorPool({
-    .maxTypes = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER <= 200}, 
-    .maxSets = 100
+    .maxTypes = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER <= 1000},
+    .maxSets = 500
 });
 
 
@@ -701,6 +723,16 @@ static std::map<const char*, uint32_t> gGemmTileSize =
     {src_gemm_multiOut1d, 64},
     {src_gemm_multiOut2d, 128}
 };
+
+template<typename... Dims>
+static void ensureTensorFilled(Tensor& tensor, float value, Dims... dims)
+{
+    if (tensor.numElements())
+        return;
+    tensor = Tensor(static_cast<uint32_t>(dims)...);
+    std::vector<float> data(tensor.numElements(), value);
+    tensor.set(std::move(data));
+}
 
 void loadShaders()
 {
@@ -726,13 +758,14 @@ void loadShaders()
     requestPipeline(src_add);
     requestPipeline(src_global_avg_pool);
     requestPipeline(src_batchnorm);
+    requestPipeline(src_relu6);
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // ConvolutionNode
 /////////////////////////////////////////////////////////////////////////////////////////
 ConvolutionNode::ConvolutionNode(uint32_t inChannels, uint32_t outChannels, uint32_t kernelSize, uint32_t stride, uint32_t padding)
-:  C(inChannels), F(outChannels), K(kernelWidth), S(stride), P(padding)
+:  C(inChannels), F(outChannels), K(kernelSize), S(stride), P(padding)
 {
     _ASSERT(K % 2 == 1);
     addSlot("in0", NodeSlot::input);
@@ -755,6 +788,13 @@ void ConvolutionNode::prepare()
 {
     _ASSERT((*this)["in0"].isShapeOf(-1, -1, C));
     _ASSERT((*this)["weight"].isShapeOf(C * K * K, F));
+
+    auto& bias = (*this)["bias"];
+    if (bias.shape().empty()) {
+        bias = Tensor(F);
+        std::vector<float> zeros(F, 0.0f);
+        bias.set(zeros);
+    }
     _ASSERT((*this)["bias"].isShapeOf(F));
 
     const auto& inShape = (*this)["in0"].shape(); // (H, W, C)
@@ -847,7 +887,14 @@ void DepthwiseConvNode::prepare()
     const auto& inShape = (*this)["in0"].shape(); // (H, W, C)
     _ASSERT(inShape.size() == 3 && inShape[2] == C);
 
-    _ASSERT((*this)["weight"].isShapeOf(C, K, K));
+    _ASSERT((*this)["weight"].isShapeOf(K * K, C));
+
+    auto& bias = (*this)["bias"];
+    if (bias.shape().empty()) {
+        bias = Tensor(C);
+        std::vector<float> zeros(C, 0.0f);
+        bias.set(zeros);
+    }
     _ASSERT((*this)["bias"].isShapeOf(C));
 
     uint32_t H = inShape[0];
@@ -920,6 +967,13 @@ void PointwiseConvNode::prepare()
 {
     _ASSERT((*this)["in0"].isShapeOf(-1, -1, C));
     _ASSERT((*this)["weight"].isShapeOf(C, F));
+
+    auto& bias = (*this)["bias"];
+    if (bias.shape().empty()) {
+        bias = Tensor(F);
+        std::vector<float> zeros(F, 0.0f);
+        bias.set(zeros);
+    }
     _ASSERT((*this)["bias"].isShapeOf(F));
 
     const auto& inShape = (*this)["in0"].shape();
@@ -991,7 +1045,7 @@ void AddNode::run(CommandBuffer cmdBuff)
     cmdBuff
         .bindPipeline(add)
         .bindDescSets({addDescSet})
-        .setPushConstants(0, sizeof(N), N)
+        .setPushConstants(0, sizeof(N), &N)
         .dispatch(N)
         .barrier( 
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
@@ -1013,8 +1067,8 @@ BatchNormNode::BatchNormNode(float epsilon)
     addSlot("gamma", NodeSlot::input);
     addSlot("beta", NodeSlot::input);
 
-    batchnorm = requestPipeline(src_batchnorm);
-    batchnormDescSet = batchnorm.descSetLayout(0).newDescSet(gDestSetPool);
+    batchNorm = requestPipeline(src_batchnorm);
+    batchNormDescSet = batchNorm.descSetLayout(0).newDescSet(gDestSetPool);
 }
 
 void BatchNormNode::prepare()
@@ -1043,7 +1097,7 @@ void BatchNormNode::run(CommandBuffer cmdBuff)
     uint32_t W = inShape[1];
     uint32_t C = inShape[2];
 
-    batchnormDescSet.write({
+    batchNormDescSet.write({
         (*this)["out0"].buffer(),
         (*this)["in0"].buffer(),
         (*this)["mean"].buffer(),
@@ -1056,8 +1110,8 @@ void BatchNormNode::run(CommandBuffer cmdBuff)
     float epsilon = eps;
 
     cmdBuff
-        .bindPipeline(batchnorm)
-        .bindDescSets({batchnormDescSet})
+        .bindPipeline(batchNorm)
+        .bindDescSets({batchNormDescSet})
         .setPushConstants(0, sizeof(batchnormConstants), batchnormConstants)
         .setPushConstants(sizeof(batchnormConstants), sizeof(epsilon), &epsilon)
         .dispatch(H * W, C)
@@ -1129,7 +1183,7 @@ void Relu6Node::prepare()
     (*this)["out0"] = Tensor((*this)["in0"].shape());
 }
 
-void Relu6Node::run(CommandBuffer cmdBuff) override {
+void Relu6Node::run(CommandBuffer cmdBuff) {
     const auto& inShape = (*this)["in0"].shape();
     int I = 1;
     for (int dim : inShape) I *= dim;
@@ -1204,9 +1258,9 @@ void MaxPoolingNode::run(CommandBuffer cmdBuff)
 }  
 
 /////////////////////////////////////////////////////////////////////////////////////////
-// GlobalAvgPoolingNode
+// GlobalAvgPoolNode
 /////////////////////////////////////////////////////////////////////////////////////////
-void GlobalAvgPoolingNode::GlobalAvgPoolingNode()
+GlobalAvgPoolNode::GlobalAvgPoolNode()
 {
     addSlot("in0", NodeSlot::input);
     addSlot("out0", NodeSlot::output);
@@ -1215,7 +1269,7 @@ void GlobalAvgPoolingNode::GlobalAvgPoolingNode()
     globalAvgPoolDescSet = globalAvgPool.descSetLayout(0).newDescSet(gDestSetPool);
 }
 
-void GlobalAvgPoolingNode::prepare()
+void GlobalAvgPoolNode::prepare()
 {
     const auto& inShape = (*this)["in0"].shape();
     _ASSERT(inShape.size() == 3);
@@ -1224,7 +1278,7 @@ void GlobalAvgPoolingNode::prepare()
     (*this)["out0"] = Tensor(1, 1, C); // (H, W, C) -> (1, 1, C)
 }
 
-void GlobalAvgPoolingNode::run(CommandBuffer cmdBuff)
+void GlobalAvgPoolNode::run(CommandBuffer cmdBuff)
 {
     const auto& inShape = (*this)["in0"].shape();
     uint32_t H = inShape[0]; 
@@ -1298,6 +1352,13 @@ void FullyConnectedNode::prepare()
 {
     _ASSERT((*this)["in0"].isShapeOf(I));
     _ASSERT((*this)["weight"].isShapeOf(I, O));
+
+    auto& bias = (*this)["bias"];
+    if (bias.shape().empty()) {
+        bias = Tensor(O);
+        std::vector<float> zeros(O, 0.0f);
+        bias.set(zeros);
+    }
     _ASSERT((*this)["bias"].isShapeOf(O));
     (*this)["out0"] = Tensor(O); 
 }
@@ -1361,93 +1422,195 @@ ConvBNReLU6::ConvBNReLU6(uint32_t inChannels,
                                              stride,
                                              padding);
 
-    bn   = std::make_unique<BatchNormNode>(outChannels);
+    bn   = std::make_unique<BatchNormNode>();
     relu = std::make_unique<Relu6Node>();  
     
     // 2) 내부 그래프 연결
     // conv(out) -> bn(in) -> relu(in) -> relu(out) …
-    *conv - *bn - *relu;
-
-    // 3) 외부에서 접근할 입출력 slot 정의
     defineSlot("in0",  conv->slot("in0"));
+    conv->slot("out0") - bn->slot("in0");
+    bn->slot("out0") - relu->slot("in0");
     defineSlot("out0", relu->slot("out0"));
 }
 
-Tensor& ConvBNReLU6::operator[](const std::string& name)
+Tensor& ConvBNReLU6::operator[](const std::string& slotName)
 {
-    // TODO
+    // ----------------------------
+    // ConvolutionNode weights
+    // ----------------------------
+    if (slotName == "conv.weight")
+        return conv->slot("weight").getValueRef();
+
+    if (slotName == "conv.bias")
+        return conv->slot("bias").getValueRef();
+
+    // ----------------------------
+    // BatchNormNode parameters
+    // ----------------------------
+    if (slotName == "bn.mean")
+        return bn->slot("mean").getValueRef();
+
+    if (slotName == "bn.variance")
+        return bn->slot("variance").getValueRef();
+
+    if (slotName == "bn.gamma")
+        return bn->slot("gamma").getValueRef();
+
+    if (slotName == "bn.beta")
+        return bn->slot("beta").getValueRef();
+
+    // Unhandled name
+    throw std::runtime_error(
+        ">> ConvBNReLU6: Tensor not found for name: " + slotName
+    );
 }
 
 PWConvBNReLU6::PWConvBNReLU6(uint32_t inChannels,
                              uint32_t outChannels)
 {
     // 1) primitive Node 생성
-    pwConv = std::make_unique<PointwiseConvNode>(inChannels,
+    pointwiseConv = std::make_unique<PointwiseConvNode>(inChannels,
                                                  outChannels);
 
-    bn     = std::make_unique<BatchNormNode>(outChannels);
+    bn     = std::make_unique<BatchNormNode>();
     relu   = std::make_unique<Relu6Node>();  
     
     // 2) 내부 그래프 연결
     // pwConv(out) -> bn(in) -> relu(in) -> relu(out) …
-    *pwConv - *bn - *relu;
-
-    // 3) 외부에서 접근할 입출력 slot 정의
-    defineSlot("in0",  pwConv->slot("in0"));
+    defineSlot("in0", pointwiseConv->slot("in0"));
+    pointwiseConv->slot("out0") - bn->slot("in0");
+    bn->slot("out0") - relu->slot("in0");
     defineSlot("out0", relu->slot("out0"));
 }
 
-Tensor& PWConvBNReLU6::operator[](const std::string& name)
+Tensor& PWConvBNReLU6::operator[](const std::string& slotName)
 {
-    // TODO
+    // ----------------------------
+    // PointwiseConvNode weights
+    // ----------------------------
+    if (slotName == "pointwiseConv.weight")
+        return pointwiseConv->slot("weight").getValueRef();
+
+    if (slotName == "pointwiseConv.bias")
+        return pointwiseConv->slot("bias").getValueRef();
+
+    // ----------------------------
+    // BatchNormNode parameters
+    // ----------------------------
+    if (slotName == "bn.mean")
+        return bn->slot("mean").getValueRef();
+
+    if (slotName == "bn.variance")
+        return bn->slot("variance").getValueRef();
+
+    if (slotName == "bn.gamma")
+        return bn->slot("gamma").getValueRef();
+
+    if (slotName == "bn.beta")
+        return bn->slot("beta").getValueRef();
+
+    // Unhandled name
+    throw std::runtime_error(
+        ">> PWConvBNReLU6: Tensor not found for name: " + slotName
+    );
 }
 
 PWConvBN::PWConvBN(uint32_t inChannels, uint32_t outChannels)
 {
     // 1) primitive Node 생성
-    pwConv = std::make_unique<PointwiseConvNode>(inChannels,
-                                                 outChannels);
-
-    bn     = std::make_unique<BatchNormNode>(outChannels);
+    pointwiseConv = std::make_unique<PointwiseConvNode>(inChannels, outChannels);
+    bn            = std::make_unique<BatchNormNode>();
     
     // 2) 내부 그래프 연결
-    // pwConv(out) -> bn(in) -> relu(out) …
-    *pwConv - *bn;
-
-    // 3) 외부에서 접근할 입출력 slot 정의
-    defineSlot("in0",  pwConv->slot("in0"));
+    // pwConv(out) -> bn(in) -> bn(out) …
+    defineSlot("in0", pointwiseConv->slot("in0"));
+    pointwiseConv->slot("out0") - bn->slot("in0");
     defineSlot("out0", bn->slot("out0"));
 }
 
-Tensor& PWConvBN::operator[](const std::string& name)
+Tensor& PWConvBN::operator[](const std::string& slotName)
 {
-    // TODO
+    // ----------------------------
+    // PointwiseConvNode weights
+    // ----------------------------
+    if (slotName == "pointwiseConv.weight")
+        return pointwiseConv->slot("weight").getValueRef();
+
+    if (slotName == "pointwiseConv.bias")
+        return pointwiseConv->slot("bias").getValueRef();
+
+    // ----------------------------
+    // BatchNormNode parameters
+    // ----------------------------
+    if (slotName == "bn.mean")
+        return bn->slot("mean").getValueRef();
+
+    if (slotName == "bn.variance")
+        return bn->slot("variance").getValueRef();
+
+    if (slotName == "bn.gamma")
+        return bn->slot("gamma").getValueRef();
+
+    if (slotName == "bn.beta")
+        return bn->slot("beta").getValueRef();
+
+    // Unhandled name
+    throw std::runtime_error(
+        ">> PWConvBN: Tensor not found for name: " + slotName
+    );
 }
 
 DWConvBNReLU6::DWConvBNReLU6(uint32_t channels,
-                                 uint32_t kernel,
-                                 uint32_t stride)
+                             uint32_t kernel,
+                             uint32_t stride,
+                             uint32_t padding)
 {
     // 1) primitive Node 생성
-    dwConv = std::make_unique<DepthwiseConvNode>(channels,
-                                                 kernel,
-                                                 stride);
+    depthwiseConv = std::make_unique<DepthwiseConvNode>(channels,
+                                                        kernel,
+                                                        stride);
 
-    bn     = std::make_unique<BatchNormNode>(channels);
+    bn     = std::make_unique<BatchNormNode>();
     relu   = std::make_unique<Relu6Node>();  
     
     // 2) 내부 그래프 연결
     // dwConv(out) -> bn(in) -> relu(in) -> relu(out) …
-    *dwConv - *bn - *relu;
-
-    // 3) 외부에서 접근할 입출력 slot 정의
-    defineSlot("in0",  dwConv->slot("in0"));
+    defineSlot("in0", depthwiseConv->slot("in0"));
+    depthwiseConv->slot("out0") - bn->slot("in0");
+    bn->slot("out0") - relu->slot("in0");
     defineSlot("out0", relu->slot("out0"));
 }
 
-Tensor& DWConvBNReLU6::operator[](const std::string& name)
+Tensor& DWConvBNReLU6::operator[](const std::string& slotName)
 {
-    // TODO
+    // ----------------------------
+    // DepthwiseConvNode weights
+    // ----------------------------
+    if (slotName == "depthwiseConv.weight")
+        return depthwiseConv->slot("weight").getValueRef();
+
+    if (slotName == "depthwiseConv.bias")
+        return depthwiseConv->slot("bias").getValueRef();
+
+    // ----------------------------
+    // BatchNormNode parameters
+    // ----------------------------
+    if (slotName == "bn.mean")
+        return bn->slot("mean").getValueRef();
+
+    if (slotName == "bn.variance")
+        return bn->slot("variance").getValueRef();
+
+    if (slotName == "bn.gamma")
+        return bn->slot("gamma").getValueRef();
+
+    if (slotName == "bn.beta")
+        return bn->slot("beta").getValueRef();
+
+    // Unhandled name
+    throw std::runtime_error(
+        ">> DWConvBNReLU6: Tensor not found for name: " + slotName
+    );
 }
 
 InvertedResidualBlock::InvertedResidualBlock(uint32_t inChannels,
@@ -1455,41 +1618,94 @@ InvertedResidualBlock::InvertedResidualBlock(uint32_t inChannels,
                                              uint32_t expansionFactor,
                                              uint32_t stride)
 {
-    uint32_t expandedChannels = inChannels * expansionFactor;
+    const uint32_t expandedChannels = inChannels * expansionFactor;
+    useResidual = (stride == 1 && inChannels == outChannels); // Skip connection 유무 확인
 
-    // 1) primitive Node 생성
-    pwConvBNReLU6 = std::make_unique<PWConvBNReLU6>(inChannels,
-                                                     expandedChannels);
+    NodeSlot* mainIn  = nullptr;  // main branch 입력
+    NodeSlot* mainOut = nullptr;  // main branch 현재 출력
+    NodeSlot* skipOut = nullptr;  // skip branch 입력(=원본)
 
-    dwConvBNReLU6 = std::make_unique<DWConvBNReLU6>(expandedChannels,
-                                                     3,
-                                                     stride);
+    // ── 0) residual이면 InputNode로 입력을 분기 ─────────────────────
+    if (useResidual) {
+        inputSplit = std::make_unique<InputNode>();
 
-    pwConvBN = std::make_unique<PWConvBN>(expandedChannels,
-                                          outChannels);
+        defineSlot("in0", inputSplit->slot("in0"));
 
-    // 2) 내부 그래프 연결
-    // pwConvBNReLU6(out) -> dwConvBNReLU6(in) -> pwConvBN(in) -> pwConvBN(out) …
-    *pwConvBNReLU6 - *dwConvBNReLU6 - *pwConvBN;
+        mainIn  = &inputSplit->slot("out0");
+        skipOut = &inputSplit->slot("out0");
+    }
 
-    // Skip connection
-    if (inChannels == outChannels && stride == 1)
+    // ── 1) expand stage (expansionFactor == 1이면 생략) ─────────────────────
+    if (expansionFactor != 1)
     {
-        addSlot("skipOut", NodeSlot::output);
-        add = std::make_unique<AddNode>();
-        *pwConvBN - *add;
+        pwConvBNReLU6 = std::make_unique<PWConvBNReLU6>(inChannels, expandedChannels);
 
-        defineSlot("in0",  pwConvBNReLU6->slot("in0"));
+        if (useResidual)
+        {
+            *mainIn - pwConvBNReLU6->slot("in0");
+        }
+        else
+        {
+            defineSlot("in0", pwConvBNReLU6->slot("in0"));
+        }
+        mainOut = &pwConvBNReLU6->slot("out0");
+    }
+
+    // ── 2) depthwise stage ────────────────────────────────
+    const uint32_t dwInChannels = (expansionFactor != 1) ? expandedChannels : inChannels;
+    dwConvBNReLU6 = std::make_unique<DWConvBNReLU6>(dwInChannels, 3, stride, 0);
+
+    if (mainOut)
+    {
+        *mainOut - dwConvBNReLU6->slot("in0");
+    }
+    else
+    {
+        if (useResidual)
+        {
+            *mainIn - dwConvBNReLU6->slot("in0");
+        }
+        else
+        {
+            defineSlot("in0", dwConvBNReLU6->slot("in0"));
+        }
+    }
+    mainOut = &dwConvBNReLU6->slot("out0");
+    
+    // ── 3) project stage ──────────────────────────────────
+    pwConvBN = std::make_unique<PWConvBN>(dwInChannels, outChannels);
+    *mainOut - pwConvBN->slot("in0");
+    mainOut = &pwConvBN->slot("out0");
+    
+    // ── 4) residual add ───────────────────────────────────
+    if (useResidual)
+    {
+        add = std::make_unique<AddNode>();
+
+        *skipOut    - add->slot("in0");
+        *mainOut    - add->slot("in1");
+
         defineSlot("out0", add->slot("out0"));
     }
     else
     {
-        defineSlot("in0",  pwConvBNReLU6->slot("in0"));
-        defineSlot("out0", pwConvBN->slot("out0"));
+        defineSlot("out0", *mainOut);
     }
 }
 
-Tensor& InvertedResidualBlock::operator[](const std::string& name)
+Tensor& InvertedResidualBlock::operator[](const std::string& slotName)
 {
-    // TODO
+    if (slotName.rfind("pwConvBNReLU6.", 0) == 0) {
+        return (*pwConvBNReLU6)[slotName.substr(14)];
+    }
+
+    if (slotName.rfind("dwConvBNReLU6.", 0) == 0) {
+        return (*dwConvBNReLU6)[slotName.substr(14)];
+    }
+
+    if (slotName.rfind("pwConvBN.", 0) == 0) {
+        return (*pwConvBN)[slotName.substr(9)];
+    }
+
+    throw std::runtime_error("InvertedResidualBlock: Tensor not found: " + slotName);
 }

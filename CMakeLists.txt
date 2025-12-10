@@ -167,6 +167,7 @@ add_subdirectory(10-mnist)
 add_subdirectory(11-mnist-refactor)
 
 add_subdirectory(100-UNet-seungwoo)
+# add_subdirectory(103-MobileNetV2-SangIn)
 # add_subdirectory(114-MobileNetV2-hwPark)
 add_subdirectory(110-GPT2-hyungkyu)
 add_subdirectory(113-GoogleNet-Huicheol)

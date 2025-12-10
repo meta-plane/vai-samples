@@ -36,7 +36,7 @@ class DepthwiseConvNode : public Node
     uint32_t C, K, S;   // C: input/output channels, K: kernel width, S: Stride
 
     ComputePipeline depthwiseConv; // im2col, gemm 등 연산을 pipeline에 한 번에 구현
-    DescriptorSet descSet;
+    DescriptorSet depthwiseConvDescSet;
 
 public:
     DepthwiseConvNode(uint32_t channels, uint32_t kernelWidth, uint32_t stride);
@@ -61,7 +61,7 @@ class PointwiseConvNode : public Node
 class AddNode : public Node
 {
     ComputePipeline add;
-    DescriptorSet descSet;
+    DescriptorSet addDescSet;
 
 public:
     AddNode();
@@ -73,6 +73,7 @@ class BatchNormNode : public Node
 {
     ComputePipeline batchNorm;
     DescriptorSet batchNormDescSet;
+    float eps;
 
 public:
     BatchNormNode(float epsilon = 1e-5f);
@@ -119,7 +120,7 @@ public:
 class GlobalAvgPoolNode : public Node
 {
     ComputePipeline globalAvgPool;
-    DescriptorSet descSet;
+    DescriptorSet globalAvgPoolDescSet;
 
 public:
     GlobalAvgPoolNode();
@@ -170,7 +171,7 @@ public:
                 uint32_t stride = 1,
                 uint32_t padding = 0);
 
-    Tensor& operator[](const std::string& name) override;
+    Tensor& operator[](const std::string& slotName);
 };
 
 class PWConvBNReLU6 : public NodeGroup
@@ -180,10 +181,10 @@ class PWConvBNReLU6 : public NodeGroup
     std::unique_ptr<Relu6Node>         relu;
 
 public:
-    PWCOnvBNReLU6(uint32_t inChannels,
+    PWConvBNReLU6(uint32_t inChannels,
                   uint32_t outChannels);
     
-    Tensor& operator[](const std::string& name) override;
+    Tensor& operator[](const std::string& slotName);
 };
 
 class PWConvBN : public NodeGroup
@@ -195,7 +196,7 @@ public:
     PWConvBN(uint32_t inChannels,
               uint32_t outChannels);
     
-    Tensor& operator[](const std::string& name) override;
+    Tensor& operator[](const std::string& slotName);
 };
 
 class DWConvBNReLU6 : public NodeGroup
@@ -210,17 +211,18 @@ public:
                   uint32_t stride = 1,
                   uint32_t padding = 0);
 
-    Tensor& operator[](const std::string& name) override;
+    Tensor& operator[](const std::string& slotName);
 };
 
 class InvertedResidualBlock : public NodeGroup
 {
-    std::unique_ptr<PwConvBNReLU6>     pwConv;  // expansion
-    std::unique_ptr<DWConvBNReLU6>     dwConv;
-    std::unique_ptr<PwConvBN>          pwConv2; // projection
+    std::unique_ptr<PWConvBNReLU6>     pwConvBNReLU6;  // expansion
+    std::unique_ptr<DWConvBNReLU6>     dwConvBNReLU6;  // depthwise conv
+    std::unique_ptr<PWConvBN>          pwConvBN;       // projection
     std::unique_ptr<AddNode>           add;
+    std::unique_ptr<InputNode>         inputSplit;     // optional: skip + conv 입력 분기
 
-    bool useResidual;
+    bool useResidual = false;
 
 public:
     InvertedResidualBlock(uint32_t inChannels,
@@ -228,11 +230,9 @@ public:
                           uint32_t expansionFactor,
                           uint32_t stride);
 
-    Tensor& operator[](const std::string& name) override;
+    Tensor& operator[](const std::string& slotName);
 };
 
 extern Device netGlobalDevice; // Global device for neural network operations
-
-
 
 #endif // NEURAL_NODES_H
