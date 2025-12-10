@@ -716,9 +716,13 @@ MultiHeadAttentionNode::MultiHeadAttentionNode(uint32_t d_in, uint32_t d_out, ui
 
     // Create descriptor sets
     qkvProjDescSet = qkvProjection.descSetLayout(0).newDescSet(gDestSetPool);
-    reshapeDescSet = reshapeForHeads.descSetLayout(0).newDescSet(gDestSetPool);
-    concatDescSet = concatenateKV.descSetLayout(0).newDescSet(gDestSetPool);
-    updateCacheDescSet = updateCache.descSetLayout(0).newDescSet(gDestSetPool);
+    reshapeDescSetQ = reshapeForHeads.descSetLayout(0).newDescSet(gDestSetPool);
+    reshapeDescSetK = reshapeForHeads.descSetLayout(0).newDescSet(gDestSetPool);
+    reshapeDescSetV = reshapeForHeads.descSetLayout(0).newDescSet(gDestSetPool);
+    concatDescSetK = concatenateKV.descSetLayout(0).newDescSet(gDestSetPool);
+    concatDescSetV = concatenateKV.descSetLayout(0).newDescSet(gDestSetPool);
+    updateCacheDescSetK = updateCache.descSetLayout(0).newDescSet(gDestSetPool);
+    updateCacheDescSetV = updateCache.descSetLayout(0).newDescSet(gDestSetPool);
     scoresDescSet = attentionScores.descSetLayout(0).newDescSet(gDestSetPool);
     scoresCachedDescSet = scoresPipelineCached.descSetLayout(0).newDescSet(gDestSetPool);
     maskDescSet = applyCausalMask.descSetLayout(0).newDescSet(gDestSetPool);
@@ -727,6 +731,10 @@ MultiHeadAttentionNode::MultiHeadAttentionNode(uint32_t d_in, uint32_t d_out, ui
     weightedSumDescSet = weightedSum.descSetLayout(0).newDescSet(gDestSetPool);
     weightedSumCachedDescSet = weightedSumPipelineCached.descSetLayout(0).newDescSet(gDestSetPool);
     combineDescSet = combineHeads.descSetLayout(0).newDescSet(gDestSetPool);
+
+    // Output projection pipeline and descriptor set (used in both modes)
+    outputProjection = requestPipeline(src_linear);
+    outProjDescSet = outputProjection.descSetLayout(0).newDescSet(gDestSetPool);
 }
 
 void MultiHeadAttentionNode::prepare()
@@ -811,8 +819,8 @@ void MultiHeadAttentionNode::run(CommandBuffer cmdBuff)
             K_reshaped.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*S*HD*sizeof(float)));
             V_reshaped.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*S*HD*sizeof(float)));
 
-            reshapeToHeads(cmdBuff, tensors.K_flat, K_reshaped, B, S, H, HD);
-            reshapeToHeads(cmdBuff, tensors.V_flat, V_reshaped, B, S, H, HD);
+            reshapeToHeads(cmdBuff, tensors.K_flat, K_reshaped, reshapeDescSetK, B, S, H, HD);
+            reshapeToHeads(cmdBuff, tensors.V_flat, V_reshaped, reshapeDescSetV, B, S, H, HD);
 
             updateCacheWithNewKV(cmdBuff, K_reshaped, V_reshaped, B, H, S, 0, kv_cache->max_len, HD);
         }
@@ -946,9 +954,9 @@ void MultiHeadAttentionNode::reshapeQKVForCache(CommandBuffer& cmdBuff, Intermed
     V_reshaped.bindBuffer(pool.requestBuffer(netGlobalDevice, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, B*H*new_S*HD*sizeof(float)));
 
     // Reshape Q, K, V to multi-head format
-    reshapeToHeads(cmdBuff, tensors.Q_flat, Q_reshaped, B, new_S, H, HD);
-    reshapeToHeads(cmdBuff, tensors.K_flat, K_reshaped, B, new_S, H, HD);
-    reshapeToHeads(cmdBuff, tensors.V_flat, V_reshaped, B, new_S, H, HD);
+    reshapeToHeads(cmdBuff, tensors.Q_flat, Q_reshaped, reshapeDescSetQ, B, new_S, H, HD);
+    reshapeToHeads(cmdBuff, tensors.K_flat, K_reshaped, reshapeDescSetK, B, new_S, H, HD);
+    reshapeToHeads(cmdBuff, tensors.V_flat, V_reshaped, reshapeDescSetV, B, new_S, H, HD);
 }
 
 void MultiHeadAttentionNode::computeQKVProjection(CommandBuffer& cmdBuff, const Tensor& input, IntermediateTensors& tensors,
@@ -1066,10 +1074,7 @@ void MultiHeadAttentionNode::combineHeadsAndProject(CommandBuffer& cmdBuff, Inte
         .dispatch0(CEIL_DIV(B*S, 16), CEIL_DIV(D, 16))
         .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / tensors.context_combined.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
 
-    // Output projection
-    ComputePipeline outProjPipeline = requestPipeline(src_linear);
-    DescriptorSet outProjDescSet = outProjPipeline.descSetLayout(0).newDescSet(gDestSetPool);
-
+    // Output projection (use pre-allocated pipeline and descriptor set)
     outProjDescSet.write({
         output.buffer(),
         tensors.context_combined.buffer(),
@@ -1080,7 +1085,7 @@ void MultiHeadAttentionNode::combineHeadsAndProject(CommandBuffer& cmdBuff, Inte
     int constants2[] = {(int)B, (int)S, (int)D, (int)d_out};
 
     cmdBuff
-        .bindPipeline(outProjPipeline)
+        .bindPipeline(outputProjection)
         .setPushConstants(0, sizeof(constants2), constants2)
         .bindDescSets({outProjDescSet})
         .dispatch0(CEIL_DIV(B*S, 16), CEIL_DIV(d_out, 16))
@@ -1103,13 +1108,11 @@ void MultiHeadAttentionNode::disableCache()
     use_cache = false;
 }
 
-void MultiHeadAttentionNode::reshapeToHeads(CommandBuffer& cmdBuff, const Tensor& flat, Tensor& reshaped,
+void MultiHeadAttentionNode::reshapeToHeads(CommandBuffer& cmdBuff, const Tensor& flat, Tensor& reshaped, DescriptorSet& descSet,
                                             uint32_t B, uint32_t S, uint32_t H, uint32_t HD)
 {
-    // Create local descriptor set to avoid conflicts when called multiple times
-    DescriptorSet localReshapeDescSet = reshapeForHeads.descSetLayout(0).newDescSet(gDestSetPool);
-
-    localReshapeDescSet.write({
+    // Use pre-allocated descriptor set (passed as parameter)
+    descSet.write({
         reshaped.buffer(),
         flat.buffer()
     });
@@ -1120,7 +1123,7 @@ void MultiHeadAttentionNode::reshapeToHeads(CommandBuffer& cmdBuff, const Tensor
     cmdBuff
         .bindPipeline(reshapeForHeads)
         .setPushConstants(0, sizeof(constants), constants)
-        .bindDescSets({localReshapeDescSet})
+        .bindDescSets({descSet})
         .dispatch0(CEIL_DIV(B*S, 16), CEIL_DIV(D, 16))
         .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / reshaped.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
 }
@@ -1137,8 +1140,7 @@ void MultiHeadAttentionNode::concatenateWithCache(CommandBuffer& cmdBuff, Interm
     // Note: This version expects K_new and V_new to already be in tensors
     // It will concatenate them with the cache
 
-    // Concatenate K: [cached_K, K_new] → K_full
-    DescriptorSet concatDescSetK = concatenateKV.descSetLayout(0).newDescSet(gDestSetPool);
+    // Concatenate K: [cached_K, K_new] → K_full (use pre-allocated descriptor set)
     concatDescSetK.write({
         tensors.K_full.buffer(),
         kv_cache->K.buffer(),
@@ -1154,8 +1156,7 @@ void MultiHeadAttentionNode::concatenateWithCache(CommandBuffer& cmdBuff, Interm
         .dispatch0(CEIL_DIV(B * H, 16), CEIL_DIV(total_len, 16))
         .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / tensors.K_full.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
 
-    // Concatenate V: [cached_V, V_new] → V_full
-    DescriptorSet concatDescSetV = concatenateKV.descSetLayout(0).newDescSet(gDestSetPool);
+    // Concatenate V: [cached_V, V_new] → V_full (use pre-allocated descriptor set)
     concatDescSetV.write({
         tensors.V_full.buffer(),
         kv_cache->V.buffer(),
@@ -1176,8 +1177,7 @@ void MultiHeadAttentionNode::updateCacheWithNewKV(CommandBuffer& cmdBuff, const 
     _ASSERT(kv_cache != nullptr);
     _ASSERT(use_cache);
 
-    // Update K cache
-    DescriptorSet updateCacheDescSetK = updateCache.descSetLayout(0).newDescSet(gDestSetPool);
+    // Update K cache (use pre-allocated descriptor set)
     updateCacheDescSetK.write({
         kv_cache->K.buffer(),
         K_new.buffer()
@@ -1192,8 +1192,7 @@ void MultiHeadAttentionNode::updateCacheWithNewKV(CommandBuffer& cmdBuff, const 
         .dispatch0(CEIL_DIV(B * H, 16), CEIL_DIV(new_S, 16))
         .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / kv_cache->K.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
 
-    // Update V cache
-    DescriptorSet updateCacheDescSetV = updateCache.descSetLayout(0).newDescSet(gDestSetPool);
+    // Update V cache (use pre-allocated descriptor set)
     updateCacheDescSetV.write({
         kv_cache->V.buffer(),
         V_new.buffer()

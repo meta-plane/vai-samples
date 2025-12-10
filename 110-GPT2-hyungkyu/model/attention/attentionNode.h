@@ -87,9 +87,13 @@ class MultiHeadAttentionNode : public Node
 
     // Descriptor sets
     DescriptorSet qkvProjDescSet;
-    DescriptorSet reshapeDescSet;         // NOTE: Not used in cache mode (creates local sets)
-    DescriptorSet concatDescSet;          // NOTE: Not used in cache mode (creates local sets)
-    DescriptorSet updateCacheDescSet;     // NOTE: Not used in cache mode (creates local sets)
+    DescriptorSet reshapeDescSetQ;        // For Q reshape in cache mode
+    DescriptorSet reshapeDescSetK;        // For K reshape in cache mode
+    DescriptorSet reshapeDescSetV;        // For V reshape in cache mode
+    DescriptorSet concatDescSetK;         // For K concatenation in cache mode
+    DescriptorSet concatDescSetV;         // For V concatenation in cache mode
+    DescriptorSet updateCacheDescSetK;    // For K cache update
+    DescriptorSet updateCacheDescSetV;    // For V cache update
     DescriptorSet scoresDescSet;
     DescriptorSet scoresCachedDescSet;    // For cached attention scores
     DescriptorSet maskDescSet;
@@ -126,7 +130,7 @@ class MultiHeadAttentionNode : public Node
     void reshapeQKVForCache(CommandBuffer& cmdBuff, IntermediateTensors& tensors,
                             Tensor& Q_reshaped, Tensor& K_reshaped, Tensor& V_reshaped,
                             uint32_t B, uint32_t new_S, uint32_t H, uint32_t HD);
-    void reshapeToHeads(CommandBuffer& cmdBuff, const Tensor& flat, Tensor& reshaped, uint32_t B, uint32_t S, uint32_t H, uint32_t HD);
+    void reshapeToHeads(CommandBuffer& cmdBuff, const Tensor& flat, Tensor& reshaped, DescriptorSet& descSet, uint32_t B, uint32_t S, uint32_t H, uint32_t HD);
     void concatenateWithCache(CommandBuffer& cmdBuff, IntermediateTensors& tensors,
                               uint32_t B, uint32_t H, uint32_t new_S, uint32_t cache_len, uint32_t HD);
     void updateCacheWithNewKV(CommandBuffer& cmdBuff, const Tensor& K_new, const Tensor& V_new,
