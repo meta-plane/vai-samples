@@ -68,12 +68,16 @@ class FeedForwardNode : public Node
     uint32_t hidden_dim;  // 4 * d_model
 
     ComputePipeline linear1Pipeline;
+    ComputePipeline linear1PipelineGEMV;
     ComputePipeline geluPipeline;
     ComputePipeline linear2Pipeline;
+    ComputePipeline linear2PipelineGEMV;
 
     DescriptorSet linear1DescSet;
+    DescriptorSet linear1DescSetGEMV;
     DescriptorSet geluDescSet;
     DescriptorSet linear2DescSet;
+    DescriptorSet linear2DescSetGEMV;
 
     // Helper functions for run() steps
     void runLinear1(CommandBuffer& cmdBuff, const Tensor& input, Tensor& hidden, const Tensor& weight1, const Tensor& bias1, uint32_t B, uint32_t S, uint32_t D, uint32_t H);

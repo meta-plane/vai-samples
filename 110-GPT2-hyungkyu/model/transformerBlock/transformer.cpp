@@ -249,6 +249,49 @@ void main() {
 }
 )";
 
+const char* src_linear_gemv = R"(
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_ballot : enable
+
+// Workgroup size = subgroup size (32 for NVIDIA, 64 for AMD)
+layout(local_size_x = 32, local_size_y = 1) in;
+
+layout(set = 0, binding = 0) buffer Output { float y[]; };    // [M*N]
+layout(set = 0, binding = 1) buffer Input { float x[]; };     // [M*K]
+layout(set = 0, binding = 2) buffer Weight { float w[]; };    // [N*K]
+layout(set = 0, binding = 3) buffer Bias { float b[]; };      // [N]
+
+layout(push_constant) uniform PushConstants {
+    int M;   // batch_size * seq_len (usually 1 in KV cache)
+    int K;   // input features
+    int N;   // output features
+};
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;         // Thread ID within workgroup [0, 31]
+    uint row_idx = gl_WorkGroupID.x;           // Which row (M dimension)
+    uint col_idx = gl_WorkGroupID.y;           // Which output feature (N dimension)
+
+    if (row_idx >= M || col_idx >= N) return;
+
+    // Phase 1: Each thread computes partial dot product over strided K
+    float partial_sum = 0.0;
+    for (uint k = tid; k < K; k += 32) {
+        partial_sum += x[row_idx * K + k] * w[col_idx * K + k];
+    }
+
+    // Phase 2: Subgroup reduction (hardware-accelerated!)
+    // All 32 threads in the subgroup sum their values in parallel
+    float total_sum = subgroupAdd(partial_sum);
+
+    // Phase 3: First thread (subgroup representative) writes result
+    if (subgroupElect()) {
+        y[row_idx * N + col_idx] = total_sum + b[col_idx];
+    }
+}
+)";
+
 FeedForwardNode::FeedForwardNode(uint32_t d_model)
     : d_model(d_model), hidden_dim(4 * d_model)
 {
@@ -260,12 +303,16 @@ FeedForwardNode::FeedForwardNode(uint32_t d_model)
     addSlot("out0", NodeSlot::output);
 
     linear1Pipeline = requestPipeline(src_linear_ff);
+    linear1PipelineGEMV = requestPipeline(src_linear_gemv);
     geluPipeline = requestPipeline(src_gelu);
     linear2Pipeline = requestPipeline(src_linear_ff);
+    linear2PipelineGEMV = requestPipeline(src_linear_gemv);
 
     linear1DescSet = linear1Pipeline.descSetLayout(0).newDescSet(gDestSetPool);
+    linear1DescSetGEMV = linear1PipelineGEMV.descSetLayout(0).newDescSet(gDestSetPool);
     geluDescSet = geluPipeline.descSetLayout(0).newDescSet(gDestSetPool);
     linear2DescSet = linear2Pipeline.descSetLayout(0).newDescSet(gDestSetPool);
+    linear2DescSetGEMV = linear2PipelineGEMV.descSetLayout(0).newDescSet(gDestSetPool);
 }
 
 void FeedForwardNode::prepare()
@@ -312,25 +359,56 @@ void FeedForwardNode::runLinear1(CommandBuffer& cmdBuff, const Tensor& input, Te
                                    const Tensor& weight1, const Tensor& bias1,
                                    uint32_t B, uint32_t S, uint32_t D, uint32_t H)
 {
-    linear1DescSet.write({
-        hidden.buffer(),
-        input.buffer(),
-        weight1.buffer(),
-        bias1.buffer()
-    });
+    uint32_t M = B * S;
+    static bool first_call = true;
 
-    int constants[] = {(int)B, (int)S, (int)D, (int)H};
+    if (M == 1) {
+        // GEMV path: Use optimized kernel for M=1
+        if (first_call) {
+            printf("[DEBUG] FeedForwardNode::runLinear1 using GEMV path (M=%u, K=%u, N=%u)\n", M, D, H);
+            first_call = false;
+        }
+        linear1DescSetGEMV.write({
+            hidden.buffer(),
+            input.buffer(),
+            weight1.buffer(),
+            bias1.buffer()
+        });
 
-    cmdBuff
-        .bindPipeline(linear1Pipeline)
-        .setPushConstants(0, sizeof(constants), constants)
-        .bindDescSets({linear1DescSet})
-        .dispatch0(CEIL_DIV(B*S, 16), CEIL_DIV(H, 16))
-        .barrier(
-            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
-            / hidden.buffer()
-            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
-        );
+        int constants[] = {(int)M, (int)D, (int)H};  // M, K, N
+
+        cmdBuff
+            .bindPipeline(linear1PipelineGEMV)
+            .setPushConstants(0, sizeof(constants), constants)
+            .bindDescSets({linear1DescSetGEMV})
+            .dispatch0(M, H)  // Dispatch M×H workgroups (each uses 32 threads with subgroup operations)
+            .barrier(
+                (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+                / hidden.buffer()
+                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+            );
+    } else {
+        // GEMM path: Use naive kernel for M>1 (fallback)
+        linear1DescSet.write({
+            hidden.buffer(),
+            input.buffer(),
+            weight1.buffer(),
+            bias1.buffer()
+        });
+
+        int constants[] = {(int)B, (int)S, (int)D, (int)H};
+
+        cmdBuff
+            .bindPipeline(linear1Pipeline)
+            .setPushConstants(0, sizeof(constants), constants)
+            .bindDescSets({linear1DescSet})
+            .dispatch0(CEIL_DIV(M, 16), CEIL_DIV(H, 16))
+            .barrier(
+                (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+                / hidden.buffer()
+                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+            );
+    }
 }
 
 void FeedForwardNode::runGELU(CommandBuffer& cmdBuff, const Tensor& hidden, Tensor& gelu_out,
@@ -359,25 +437,51 @@ void FeedForwardNode::runLinear2(CommandBuffer& cmdBuff, const Tensor& gelu_out,
                                    const Tensor& weight2, const Tensor& bias2,
                                    uint32_t B, uint32_t S, uint32_t H, uint32_t D)
 {
-    linear2DescSet.write({
-        output.buffer(),
-        gelu_out.buffer(),
-        weight2.buffer(),
-        bias2.buffer()
-    });
+    uint32_t M = B * S;
 
-    int constants[] = {(int)B, (int)S, (int)H, (int)D};
+    if (M == 1) {
+        // GEMV path: Use optimized kernel for M=1
+        linear2DescSetGEMV.write({
+            output.buffer(),
+            gelu_out.buffer(),
+            weight2.buffer(),
+            bias2.buffer()
+        });
 
-    cmdBuff
-        .bindPipeline(linear2Pipeline)
-        .setPushConstants(0, sizeof(constants), constants)
-        .bindDescSets({linear2DescSet})
-        .dispatch0(CEIL_DIV(B*S, 16), CEIL_DIV(D, 16))
-        .barrier(
-            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
-            / output.buffer()
-            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
-        );
+        int constants[] = {(int)M, (int)H, (int)D};  // M, K, N
+
+        cmdBuff
+            .bindPipeline(linear2PipelineGEMV)
+            .setPushConstants(0, sizeof(constants), constants)
+            .bindDescSets({linear2DescSetGEMV})
+            .dispatch0(M, D)  // Dispatch M×D workgroups (each uses 32 threads with subgroup operations)
+            .barrier(
+                (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+                / output.buffer()
+                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+            );
+    } else {
+        // GEMM path: Use naive kernel for M>1 (fallback)
+        linear2DescSet.write({
+            output.buffer(),
+            gelu_out.buffer(),
+            weight2.buffer(),
+            bias2.buffer()
+        });
+
+        int constants[] = {(int)B, (int)S, (int)H, (int)D};
+
+        cmdBuff
+            .bindPipeline(linear2Pipeline)
+            .setPushConstants(0, sizeof(constants), constants)
+            .bindDescSets({linear2DescSet})
+            .dispatch0(CEIL_DIV(M, 16), CEIL_DIV(D, 16))
+            .barrier(
+                (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+                / output.buffer()
+                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+            );
+    }
 }
 
 // ==================== FeedForwardNode Main Run ====================

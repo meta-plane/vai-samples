@@ -43,6 +43,48 @@ void main() {
 }
 )";
 
+// LinearNode GEMV version (for M=1 case with subgroup optimization)
+static const char* src_linear_gemv = R"(
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_ballot : enable
+
+layout(local_size_x = 32, local_size_y = 1) in;
+
+layout(set = 0, binding = 0) buffer Output { float y[]; };      // [M*O]
+layout(set = 0, binding = 1) buffer Input { float x[]; };       // [M*I]
+layout(set = 0, binding = 2) buffer Weight { float w[]; };      // [O*I]
+layout(set = 0, binding = 3) buffer Bias { float b[]; };        // [O]
+
+layout(push_constant) uniform PushConstants {
+    int M;   // batch_size * seq_len (usually 1 in KV cache)
+    int I;   // in_features
+    int O;   // out_features
+};
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;   // Thread ID [0, 31]
+    uint row_idx = gl_WorkGroupID.x;     // Which row (M dimension)
+    uint col_idx = gl_WorkGroupID.y;     // Which output feature (O dimension)
+
+    if (row_idx >= M || col_idx >= O) return;
+
+    // Compute partial dot product over strided I
+    float partial_sum = 0.0;
+    for (uint i = tid; i < I; i += 32) {
+        partial_sum += x[row_idx * I + i] * w[col_idx * I + i];
+    }
+
+    // Subgroup reduction
+    float total_sum = subgroupAdd(partial_sum);
+
+    // First thread writes result with bias
+    if (subgroupElect()) {
+        y[row_idx * O + col_idx] = total_sum + b[col_idx];
+    }
+}
+)";
+
 LinearNode::LinearNode(uint32_t in_features, uint32_t out_features)
     : in_features(in_features), out_features(out_features)
 {
@@ -256,6 +298,68 @@ void main() {
         v_val += x[bs * D_in + i] * wv[d_out * D_in + i];
     }
     v[bs * D_out + d_out] = v_val + bv[d_out];
+}
+)";
+
+// Shader 1b: QKV Projection with Subgroup Optimization (for M=1 case)
+const char* src_qkv_projection_gemv = R"(
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_ballot : enable
+
+layout(local_size_x = 32, local_size_y = 1) in;
+
+layout(set = 0, binding = 0) buffer Q { float q[]; };        // [M*D_out]
+layout(set = 0, binding = 1) buffer K { float k[]; };        // [M*D_out]
+layout(set = 0, binding = 2) buffer V { float v[]; };        // [M*D_out]
+layout(set = 0, binding = 3) buffer Input { float x[]; };    // [M*D_in]
+layout(set = 0, binding = 4) buffer Wq { float wq[]; };      // [D_out*D_in]
+layout(set = 0, binding = 5) buffer Wk { float wk[]; };      // [D_out*D_in]
+layout(set = 0, binding = 6) buffer Wv { float wv[]; };      // [D_out*D_in]
+layout(set = 0, binding = 7) buffer Bq { float bq[]; };      // [D_out]
+layout(set = 0, binding = 8) buffer Bk { float bk[]; };      // [D_out]
+layout(set = 0, binding = 9) buffer Bv { float bv[]; };      // [D_out]
+
+layout(push_constant) uniform PushConstants {
+    int M;      // batch_size * seq_len (usually 1 in KV cache)
+    int D_in;   // input features
+    int D_out;  // output features
+};
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;   // Thread ID [0, 31]
+    uint row_idx = gl_WorkGroupID.x;     // Which row (M dimension)
+    uint col_idx = gl_WorkGroupID.y;     // Which output feature (D_out dimension)
+
+    if (row_idx >= M || col_idx >= D_out) return;
+
+    // Compute Q: partial dot product over strided D_in
+    float q_partial = 0.0;
+    for (uint i = tid; i < D_in; i += 32) {
+        q_partial += x[row_idx * D_in + i] * wq[col_idx * D_in + i];
+    }
+    float q_sum = subgroupAdd(q_partial);
+
+    // Compute K: partial dot product over strided D_in
+    float k_partial = 0.0;
+    for (uint i = tid; i < D_in; i += 32) {
+        k_partial += x[row_idx * D_in + i] * wk[col_idx * D_in + i];
+    }
+    float k_sum = subgroupAdd(k_partial);
+
+    // Compute V: partial dot product over strided D_in
+    float v_partial = 0.0;
+    for (uint i = tid; i < D_in; i += 32) {
+        v_partial += x[row_idx * D_in + i] * wv[col_idx * D_in + i];
+    }
+    float v_sum = subgroupAdd(v_partial);
+
+    // First thread writes results with bias
+    if (subgroupElect()) {
+        q[row_idx * D_out + col_idx] = q_sum + bq[col_idx];
+        k[row_idx * D_out + col_idx] = k_sum + bk[col_idx];
+        v[row_idx * D_out + col_idx] = v_sum + bv[col_idx];
+    }
 }
 )";
 
@@ -700,6 +804,7 @@ MultiHeadAttentionNode::MultiHeadAttentionNode(uint32_t d_in, uint32_t d_out, ui
 
     // Create pipelines - standard (no cache)
     qkvProjection = requestPipeline(src_qkv_projection);
+    qkvProjectionGEMV = requestPipeline(src_qkv_projection_gemv);  // GEMV version for M=1
     attentionScores = requestPipeline(src_attention_scores);
     applyCausalMask = requestPipeline(src_causal_mask);
     softmaxPipeline = requestPipeline(src_softmax);
@@ -716,6 +821,7 @@ MultiHeadAttentionNode::MultiHeadAttentionNode(uint32_t d_in, uint32_t d_out, ui
 
     // Create descriptor sets
     qkvProjDescSet = qkvProjection.descSetLayout(0).newDescSet(gDestSetPool);
+    qkvProjDescSetGEMV = qkvProjectionGEMV.descSetLayout(0).newDescSet(gDestSetPool);  // GEMV descriptor set
     reshapeDescSetQ = reshapeForHeads.descSetLayout(0).newDescSet(gDestSetPool);
     reshapeDescSetK = reshapeForHeads.descSetLayout(0).newDescSet(gDestSetPool);
     reshapeDescSetV = reshapeForHeads.descSetLayout(0).newDescSet(gDestSetPool);
@@ -734,7 +840,9 @@ MultiHeadAttentionNode::MultiHeadAttentionNode(uint32_t d_in, uint32_t d_out, ui
 
     // Output projection pipeline and descriptor set (used in both modes)
     outputProjection = requestPipeline(src_linear);
+    outputProjectionGEMV = requestPipeline(src_linear_gemv);  // GEMV version for M=1 (from transformer.cpp)
     outProjDescSet = outputProjection.descSetLayout(0).newDescSet(gDestSetPool);
+    outProjDescSetGEMV = outputProjectionGEMV.descSetLayout(0).newDescSet(gDestSetPool);
 }
 
 void MultiHeadAttentionNode::prepare()
@@ -964,23 +1072,47 @@ void MultiHeadAttentionNode::computeQKVProjection(CommandBuffer& cmdBuff, const 
                                                    const Tensor& B_q, const Tensor& B_k, const Tensor& B_v,
                                                    uint32_t B, uint32_t S, uint32_t D_in, uint32_t D_out)
 {
-    qkvProjDescSet.write({
-        tensors.Q_flat.buffer(), tensors.K_flat.buffer(), tensors.V_flat.buffer(),
-        input.buffer(),
-        W_q.buffer(), W_k.buffer(), W_v.buffer(),
-        B_q.buffer(), B_k.buffer(), B_v.buffer()
-    });
+    uint32_t M = B * S;
 
-    int constants[] = {(int)B, (int)S, (int)D_in, (int)D_out};
+    if (M == 1) {
+        // GEMV path: Use subgroup-optimized kernel for M=1 (KV cache mode)
+        qkvProjDescSetGEMV.write({
+            tensors.Q_flat.buffer(), tensors.K_flat.buffer(), tensors.V_flat.buffer(),
+            input.buffer(),
+            W_q.buffer(), W_k.buffer(), W_v.buffer(),
+            B_q.buffer(), B_k.buffer(), B_v.buffer()
+        });
 
-    cmdBuff
-        .bindPipeline(qkvProjection)
-        .setPushConstants(0, sizeof(constants), constants)
-        .bindDescSets({qkvProjDescSet})
-        .dispatch0(CEIL_DIV(B*S, 16), CEIL_DIV(D_out, 16))
-        .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / tensors.Q_flat.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ))
-        .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / tensors.K_flat.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ))
-        .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / tensors.V_flat.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+        int constants[] = {(int)M, (int)D_in, (int)D_out};  // M, K, N
+
+        cmdBuff
+            .bindPipeline(qkvProjectionGEMV)
+            .setPushConstants(0, sizeof(constants), constants)
+            .bindDescSets({qkvProjDescSetGEMV})
+            .dispatch0(M, D_out)  // M×D_out workgroups (each uses 32 threads with subgroup ops)
+            .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / tensors.Q_flat.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ))
+            .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / tensors.K_flat.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ))
+            .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / tensors.V_flat.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+    } else {
+        // GEMM path: Use standard kernel for M>1
+        qkvProjDescSet.write({
+            tensors.Q_flat.buffer(), tensors.K_flat.buffer(), tensors.V_flat.buffer(),
+            input.buffer(),
+            W_q.buffer(), W_k.buffer(), W_v.buffer(),
+            B_q.buffer(), B_k.buffer(), B_v.buffer()
+        });
+
+        int constants[] = {(int)B, (int)S, (int)D_in, (int)D_out};
+
+        cmdBuff
+            .bindPipeline(qkvProjection)
+            .setPushConstants(0, sizeof(constants), constants)
+            .bindDescSets({qkvProjDescSet})
+            .dispatch0(CEIL_DIV(B*S, 16), CEIL_DIV(D_out, 16))
+            .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / tensors.Q_flat.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ))
+            .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / tensors.K_flat.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ))
+            .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / tensors.V_flat.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+    }
 }
 
 void MultiHeadAttentionNode::computeAttentionScores(CommandBuffer& cmdBuff, IntermediateTensors& tensors,
@@ -1074,22 +1206,44 @@ void MultiHeadAttentionNode::combineHeadsAndProject(CommandBuffer& cmdBuff, Inte
         .dispatch0(CEIL_DIV(B*S, 16), CEIL_DIV(D, 16))
         .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / tensors.context_combined.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
 
-    // Output projection (use pre-allocated pipeline and descriptor set)
-    outProjDescSet.write({
-        output.buffer(),
-        tensors.context_combined.buffer(),
-        W_out.buffer(),
-        B_out.buffer()
-    });
+    // Output projection
+    uint32_t M = B * S;
 
-    int constants2[] = {(int)B, (int)S, (int)D, (int)d_out};
+    if (M == 1) {
+        // GEMV path: Use subgroup-optimized kernel for M=1
+        outProjDescSetGEMV.write({
+            output.buffer(),
+            tensors.context_combined.buffer(),
+            W_out.buffer(),
+            B_out.buffer()
+        });
 
-    cmdBuff
-        .bindPipeline(outputProjection)
-        .setPushConstants(0, sizeof(constants2), constants2)
-        .bindDescSets({outProjDescSet})
-        .dispatch0(CEIL_DIV(B*S, 16), CEIL_DIV(d_out, 16))
-        .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / output.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+        int constants2[] = {(int)M, (int)D, (int)d_out};  // M, I, O
+
+        cmdBuff
+            .bindPipeline(outputProjectionGEMV)
+            .setPushConstants(0, sizeof(constants2), constants2)
+            .bindDescSets({outProjDescSetGEMV})
+            .dispatch0(M, d_out)  // M×d_out workgroups (each uses 32 threads with subgroup ops)
+            .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / output.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+    } else {
+        // GEMM path: Use standard kernel for M>1
+        outProjDescSet.write({
+            output.buffer(),
+            tensors.context_combined.buffer(),
+            W_out.buffer(),
+            B_out.buffer()
+        });
+
+        int constants2[] = {(int)B, (int)S, (int)D, (int)d_out};
+
+        cmdBuff
+            .bindPipeline(outputProjection)
+            .setPushConstants(0, sizeof(constants2), constants2)
+            .bindDescSets({outProjDescSet})
+            .dispatch0(CEIL_DIV(B*S, 16), CEIL_DIV(d_out, 16))
+            .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / output.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+    }
 }
 
 // ============================================================================

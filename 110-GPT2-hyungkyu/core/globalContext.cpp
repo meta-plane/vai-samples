@@ -16,6 +16,10 @@ DescriptorPool gDestSetPool = netGlobalDevice.createDescriptorPool({
     .maxSets = 100000
 });
 
+// Subgroup size - initialized to 32 as default, then updated by hardware detection
+// Actual value is queried from VkPhysicalDeviceSubgroupProperties during device initialization
+uint32_t gSubgroupSize = 32;
+
 // ============================================================================
 // Global Pipeline Cache
 // ============================================================================

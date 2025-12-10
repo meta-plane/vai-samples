@@ -70,12 +70,14 @@ class MultiHeadAttentionNode : public Node
 
     // Pipelines for each stage (standard mode)
     ComputePipeline qkvProjection;        // Project input to Q, K, V
+    ComputePipeline qkvProjectionGEMV;    // QKV projection with subgroup optimization (M=1)
     ComputePipeline attentionScores;      // Q @ K^T / sqrt(head_dim)
     ComputePipeline applyCausalMask;      // Set upper triangle to -inf
     ComputePipeline softmaxPipeline;      // Softmax on attention scores
     ComputePipeline weightedSum;          // attn_weights @ V
     ComputePipeline combineHeads;         // Reshape and concat heads
     ComputePipeline outputProjection;     // Final linear projection
+    ComputePipeline outputProjectionGEMV; // Output projection with subgroup optimization (M=1)
 
     // Pipelines for cache mode
     ComputePipeline reshapeForHeads;      // Reshape to multi-head format [B,S,D] -> [B,H,S,HD]
@@ -87,6 +89,7 @@ class MultiHeadAttentionNode : public Node
 
     // Descriptor sets
     DescriptorSet qkvProjDescSet;
+    DescriptorSet qkvProjDescSetGEMV;     // For GEMV QKV projection (M=1)
     DescriptorSet reshapeDescSetQ;        // For Q reshape in cache mode
     DescriptorSet reshapeDescSetK;        // For K reshape in cache mode
     DescriptorSet reshapeDescSetV;        // For V reshape in cache mode
@@ -103,6 +106,7 @@ class MultiHeadAttentionNode : public Node
     DescriptorSet weightedSumCachedDescSet; // For cached weighted sum
     DescriptorSet combineDescSet;
     DescriptorSet outProjDescSet;
+    DescriptorSet outProjDescSetGEMV;     // For GEMV output projection (M=1)
 
     // Helper struct for intermediate tensors
     struct IntermediateTensors {
