@@ -218,7 +218,8 @@ class NeuralNet
     Buffer uploadBuffer; 
     uint8_t* uploadBufferMappedAddress = nullptr;
     size_t uploadBufferOffset = 0; 
-    const size_t uploadBufferSize = 1024 * 1024 * 64; // 64 MB
+    //const size_t uploadBufferSize = 1024 * 1024 * 64; // 64 MB
+    const size_t uploadBufferSize = 1024 * 1024 * 1024; // 64 MB
 
     std::vector<InputNode> _inputs;
     std::vector<OutputNode> _outputs;

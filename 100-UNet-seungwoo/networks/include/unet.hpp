@@ -6,6 +6,7 @@
 #include "../../library/neuralNet.h"
 #include "../../library/neuralNodes.h"
 #include "../../library/vulkanApp.h"
+#include  "../../safeTensor/safeTensorsParser.h"
 
 #include "layers.hpp"
 
@@ -21,7 +22,6 @@ namespace networks
 		uint32_t				height_;
 		uint32_t				width_;
 		uint32_t				channel_;
-
 
 		std::unique_ptr<doubleConvBnRelu>		encoderConv1_;
 		std::unique_ptr<MaxPoolingNode>			pool1_;
@@ -58,8 +58,11 @@ namespace networks
 	public:
 		using s_ptr = std::shared_ptr<Unet>;
 		using u_ptr = std::unique_ptr<Unet>;
+		using w_ptr = std::weak_ptr<Unet>;
 
 		Unet(Device& device, uint32_t  height, uint32_t width, uint32_t channel, uint32_t numInputs = 1, uint32_t numOutputs = 1);
-		~Unet();
+		~Unet() = default;
+
+		void setWeight(SafeTensorsParser& parser);
 	};
 }

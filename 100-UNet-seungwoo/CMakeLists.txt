@@ -11,6 +11,8 @@ add_executable(${PROJECT_NAME}
     library/jsonParser.cpp
 
     networks/src/unet.cpp
+    safeTensor/safeTensorsParser.cpp
+
  "networks/src/unet.cpp")
 
 add_definitions(

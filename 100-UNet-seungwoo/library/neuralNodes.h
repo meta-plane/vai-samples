@@ -13,31 +13,41 @@ class ConCatNode : public Node
 
 public:
     ConCatNode(uint32_t dim);
+    ~ConCatNode() override = default;
+
     void prepare() override;
     void run(CommandBuffer cmdBuff) override;
 };
 
 class ConvTransposeNode : public Node
 {
-    uint32_t C, F, K;
-
-    ComputePipeline im2col;
-    ComputePipeline gemm;
-
 public:
-    ConvTransposeNode(uint32_t inChannels, uint32_t outChannels, uint32_t kernelWidth);
+    ConvTransposeNode(uint32_t inChannels,uint32_t outChannels,uint32_t kernelSize,uint32_t stride = 2,uint32_t padding = 0);
+
     void prepare() override;
     void run(CommandBuffer cmdBuff) override;
+
+private:
+    uint32_t C_in;   // 입력 채널
+    uint32_t C_out;  // 출력 채널
+    uint32_t K;      // 커널 크기 (K x K)
+    uint32_t S;      // stride
+    uint32_t P;      // padding
+
+    ComputePipeline convtranspose;
+    DescriptorSet convtransposeDescSet;
 };
 
 class BatchNormNode : public Node
 {
+    ComputePipeline bacthnrom;
+    DescriptorSet   bacthnromDescSet;
+
 public:
     BatchNormNode();
     ~BatchNormNode() override = default;
     void prepare() override;
     void run(CommandBuffer cmdBuff) override;
-
 };
 
 
