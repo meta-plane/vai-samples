@@ -124,6 +124,28 @@ static void detectSubgroupProperties(VkPhysicalDevice physicalDevice)
     fflush(stdout);
 }
 
+static void detectComputeLimits(VkPhysicalDevice physicalDevice)
+{
+    VkPhysicalDeviceProperties props = {};
+    vkGetPhysicalDeviceProperties(physicalDevice, &props);
+
+    printf("[GPU Compute Limits]\n");
+    printf("  Max Shared Memory: %u KB (%u bytes)\n",
+        props.limits.maxComputeSharedMemorySize / 1024,
+        props.limits.maxComputeSharedMemorySize);
+    printf("  Max Workgroup Size: %u (invocations)\n",
+        props.limits.maxComputeWorkGroupInvocations);
+    printf("  Max Workgroup Count: [%u, %u, %u]\n",
+        props.limits.maxComputeWorkGroupCount[0],
+        props.limits.maxComputeWorkGroupCount[1],
+        props.limits.maxComputeWorkGroupCount[2]);
+    printf("  Max Workgroup Size (per dimension): [%u, %u, %u]\n",
+        props.limits.maxComputeWorkGroupSize[0],
+        props.limits.maxComputeWorkGroupSize[1],
+        props.limits.maxComputeWorkGroupSize[2]);
+    fflush(stdout);
+}
+
 static bool deviceSupportsExtensions(
     VkPhysicalDevice physicalDevice, 
     const std::vector<const char*>& extensions)
@@ -574,6 +596,7 @@ bool VulkanApp::initDevice(uint32_t gpuIndex, DeviceSettings settings)
 
     // Detect GPU hardware capabilities
     detectSubgroupProperties(physicalDevice);
+    detectComputeLimits(physicalDevice);
 
     const std::vector<VkQueueFamilyProperties>& qfProps = impl->qfProps[physicalDevice];
     const std::vector<bool>& qfSupportPresent = impl->qfSupportPresent[physicalDevice];
