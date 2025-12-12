@@ -7,6 +7,7 @@
 #include "graphTest.h"
 #include "../model/attention/attentionNode.h"
 #include "../model/transformerBlock/transformer.h"
+#include "../model/cache/kvCache.h"
 #include <iostream>
 #include <vector>
 #include <memory>
@@ -15,6 +16,91 @@ using namespace vk;
 
 // Global test container
 static std::vector<std::unique_ptr<ITest>> tests;
+
+// ============================================================================
+// Template Specialization for MultiHeadAttentionNode (KV Cache Support)
+// ============================================================================
+
+template<>
+void GraphTest<MultiHeadAttentionNode>::runSequence() {
+    std::cout << "  Running sequence test with " << sequenceSteps.size() << " steps..." << std::endl;
+    std::cout << "  Enabling KV cache for autoregressive generation..." << std::endl;
+
+    actualOutputTensors.clear();
+
+    // Initialize KV cache (following KVCacheManager::initialize pattern)
+    LayerKVCache kvCache;
+    uint32_t num_heads = targetGraph->getNumHeads();
+    uint32_t head_dim = targetGraph->getHeadDim();
+    uint32_t batch = 1;
+
+    // Create cache tensors [batch, num_heads, max_len, head_dim]
+    size_t cache_bytes = batch * num_heads * maxCacheLength * head_dim * sizeof(float);
+    BufferPool& pool = BufferPool::get();
+
+    kvCache.K = Tensor(batch, num_heads, maxCacheLength, head_dim);
+    kvCache.K.bindBuffer(pool.requestBuffer(
+        netGlobalDevice,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        cache_bytes
+    ));
+    kvCache.K.setConstant(true);  // Prevent BufferPool from reusing
+
+    kvCache.V = Tensor(batch, num_heads, maxCacheLength, head_dim);
+    kvCache.V.bindBuffer(pool.requestBuffer(
+        netGlobalDevice,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        cache_bytes
+    ));
+    kvCache.V.setConstant(true);  // Prevent BufferPool from reusing
+
+    kvCache.current_len = 0;
+    kvCache.max_len = maxCacheLength;
+
+    // Enable KV cache for the attention layer
+    targetGraph->setCache(&kvCache);
+
+    std::cout << "    Cache initialized: max_len=" << maxCacheLength
+              << ", heads=" << num_heads << ", head_dim=" << head_dim << std::endl;
+
+    // Process sequence step-by-step with KV cache
+    for (size_t i = 0; i < sequenceSteps.size(); ++i) {
+        auto& step = sequenceSteps[i];
+
+        std::cout << "    Step " << (i+1) << ": cache_len=" << step.cacheLength
+                  << ", new_tokens=1..." << std::endl;
+
+        try {
+            // Update cache length to match this step
+            kvCache.current_len = step.cacheLength;
+
+            // Create input tensor and assign to slot
+            Tensor inputTensor = createInputTensor(step.input.shape, step.input.data);
+            network->input(0)["in0"] = inputTensor;
+
+            // Run inference with KV cache
+            Tensor& inputRef = network->input(0)["in0"];
+            auto outputs = (*network)(inputRef);
+
+            // After processing, cache should have grown by 1
+            kvCache.current_len = step.cacheLength + 1;
+
+            // Store output for verification
+            actualOutputTensors.push_back(outputs[0]);
+            std::cout << "      Step " << (i+1) << " completed (cache now at "
+                      << kvCache.current_len << " tokens)" << std::endl;
+
+        } catch (const std::exception& e) {
+            std::cout << "      Step " << (i+1) << " FAILED: " << e.what() << std::endl;
+            throw;
+        }
+    }
+
+    // Disable cache after test
+    targetGraph->disableCache();
+}
 
 // Test registration helper function
 template<typename NodeType, typename... Args>
@@ -55,6 +141,11 @@ void registerTests() {
         "TransformerBlock - Full Block (1x4x768, 12 heads)",
         PROJECT_CURRENT_DIR "/assets/test_data/transformer_test.json",
         768, 12);
+
+    addTest<MultiHeadAttentionNode>(
+        "MultiHeadAttention - Autoregressive Sequence (4 steps, KV Cache)",
+        PROJECT_CURRENT_DIR "/assets/test_data/attention_sequence_test.json",
+        768, 768, 12);
 }
 
 int main() {

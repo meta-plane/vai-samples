@@ -48,6 +48,22 @@ void GraphTest<T>::loadExpectedOutput(JsonParser& json) {
 template<typename T>
 void GraphTest<T>::loadTestDataFromJSON() {
     JsonParser json(jsonPath.c_str());
+
+    // Check if this is sequence mode
+    try {
+        auto mode = json["mode"].parseString();
+        if (mode == "sequence") {
+            isSequenceMode = true;
+            loadConfig(json);
+            loadSequenceSteps(json);
+            loadParameters(json);
+            return;
+        }
+    } catch (...) {
+        // No "mode" field - standard test
+    }
+
+    // Standard single-step test
     loadInput(json);
     loadParameters(json);
     loadExpectedOutput(json);
@@ -127,6 +143,7 @@ void GraphTest<T>::convertParametersToGPU() {
             throw std::runtime_error("Parameter slot name not set");
         }
         Tensor paramTensor = createInputTensor(param.shape, param.data);
+        paramTensor.setConstant(true);  // Mark as constant so it persists across multiple runs
         (*targetGraph)[param.slotName] = paramTensor;
     }
 }
@@ -263,19 +280,31 @@ bool GraphTest<T>::execute() {
 
     try {
         connectToNetwork();
-        convertInputToGPU();
         convertParametersToGPU();
-        validateExpectedOutput();
 
-        printTestConfig();
+        if (isSequenceMode) {
+            // Sequence mode execution
+            auto start = std::chrono::high_resolution_clock::now();
+            runSequence();
+            auto end = std::chrono::high_resolution_clock::now();
+            double duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
 
-        auto start = std::chrono::high_resolution_clock::now();
-        run();
-        auto end = std::chrono::high_resolution_clock::now();
-        double duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
+            verifySequenceResults();
+            printTestResult(duration);
+        } else {
+            // Standard single-step execution
+            convertInputToGPU();
+            validateExpectedOutput();
+            printTestConfig();
 
-        verifyResults();
-        printTestResult(duration);
+            auto start = std::chrono::high_resolution_clock::now();
+            run();
+            auto end = std::chrono::high_resolution_clock::now();
+            double duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
+
+            verifyResults();
+            printTestResult(duration);
+        }
 
         testPassed = true;
         return true;
@@ -320,4 +349,129 @@ T* GraphTest<T>::getLayer() {
 template<typename T>
 const T* GraphTest<T>::getLayer() const {
     return targetGraph.get();
+}
+
+// ============================================================================
+// Sequence Mode Support
+// ============================================================================
+
+template<typename T>
+void GraphTest<T>::loadConfig(JsonParser& json) {
+    try {
+        auto config = json["config"];
+        maxCacheLength = config["max_cache_length"].parseInt();
+    } catch (...) {
+        maxCacheLength = 1024;  // Default
+    }
+}
+
+template<typename T>
+void GraphTest<T>::loadSequenceSteps(JsonParser& json) {
+    auto stepsArray = json["steps"];
+    int numSteps = stepsArray.size();
+
+    for (int i = 0; i < numSteps; ++i) {
+        auto step = stepsArray[i];
+
+        SequenceStep seqStep;
+
+        // Load input
+        std::vector<uint32_t> inputShape;
+        seqStep.input.data = step["input"].parseNDArray(inputShape);
+        seqStep.input.shape = inputShape;
+
+        // Load expected output
+        std::vector<uint32_t> outputShape;
+        seqStep.expectedOutput.data = step["output"].parseNDArray(outputShape);
+        seqStep.expectedOutput.shape = outputShape;
+
+        // Load cache length
+        seqStep.cacheLength = step["cache_length"].parseInt();
+
+        sequenceSteps.push_back(seqStep);
+    }
+}
+
+template<typename T>
+void GraphTest<T>::runSequence() {
+    std::cout << "  Running sequence test with " << sequenceSteps.size() << " steps..." << std::endl;
+
+    // Initialize KV cache for MultiHeadAttentionNode
+    // This requires access to cache - we'll handle this in specialized template
+    // For now, process each step and collect outputs
+
+    actualOutputTensors.clear();
+
+    for (size_t i = 0; i < sequenceSteps.size(); ++i) {
+        auto& step = sequenceSteps[i];
+
+        std::cout << "    Step " << (i+1) << ": cache_length=" << step.cacheLength << std::endl;
+
+        // Create input tensor
+        Tensor inputTensor = createInputTensor(step.input.shape, step.input.data);
+        network->input(0)["in0"] = inputTensor;
+
+        // Run inference
+        auto outputs = (*network)(inputTensor);
+
+        // Store output
+        actualOutputTensors.push_back(outputs[0]);
+    }
+}
+
+template<typename T>
+void GraphTest<T>::verifySequenceResults() {
+    std::cout << "\n  Verifying sequence results..." << std::endl;
+
+    if (actualOutputTensors.size() != sequenceSteps.size()) {
+        throw std::runtime_error("Output count mismatch");
+    }
+
+    float maxErrorOverall = 0.0f;
+    float meanErrorOverall = 0.0f;
+    int totalElements = 0;
+
+    for (size_t i = 0; i < sequenceSteps.size(); ++i) {
+        auto& step = sequenceSteps[i];
+        auto actualData = readTensorData(actualOutputTensors[i]);
+
+        try {
+            auto metrics = assertClose(actualData, step.expectedOutput.data, tolerance,
+                                       "Step " + std::to_string(i+1));
+
+            maxErrorOverall = std::max(maxErrorOverall, metrics.maxError);
+            meanErrorOverall += metrics.meanError * actualData.size();
+            totalElements += actualData.size();
+
+            std::cout << "    Step " << (i+1) << ": max_error=" << metrics.maxError
+                      << ", mean_error=" << metrics.meanError << std::endl;
+        } catch (const std::exception& e) {
+            // DEBUG: Print first 16 actual and expected values for failed step
+            std::cout << "    Step " << (i+1) << " FAILED - printing debug values:" << std::endl;
+            size_t numToPrint = std::min(size_t(16), actualData.size());
+            std::cout << "      Actual[0-15]:   ";
+            for (size_t j = 0; j < numToPrint; ++j) {
+                std::cout << actualData[j];
+                if (j < numToPrint - 1) std::cout << ", ";
+            }
+            std::cout << std::endl;
+            std::cout << "      Expected[0-15]: ";
+            for (size_t j = 0; j < numToPrint; ++j) {
+                std::cout << step.expectedOutput.data[j];
+                if (j < numToPrint - 1) std::cout << ", ";
+            }
+            std::cout << std::endl;
+            throw;
+        }
+    }
+
+    meanErrorOverall /= totalElements;
+
+    std::cout << "\n  Overall Sequence Results:" << std::endl;
+    std::cout << "    Max Error:  " << maxErrorOverall << std::endl;
+    std::cout << "    Mean Error: " << meanErrorOverall << std::endl;
+
+    if (maxErrorOverall >= tolerance) {
+        throw std::runtime_error("Sequence test failed: max error exceeds tolerance");
+    }
 }

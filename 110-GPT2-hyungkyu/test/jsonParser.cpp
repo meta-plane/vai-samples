@@ -146,3 +146,27 @@ std::vector<std::string> JsonParserRef::getKeys() const
     return keys;
 }
 
+
+int JsonParserRef::parseInt() const
+{
+    if (!pImpl->jsonData.is_number_integer())
+        throw std::runtime_error("JSON value is not an integer");
+    return pImpl->jsonData.get<int>();
+}
+
+
+std::string JsonParserRef::parseString() const
+{
+    if (!pImpl->jsonData.is_string())
+        throw std::runtime_error("JSON value is not a string");
+    return pImpl->jsonData.get<std::string>();
+}
+
+
+size_t JsonParserRef::size() const
+{
+    if (!pImpl->jsonData.is_array())
+        throw std::runtime_error("JSON value is not an array");
+    return pImpl->jsonData.size();
+}
+

@@ -54,6 +54,17 @@ protected:
     CPUTensorData cpuExpectedOutput;
     std::vector<CPUTensorData> cpuParameters;
 
+    // Sequence mode support
+    struct SequenceStep {
+        CPUTensorData input;
+        CPUTensorData expectedOutput;
+        uint32_t cacheLength;  // Number of tokens already in cache
+    };
+
+    bool isSequenceMode = false;
+    std::vector<SequenceStep> sequenceSteps;
+    uint32_t maxCacheLength = 0;
+
     // GPU-side test data
     std::vector<Tensor> actualOutputTensors;
 
@@ -104,6 +115,12 @@ protected:
     void loadInput(JsonParser& json);
     void loadParameters(JsonParser& json);
     void loadExpectedOutput(JsonParser& json);
+    void loadSequenceSteps(JsonParser& json);
+    void loadConfig(JsonParser& json);
+
+    // Sequence mode execution
+    void runSequence();
+    void verifySequenceResults();
 
 public:
     // Constructor: takes test name, JSON path, and node constructor arguments
