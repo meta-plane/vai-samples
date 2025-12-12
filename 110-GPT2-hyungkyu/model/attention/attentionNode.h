@@ -87,6 +87,7 @@ class MultiHeadAttentionNode : public Node
     ComputePipeline maskPipelineCached;   // Causal mask for cached attention
     ComputePipeline weightedSumPipelineCached; // Weighted sum for cached attention
     ComputePipeline flashAttentionKVCache; // Flash Attention for KV cache mode (fused, memory-efficient)
+    ComputePipeline flashAttentionReduce;  // Split-K reduce shader
 
     // Descriptor sets
     DescriptorSet qkvProjDescSet;
@@ -109,6 +110,7 @@ class MultiHeadAttentionNode : public Node
     DescriptorSet outProjDescSet;
     DescriptorSet outProjDescSetGEMV;     // For GEMV output projection (M=1)
     DescriptorSet flashAttnDescSet;       // For Flash Attention KV cache mode
+    DescriptorSet flashAttnReduceDescSet; // For Split-K reduce
 
     // Helper struct for intermediate tensors
     struct IntermediateTensors {

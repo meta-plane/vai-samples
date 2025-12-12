@@ -806,6 +806,8 @@ layout(push_constant) uniform PushConstants {
     int B, H, S_q, S_kv, HD;
     float scale;
     int cache_len;
+    int k_num;      // Number of splits (1 = no split, >1 = split-k mode)
+    int split_kv;   // KV positions per split
 };
 
 // Shared memory for Q and reductions
@@ -825,6 +827,21 @@ void main() {
     const float NEG_FLT_MAX_OVER_2 = uintBitsToFloat(0xFEFFFFFF);
     const int Bc = 32;  // Process 32 KV positions per iteration
 
+    // =========================================================================
+    // Split-K index calculation (matching llama.cpp init_indices)
+    // =========================================================================
+    uint split_k_index = 0;
+    int start_j = 0;
+    int num_blocks = (S_kv + Bc - 1) / Bc;
+    int end_j = num_blocks;
+
+    if (k_num > 1) {
+        split_k_index = gl_WorkGroupID.z;
+        start_j = int(split_k_index) * split_kv / Bc;
+        int end_kv = min(S_kv, int(split_k_index + 1) * split_kv);
+        end_j = (end_kv + Bc - 1) / Bc;
+    }
+
     // Load Q into shared memory
     for (int d = int(tid); d < HD; d += 32) {
         s_Q[d] = q[q_offset + d] * scale;  // Apply scale during load
@@ -840,9 +857,8 @@ void main() {
     }
 
     // Process KV in blocks of Bc=32
-    const int num_blocks = (S_kv + Bc - 1) / Bc;
 
-    for (int j = 0; j < num_blocks; ++j) {
+    for (int j = start_j; j < end_j; ++j) {
         const int kv_idx = j * Bc + int(tid);
 
         // Compute attention score for this KV position
@@ -943,14 +959,128 @@ void main() {
         barrier();
     }
 
-    // Thread 0 writes final normalized output
+    // Thread 0 writes output
     if (tid == 0) {
+        // N = total number of rows (query positions)
+        const int n = int(bh * S_q + sq);  // Row index
+        const int N = B * H * S_q;          // Total rows
+
+        // =====================================================================
+        // If there is split_k, store partial O, L, M for later reduction
+        // (matching llama.cpp flash_attn.comp lines 319-341)
+        // =====================================================================
+        if (k_num > 1) {
+            // O layout: [k_num][N][HD]
+            int o_offset = int(split_k_index) * N * HD + n * HD;
+            for (int d = 0; d < HD; ++d) {
+                ctx[o_offset + d] = Of[d];
+            }
+
+            // L, M layout: after O data, [k_num][N*2] with L then M
+            int lm_base = k_num * N * HD;
+            int lm_stride = N * 2;
+            ctx[lm_base + int(split_k_index) * lm_stride + n] = Lf;
+            ctx[lm_base + int(split_k_index) * lm_stride + N + n] = Mf;
+
+            return;  // Early return for split-k
+        }
+
+        // k_num == 1: direct normalized output
         float Lfrcp = (Lf == 0.0) ? 0.0 : (1.0 / Lf);
         const int out_offset = int(bh * S_q * HD + sq * HD);
 
         for (int d = 0; d < HD; ++d) {
             ctx[out_offset + d] = Of[d] * Lfrcp;
         }
+    }
+}
+)";
+
+// ============================================================================
+// Split-K Reduce Shader (ported from llama.cpp flash_attn_split_k_reduce.comp)
+// ============================================================================
+
+const char* src_flash_attn_reduce = R"(
+// Combines partial O, L, M from k_num splits
+// Each workgroup handles one row (query position)
+#version 450
+
+layout(local_size_x = 32, local_size_y = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer A { float data_a[]; };  // Partials
+layout(set = 0, binding = 1) writeonly buffer D { float data_d[]; }; // Output
+
+layout(push_constant) uniform parameter {
+    int HD;     // Head dimension
+    int N;      // Total rows (B * H * S_q)
+    int k_num;  // Number of splits
+};
+
+shared float tmpsh[32];
+
+void main() {
+    const uint n = gl_WorkGroupID.x;  // Row index
+    const uint tid = gl_LocalInvocationID.x;
+
+    // L, M layout: after O data [k_num][N][HD]
+    // Then [k_num][N*2] with L then M interleaved
+    int lm_base = k_num * N * HD;
+    int l_offset = lm_base + int(n);
+    int m_offset = lm_base + N + int(n);
+    int lm_stride = N * 2;
+
+    // Step 1: Compute max M across all splits
+    float m_max = uintBitsToFloat(0xFEFFFFFF);  // -FLT_MAX/2
+    for (int k = int(tid); k < k_num; k += 32) {
+        float m = data_a[m_offset + k * lm_stride];
+        m_max = max(m_max, m);
+    }
+
+    // Reduce m_max across workgroup
+    tmpsh[tid] = m_max;
+    barrier();
+    for (int s = 16; s > 0; s >>= 1) {
+        if (tid < uint(s)) {
+            m_max = max(m_max, tmpsh[tid + s]);
+            tmpsh[tid] = m_max;
+        }
+        barrier();
+    }
+    m_max = tmpsh[0];
+    barrier();
+
+    // Step 2: Compute total L = sum(exp(m_k - m_max) * l_k)
+    float L = 0.0;
+    for (int k = int(tid); k < k_num; k += 32) {
+        float l = data_a[l_offset + k * lm_stride];
+        float m = data_a[m_offset + k * lm_stride];
+        L += exp(m - m_max) * l;
+    }
+
+    // Reduce L across workgroup
+    tmpsh[tid] = L;
+    barrier();
+    for (int s = 16; s > 0; s >>= 1) {
+        if (tid < uint(s)) {
+            L += tmpsh[tid + s];
+            tmpsh[tid] = L;
+        }
+        barrier();
+    }
+    L = tmpsh[0];
+    float Lrcp = (L == 0.0) ? 0.0 : (1.0 / L);
+
+    // Step 3: Compute final O for each dimension
+    for (int d = int(tid); d < HD; d += 32) {
+        float O = 0.0;
+        for (int k = 0; k < k_num; ++k) {
+            int o_offset = k * N * HD + int(n) * HD + d;
+            float m = data_a[m_offset + k * lm_stride];
+            O += exp(m - m_max) * data_a[o_offset];
+        }
+        O *= Lrcp;
+
+        data_d[int(n) * HD + d] = O;
     }
 }
 )";
@@ -989,6 +1119,7 @@ MultiHeadAttentionNode::MultiHeadAttentionNode(uint32_t d_in, uint32_t d_out, ui
     maskPipelineCached = requestPipeline(src_causal_mask_cached);
     weightedSumPipelineCached = requestPipeline(src_weighted_sum_cached);
     flashAttentionKVCache = requestPipeline(src_flash_attention_kvcache);
+    flashAttentionReduce = requestPipeline(src_flash_attn_reduce);
 
     // Create descriptor sets
     qkvProjDescSet = qkvProjection.descSetLayout(0).newDescSet(gDestSetPool);
@@ -1009,6 +1140,7 @@ MultiHeadAttentionNode::MultiHeadAttentionNode(uint32_t d_in, uint32_t d_out, ui
     weightedSumCachedDescSet = weightedSumPipelineCached.descSetLayout(0).newDescSet(gDestSetPool);
     combineDescSet = combineHeads.descSetLayout(0).newDescSet(gDestSetPool);
     flashAttnDescSet = flashAttentionKVCache.descSetLayout(0).newDescSet(gDestSetPool);
+    flashAttnReduceDescSet = flashAttentionReduce.descSetLayout(0).newDescSet(gDestSetPool);
 
     // Output projection pipeline and descriptor set (used in both modes)
     outputProjection = requestPipeline(src_linear);
@@ -1151,20 +1283,88 @@ void MultiHeadAttentionNode::run(CommandBuffer cmdBuff)
             });
 
             float scale = 1.0f / std::sqrt(static_cast<float>(HD));
+            
+            // Split-K parameters (matching llama.cpp)
+            int k_num = 1;     // Number of splits (1 = no split)
+            int split_kv = total_S;  // KV positions per split
+            
+            // Enable Split-K for long sequences (threshold: 256 KV positions)
+            const int SPLIT_K_THRESHOLD = 256;
+            if (total_S >= SPLIT_K_THRESHOLD) {
+                k_num = (total_S + SPLIT_K_THRESHOLD - 1) / SPLIT_K_THRESHOLD;
+                k_num = std::min(k_num, 8);  // Cap at 8 splits
+                split_kv = (total_S + k_num - 1) / k_num;
+            }
+            
             struct {
                 int B, H, S_q, S_kv, HD;
                 float scale;
                 int cache_len;
+                int k_num;
+                int split_kv;
             } constants = {
-                (int)B, (int)H, (int)new_S, (int)total_S, (int)HD, scale, (int)cache_len
+                (int)B, (int)H, (int)new_S, (int)total_S, (int)HD, scale, (int)cache_len, k_num, split_kv
             };
 
-            // Dispatch: (B*H, S_q) workgroups, each with 32 threads (llama.cpp style)
-            cmdBuff.bindPipeline(flashAttentionKVCache)
-                   .setPushConstants(0, sizeof(constants), &constants)
-                   .bindDescSets({flashAttnDescSet})
-                   .dispatch0(B * H, new_S)
-                   .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / tensors.context.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+            // Dispatch: workgroups depend on split-k mode
+            if (k_num == 1) {
+                // No split-k: direct output to tensors.context
+                cmdBuff.bindPipeline(flashAttentionKVCache)
+                       .setPushConstants(0, sizeof(constants), &constants)
+                       .bindDescSets({flashAttnDescSet})
+                       .dispatch0(B * H, new_S)
+                       .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / tensors.context.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+            } else {
+                // Split-k mode: need partials buffer
+                BufferPool& pool = BufferPool::get();
+                int N = B * H * new_S;  // Total query positions
+                
+                // Partials buffer: O[k_num][N][HD] + L[k_num][N] + M[k_num][N]
+                size_t partials_size = (k_num * N * HD + k_num * N * 2) * sizeof(float);
+                Buffer partialsBuffer = pool.requestBuffer(netGlobalDevice, 
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, 
+                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 
+                    partials_size);
+                
+                // Update flash attention desc set to write to partials
+                flashAttnDescSet.write({
+                    partialsBuffer,  // Write partials here instead of context
+                    Q_reshaped.buffer(),
+                    tensors.K_full.buffer(),
+                    tensors.V_full.buffer()
+                });
+                
+                // Flash Attention: write partial O, L, M
+                cmdBuff.bindPipeline(flashAttentionKVCache)
+                       .setPushConstants(0, sizeof(constants), &constants)
+                       .bindDescSets({flashAttnDescSet})
+                       .dispatch0(B * H, new_S, k_num)
+                       .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / partialsBuffer / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+                
+                // Reduce: combine partials into final output
+                flashAttnReduceDescSet.write({
+                    partialsBuffer,           // Input: partials
+                    tensors.context.buffer()  // Output: final context
+                });
+                
+                struct {
+                    int HD, N, k_num;
+                } reduceConstants = { (int)HD, N, k_num };
+                
+                cmdBuff.bindPipeline(flashAttentionReduce)
+                       .setPushConstants(0, sizeof(reduceConstants), &reduceConstants)
+                       .bindDescSets({flashAttnReduceDescSet})
+                       .dispatch0(N)  // One workgroup per row
+                       .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / tensors.context.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+                
+                // Restore flash attention desc set for next iteration
+                flashAttnDescSet.write({
+                    tensors.context.buffer(),
+                    Q_reshaped.buffer(),
+                    tensors.K_full.buffer(),
+                    tensors.V_full.buffer()
+                });
+            }
         } else {
             // Standard 4-pass attention for batch processing
             computeAttentionScoresCached(cmdBuff, Q_reshaped, tensors.K_full, tensors.scores, B, H, new_S, total_S, HD);
