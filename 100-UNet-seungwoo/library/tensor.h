@@ -5,6 +5,7 @@
 #include "jsonParser.h"
 #include "vulkanApp.h"
 #include "error.h"
+#include "../safeTensor/safeTensorsParser.h"
 #include <memory>
 #include <vector>
 #include <map>
@@ -109,7 +110,14 @@ public:
         set(json.parseNDArray(_shape));
         _isConstant = true;
     }
-    
+
+    Tensor(const SafeTensorsParserRef& safetensors) : _data(std::make_shared<TensorData>())
+    {
+        _shape = safetensors.getShape();
+        set(safetensors.parseNDArray());
+        _isConstant = true;
+    }
+
     Tensor() = default;
     Tensor(const Tensor&) = default;
     Tensor(Tensor&&) = default;

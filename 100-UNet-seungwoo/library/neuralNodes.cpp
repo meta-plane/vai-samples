@@ -541,8 +541,8 @@ void main()
 Device netGlobalDevice = VulkanApp::get().device();
 
 static DescriptorPool gDestSetPool = netGlobalDevice.createDescriptorPool({
-    .maxTypes = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER <= 200}, 
-    .maxSets = 100
+    .maxTypes = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER <= 20000}, 
+    .maxSets = 2000
 });
 
 
@@ -586,7 +586,7 @@ void loadShaders()
 
 //Concat 기준은 무조건 0 뒤에 붙이는 걸로 한다
 ConCatNode::ConCatNode(uint32_t dim)
-    :dim_(dim)
+    : dim_(dim)
 {
     addSlot("in0", NodeSlot::input);
     addSlot("in1", NodeSlot::input);
@@ -601,25 +601,32 @@ void ConCatNode::prepare()
     const auto& s0 = (*this)["in0"].shape();
     const auto& s1 = (*this)["in1"].shape();
 
+    // HWC 전제: [H, W, C]
+    _ASSERT(s0.size() == 3);
+    _ASSERT(s1.size() == 3);
     _ASSERT(s0.size() == s1.size());
-    _ASSERT(dim_ >= 0 && dim_ < (int)s0.size());
+    _ASSERT(dim_ < s0.size());       // dim_ ∈ {0(H), 1(W), 2(C)}
 
     size_t ndim = s0.size();
-    std::vector<uint32_t> out_shape(ndim);
+    std::vector<uint32_t> out_shape;
+    out_shape.reserve(ndim);
 
-    for (size_t i; i < ndim; ++i) 
+    for (size_t i = 0; i < ndim; ++i)
     {
-        if (i == dim_) 
+        if (i == dim_)
         {
-            out_shape.emplace_back(s0[i] + s1[i]);
+            // concat 축(H/W/C) → 둘의 크기를 더함
+            out_shape.push_back(s0[i] + s1[i]);
         }
-        else 
+        else
         {
+            // 다른 축은 동일해야 함
             _ASSERT(s0[i] == s1[i]);
             out_shape.push_back(s0[i]);
         }
     }
 
+    // out0도 HWC 유지
     (*this)["out0"] = Tensor(out_shape);
 }
 
@@ -630,23 +637,24 @@ void ConCatNode::run(CommandBuffer cmdBuff)
     const auto& out = (*this)["out0"].shape();
 
     const uint32_t rank = s0.size();
+    _ASSERT(rank == 3); // [H, W, C]
 
-    uint32_t outer_size = 1;            // Concat 축 이전 차원들의 곱 (없으면 1)
-    uint32_t inner_size = 1;            // Concat 축 이후 차원들의 곱 (없으면 1)
-    uint32_t axis_dim0 = s0[dim_];      // 입력 0의 Concat 축 크기
-    uint32_t axis_dim1 = s1[dim_];      // 입력 1의 Concat 축 크기
-    uint32_t total = outer_size * (axis_dim0 + axis_dim1) * inner_size;
+    // HWC 전제이지만, flatten할 때는 다시 [Outer, Axis, Inner] 개념으로 바꿔서 보냄
+    uint32_t outer_size = 1; // concat 축 이전 차원들의 곱 (없으면 1)
+    uint32_t inner_size = 1; // concat 축 이후 차원들의 곱 (없으면 1)
+    uint32_t axis_dim0 = s0[dim_];
+    uint32_t axis_dim1 = s1[dim_];
+
     // Outer: Axis 이전 차원들의 곱
-    for (int i = 0; i < dim_; ++i) 
-    {
-        outer_size *= static_cast<uint32_t>(s0[i]);
-    }
+    for (int i = 0; i < (int)dim_; ++i)
+        outer_size *= s0[i];
 
     // Inner: Axis 이후 차원들의 곱
-    for (int i = dim_ + 1; i < rank; ++i) 
-    {
-        inner_size *= static_cast<uint32_t>(s0[i]);
-    }
+    for (int i = (int)dim_ + 1; i < (int)rank; ++i)
+        inner_size *= s0[i];
+
+    uint32_t axis_total = axis_dim0 + axis_dim1;
+    uint32_t total = outer_size * axis_total * inner_size;
 
     concatDescSet.write({
         (*this)["out0"].buffer(),
@@ -654,13 +662,19 @@ void ConCatNode::run(CommandBuffer cmdBuff)
         (*this)["in1"].buffer(),
         });
 
-    struct { int outer_size, inner_size, axis_dim0, axis_dim1; } push{ int(outer_size), int(inner_size), int(axis_dim0), int(axis_dim1) };
+    struct PushConsts {
+        uint32_t outer_size;
+        uint32_t inner_size;
+        uint32_t axis_dim0;
+        uint32_t axis_dim1;
+    } push{ outer_size, inner_size, axis_dim0, axis_dim1 };
 
     cmdBuff
         .bindPipeline(concat)
         .bindDescSets({ concatDescSet })
         .setPushConstants(0, sizeof(push), &push)
-        .dispatch(CEIL_DIV(total, 64))
+        // local_size_x = 256 → 256으로 나눠야 함
+        .dispatch(CEIL_DIV(total, 256))
         .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["out0"].buffer()
@@ -672,14 +686,112 @@ void ConCatNode::run(CommandBuffer cmdBuff)
 // ConvTransposeNode
 /////////////////////////////////////////////////////////////////////////////////////////
 
-ConvTransposeNode::ConvTransposeNode(uint32_t inChannels, uint32_t outChannels, uint32_t kernelWidth)
+ConvTransposeNode::ConvTransposeNode(uint32_t inChannels,
+    uint32_t outChannels,
+    uint32_t kernelSize,
+    uint32_t stride,
+    uint32_t padding)
+    : C_in(inChannels)
+    , C_out(outChannels)
+    , K(kernelSize)
+    , S(stride)
+    , P(padding)
 {
-    addSlot("in0", NodeSlot::input);
-    addSlot("out0", NodeSlot::output);
+    addSlot("in0", NodeSlot::input);   // [C_in, H_in, W_in]
+    addSlot("out0", NodeSlot::output);  // [C_out, H_out, W_out]
+    addSlot("weight", NodeSlot::input);   // [C_in*K*K, C_out]
+    addSlot("bias", NodeSlot::input);   // [C_out]
+
+    convtranspose = requestPipeline(src_conv_transpose);
+    convtransposeDescSet = convtranspose.descSetLayout(0).newDescSet(gDestSetPool);
 }
 
-void ConvTransposeNode::prepare() {}
-void ConvTransposeNode::run(CommandBuffer cmdBuff) {}
+void ConvTransposeNode::prepare()
+{
+    // in0: [H_in, W_in, C_in]
+    const auto& inShape = (*this)["in0"].shape();
+    _ASSERT(inShape.size() == 3);
+    uint32_t h_in = inShape[0];
+    uint32_t w_in = inShape[1];
+    uint32_t c_in = inShape[2];
+
+    _ASSERT(c_in == C_in);
+
+    // weight: [C_in*K*K, C_out]  (파이썬 conv_to_vkB와 일치)
+    _ASSERT((*this)["weight"].isShapeOf(C_in * K * K, C_out));
+
+    // bias: [C_out]
+    _ASSERT((*this)["bias"].isShapeOf(C_out));
+
+    // ConvTranspose2D 출력 크기 공식 (PyTorch ConvTranspose2d와 동일)
+    uint32_t h_out = (h_in - 1) * S - 2 * P + K;
+    uint32_t w_out = (w_in - 1) * S - 2 * P + K;
+
+    // out0: [H_out, W_out, C_out]  ← HWC 고정
+    (*this)["out0"] = Tensor(h_out, w_out, C_out);
+}
+
+void ConvTransposeNode::run(CommandBuffer cmdBuff)
+{
+    const auto& in = (*this)["in0"].shape();
+    const auto& out = (*this)["out0"].shape();
+
+    _ASSERT(in.size() == 3);
+    _ASSERT(out.size() == 3);
+
+    // HWC 레이아웃
+    uint32_t h_in = in[0];
+    uint32_t w_in = in[1];
+    uint32_t c_in = in[2];
+
+    uint32_t h_out = out[0];
+    uint32_t w_out = out[1];
+    uint32_t c_out = out[2];
+
+    _ASSERT(c_in == C_in);
+    _ASSERT(c_out == C_out);
+
+    convtransposeDescSet.write({
+        (*this)["out0"].buffer(),
+        (*this)["in0"].buffer(),
+        (*this)["weight"].buffer(),
+        (*this)["bias"].buffer(),
+        });
+
+    struct PushConsts
+    {
+        int C_in;
+        int H_in;
+        int W_in;
+        int C_out;
+        int H_out;
+        int W_out;
+        int K;
+        int stride;
+        int padding;
+    } push{
+        (int)c_in,  (int)h_in,  (int)w_in,
+        (int)c_out, (int)h_out, (int)w_out,
+        (int)K,     (int)S,     (int)P
+    };
+
+    cmdBuff
+        .bindPipeline(convtranspose)
+        .bindDescSets({ convtransposeDescSet })
+        .setPushConstants(0, sizeof(push), &push)
+        // local_size_x = 8, local_size_y = 8, local_size_z = 4
+        // 여기서는 x = H_out, y = W_out, z = C_out 로 사용
+        .dispatch(
+            CEIL_DIV(h_out, 8),
+            CEIL_DIV(w_out, 8),
+            CEIL_DIV(c_out, 4)
+        )
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["out0"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // BatchNormNode
@@ -688,17 +800,95 @@ void ConvTransposeNode::run(CommandBuffer cmdBuff) {}
 BatchNormNode::BatchNormNode()
 {
     addSlot("in0", NodeSlot::input);
+
+    addSlot("gamma", NodeSlot::input);      // weight (scale), shape [C]
+    addSlot("beta", NodeSlot::input);       // bias (shift),  shape [C]
+    addSlot("mean", NodeSlot::input);       // running_mean,  shape [C]
+    addSlot("variance", NodeSlot::input);   // running_var,   shape [C]
+
     addSlot("out0", NodeSlot::output);
+
+    bacthnrom = requestPipeline(src_batchnorm);
+    bacthnromDescSet = bacthnrom.descSetLayout(0).newDescSet(gDestSetPool);
 }
 
-void BatchNormNode::prepare() {}
-void BatchNormNode::run(CommandBuffer cmdBuff) {}
+void BatchNormNode::prepare()
+{
+    _ASSERT((*this)["in0"].validShape());
+
+    const auto& inShape = (*this)["in0"].shape();
+    _ASSERT(inShape.size() == 3); // [H, W, C]
+
+    uint32_t H = inShape[0];
+    uint32_t W = inShape[1];
+    uint32_t C = inShape[2];
+
+    // 파라미터 텐서들이 채널 크기와 일치하는지 체크
+    _ASSERT((*this)["gamma"].isShapeOf(C));
+    _ASSERT((*this)["beta"].isShapeOf(C));
+    _ASSERT((*this)["mean"].isShapeOf(C));
+    _ASSERT((*this)["variance"].isShapeOf(C));
+
+    // 출력은 입력과 동일한 [H, W, C]
+    (*this)["out0"] = Tensor(inShape);
+}
+
+void BatchNormNode::run(CommandBuffer cmdBuff)
+{
+    const auto& inShape = (*this)["in0"].shape();
+
+    _ASSERT(inShape.size() == 3); // [H, W, C]
+
+    // HWC 레이아웃
+    uint32_t H = inShape[0];
+    uint32_t W = inShape[1];
+    uint32_t C = inShape[2];
+
+    int totalElems = 1;
+    for (int dim : inShape)
+        totalElems *= dim;  // = H * W * C
+
+    bacthnromDescSet.write({
+        (*this)["out0"].buffer(),
+        (*this)["in0"].buffer(),
+        (*this)["gamma"].buffer(),
+        (*this)["beta"].buffer(),
+        (*this)["mean"].buffer(),
+        (*this)["variance"].buffer(),
+        });
+
+    // 쉐이더쪽 push constant와 구조체 맞추기 (C, H, W, eps)
+    struct PushConsts
+    {
+        int C;
+        int H;
+        int W;
+        float eps;
+    } push{
+        (int)C,
+        (int)H,
+        (int)W,
+        1e-5f // epsilon (필요하면 ctor 인자로 뽑아도 됨)
+    };
+
+    cmdBuff
+        .bindPipeline(bacthnrom)
+        .bindDescSets({ bacthnromDescSet })
+        .setPushConstants(0, sizeof(push), &push)
+        // 전체 element 수만큼 1D dispatch (local_size_x=64)
+        .dispatch(CEIL_DIV(totalElems, 64))
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["out0"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // ConvolutionNode
 /////////////////////////////////////////////////////////////////////////////////////////
 ConvolutionNode::ConvolutionNode(uint32_t inChannels, uint32_t outChannels, uint32_t kernelWidth)
-:  C(inChannels), F(outChannels), K(kernelWidth)
+    : C(inChannels), F(outChannels), K(kernelWidth)
 {
     _ASSERT(K % 2 == 1);
     addSlot("in0", NodeSlot::input);
@@ -709,7 +899,7 @@ ConvolutionNode::ConvolutionNode(uint32_t inChannels, uint32_t outChannels, uint
 
     im2col = requestPipeline(src_im2col);
     im2colDescSet = im2col.descSetLayout(0).newDescSet(gDestSetPool);
-    
+
     const char* gemmSrc = src_gemm_shared;
 
     gemm = requestPipeline(gemmSrc);
@@ -720,7 +910,7 @@ ConvolutionNode::ConvolutionNode(uint32_t inChannels, uint32_t outChannels, uint
 void ConvolutionNode::prepare()
 {
     _ASSERT((*this)["in0"].isShapeOf(-1, -1, C));
-    _ASSERT((*this)["weight"].isShapeOf(C*K*K, F));
+    _ASSERT((*this)["weight"].isShapeOf(C*K*K,F));
     _ASSERT((*this)["bias"].isShapeOf(F));
 
     const auto& inShape = (*this)["in0"].shape();

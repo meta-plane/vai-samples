@@ -143,7 +143,7 @@ void test()
     loadShaders();
 
     const uint32_t channels = 1;
-    auto [srcImage, width, height] = readImage<channels>(PROJECT_ROOT_DIR"/data/0.png");
+    auto [srcImage, width, height] = readImage<channels>(PROJECT_ROOT_DIR"/11-mnist-refactor/0.png");
     _ASSERT(width == 28 && height == 28);
     _ASSERT(width * height * channels == srcImage.size());
 

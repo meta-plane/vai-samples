@@ -20,7 +20,41 @@ public:
 
 	Tensor& operator[](const std::string& name)
 	{
-		return (*this)[name];
+		// 1. Convolution 파라미터
+		if (name == "weight")
+		{
+			return conv_["weight"];
+		}
+		else if (name == "bias")
+		{
+			// Conv에 bias가 있다면 반환, 없다면 예외 처리 필요
+			return conv_["bias"];
+		}
+
+		//// 2. BatchNorm 파라미터 (일반적인 BN 파라미터 매핑)
+		// Gamma (Scale Factor)
+		else if (name == "gamma")
+		{
+			return bn_["gamma"]; // 보통 BN 노드 내부는 weight라는 키를 사용할 가능성이 높음
+		}
+		// Beta (Shift Factor)
+		else if (name == "beta")
+		{
+			return bn_["beta"];   // 보통 BN 노드 내부는 bias라는 키를 사용할 가능성이 높음
+		}
+		// Running Mean
+		else if (name == "mean")
+		{
+			return bn_["mean"];
+		}
+		// Running Variance
+		else if (name == "variance")
+		{
+			return bn_["variance"];
+		}
+
+		// 3. 예외 처리: 알 수 없는 키가 들어온 경우
+		throw std::runtime_error("ConvBnRelu: Unknown parameter name '" + name + "'");
 	}
 };
 
@@ -42,6 +76,30 @@ public:
 
 	Tensor& operator[](const std::string& name)
 	{
-		return (*this)[name];
+		// 구분자 "." 의 위치를 찾음
+		size_t delimiterPos = name.find(".");
+
+		if (delimiterPos == std::string::npos)
+		{
+			throw std::runtime_error("DoubleConvBnRelu: Invalid key format. Use 'prefix.param' (e.g., '0.weight')");
+		}
+
+		// 접두어(Prefix)와 나머지 이름(SubName) 분리
+		std::string prefix = name.substr(0, delimiterPos); // "0" or "1"
+		std::string subName = name.substr(delimiterPos + 1); // "weight", "gamma" ...
+
+		// 접두어에 따라 하위 블록의 operator[] 호출 (재귀적 구조)
+		if (prefix == "0")
+		{
+			return conv1_[subName];
+		}
+		else if (prefix == "1")
+		{
+			return conv2_[subName];
+		}
+		else
+		{
+			throw std::runtime_error("DoubleConvBnRelu: Unknown block prefix '" + prefix + "'");
+		};
 	}
 };
