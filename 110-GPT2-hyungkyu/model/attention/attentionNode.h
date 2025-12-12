@@ -86,6 +86,7 @@ class MultiHeadAttentionNode : public Node
     ComputePipeline scoresPipelineCached; // Attention scores with different K/V lengths
     ComputePipeline maskPipelineCached;   // Causal mask for cached attention
     ComputePipeline weightedSumPipelineCached; // Weighted sum for cached attention
+    ComputePipeline flashAttentionKVCache; // Flash Attention for KV cache mode (fused, memory-efficient)
 
     // Descriptor sets
     DescriptorSet qkvProjDescSet;
@@ -107,6 +108,7 @@ class MultiHeadAttentionNode : public Node
     DescriptorSet combineDescSet;
     DescriptorSet outProjDescSet;
     DescriptorSet outProjDescSetGEMV;     // For GEMV output projection (M=1)
+    DescriptorSet flashAttnDescSet;       // For Flash Attention KV cache mode
 
     // Helper struct for intermediate tensors
     struct IntermediateTensors {
@@ -162,6 +164,16 @@ public:
      * Disable KV caching
      */
     void disableCache();
+
+    /**
+     * Get number of attention heads
+     */
+    uint32_t getNumHeads() const { return num_heads; }
+
+    /**
+     * Get head dimension
+     */
+    uint32_t getHeadDim() const { return head_dim; }
 
     /**
      * Check if caching is enabled

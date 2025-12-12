@@ -360,14 +360,8 @@ void FeedForwardNode::runLinear1(CommandBuffer& cmdBuff, const Tensor& input, Te
                                    uint32_t B, uint32_t S, uint32_t D, uint32_t H)
 {
     uint32_t M = B * S;
-    static bool first_call = true;
-
     if (M == 1) {
         // GEMV path: Use optimized kernel for M=1
-        if (first_call) {
-            printf("[DEBUG] FeedForwardNode::runLinear1 using GEMV path (M=%u, K=%u, N=%u)\n", M, D, H);
-            first_call = false;
-        }
         linear1DescSetGEMV.write({
             hidden.buffer(),
             input.buffer(),

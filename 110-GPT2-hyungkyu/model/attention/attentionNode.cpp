@@ -785,6 +785,176 @@ void main() {
 }
 )";
 
+// ============================================================================
+// Flash Attention KV Cache Shader (llama.cpp scalar path style)
+// ============================================================================
+
+const char* src_flash_attention_kvcache = R"(
+// Accurate port of llama.cpp Flash Attention for KV cache mode
+// Simplified for: Br=1 (single query), FP32, no quantization
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+
+layout(local_size_x = 32, local_size_y = 1) in;
+
+layout(set = 0, binding = 0) buffer Context { float ctx[]; };
+layout(set = 0, binding = 1) buffer Q { float q[]; };
+layout(set = 0, binding = 2) buffer K { float k[]; };
+layout(set = 0, binding = 3) buffer V { float v[]; };
+
+layout(push_constant) uniform PushConstants {
+    int B, H, S_q, S_kv, HD;
+    float scale;
+    int cache_len;
+};
+
+// Shared memory for Q and reductions
+shared float s_Q[64];  // HD=64
+shared float tmpsh[32];  // For reduction
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint bh = gl_WorkGroupID.x;
+    const uint sq = gl_WorkGroupID.y;
+
+    if (bh >= B * H || sq >= S_q) return;
+
+    const int q_abs_pos = cache_len + int(sq);
+    const int q_offset = int(bh * S_q * HD + sq * HD);
+
+    const float NEG_FLT_MAX_OVER_2 = uintBitsToFloat(0xFEFFFFFF);
+    const int Bc = 32;  // Process 32 KV positions per iteration
+
+    // Load Q into shared memory
+    for (int d = int(tid); d < HD; d += 32) {
+        s_Q[d] = q[q_offset + d] * scale;  // Apply scale during load
+    }
+    barrier();
+
+    // Initialize accumulation variables (Br=1, so no array needed)
+    float Lf = 0.0;  // Sum of exp(scores - max)
+    float Mf = NEG_FLT_MAX_OVER_2;  // Running max
+    float Of[64];  // Output accumulation
+    for (int d = 0; d < HD; ++d) {
+        Of[d] = 0.0;
+    }
+
+    // Process KV in blocks of Bc=32
+    const int num_blocks = (S_kv + Bc - 1) / Bc;
+
+    for (int j = 0; j < num_blocks; ++j) {
+        const int kv_idx = j * Bc + int(tid);
+
+        // Compute attention score for this KV position
+        float Sf = 0.0;  // Score for this thread
+        if (kv_idx < S_kv && kv_idx <= q_abs_pos) {
+            const int k_offset = int(bh * S_kv * HD + kv_idx * HD);
+            for (int d = 0; d < HD; ++d) {
+                Sf += s_Q[d] * k[k_offset + d];
+            }
+        } else {
+            Sf = NEG_FLT_MAX_OVER_2;  // Out of bounds
+        }
+
+        // Compute rowmax across this block (within thread's view)
+        // Each thread has computed one score, no need to max locally
+        float rowmaxf = Sf;
+
+        // Save old max
+        float Moldf = Mf;
+
+        // Update max
+        Mf = max(rowmaxf, Moldf);
+
+        // Compute softmax probability
+        float Pf = exp(Sf - Mf);
+
+        // Compute rescale factor
+        float eMf = exp(Moldf - Mf);
+
+        // Update sum
+        Lf = eMf * Lf + Pf;
+
+        // Rescale previous output
+        for (int d = 0; d < HD; ++d) {
+            Of[d] = eMf * Of[d];
+        }
+
+        // Accumulate weighted V
+        if (kv_idx < S_kv && kv_idx <= q_abs_pos) {
+            const int v_offset = int(bh * S_kv * HD + kv_idx * HD);
+            for (int d = 0; d < HD; ++d) {
+                Of[d] += Pf * v[v_offset + d];
+            }
+        }
+    }
+
+    // Final reduction across threads using shared memory tree reduction
+    // This matches llama.cpp's approach (lines 261-314)
+
+    // Reduce Mf (max)
+    tmpsh[tid] = Mf;
+    barrier();
+    for (int s = 16; s > 0; s >>= 1) {
+        if (tid < s) {
+            tmpsh[tid] = max(tmpsh[tid], tmpsh[tid + s]);
+        }
+        barrier();
+    }
+    float rowmaxf = tmpsh[0];
+    barrier();
+
+    // Rescale based on global max
+    float Moldf = Mf;
+    Mf = max(rowmaxf, Moldf);
+    float eMf = exp(Moldf - Mf);
+    Lf = eMf * Lf;
+
+    // Reduce Lf (sum)
+    tmpsh[tid] = Lf;
+    barrier();
+    for (int s = 16; s > 0; s >>= 1) {
+        if (tid < s) {
+            tmpsh[tid] = tmpsh[tid] + tmpsh[tid + s];
+        }
+        barrier();
+    }
+    Lf = tmpsh[0];
+    barrier();
+
+    // Reduce Of (output) - accumulate across threads
+    for (int d = 0; d < HD; ++d) {
+        // Rescale and reduce this dimension
+        float val = eMf * Of[d];
+        tmpsh[tid] = val;
+        barrier();
+
+        // Tree reduction for this dimension
+        for (int s = 16; s > 0; s >>= 1) {
+            if (tid < s) {
+                tmpsh[tid] = tmpsh[tid] + tmpsh[tid + s];
+            }
+            barrier();
+        }
+
+        if (tid == 0) {
+            Of[d] = tmpsh[0];
+        }
+        barrier();
+    }
+
+    // Thread 0 writes final normalized output
+    if (tid == 0) {
+        float Lfrcp = (Lf == 0.0) ? 0.0 : (1.0 / Lf);
+        const int out_offset = int(bh * S_q * HD + sq * HD);
+
+        for (int d = 0; d < HD; ++d) {
+            ctx[out_offset + d] = Of[d] * Lfrcp;
+        }
+    }
+}
+)";
+
 MultiHeadAttentionNode::MultiHeadAttentionNode(uint32_t d_in, uint32_t d_out, uint32_t num_heads)
     : d_in(d_in), d_out(d_out), num_heads(num_heads)
 {
@@ -818,6 +988,7 @@ MultiHeadAttentionNode::MultiHeadAttentionNode(uint32_t d_in, uint32_t d_out, ui
     scoresPipelineCached = requestPipeline(src_attention_scores_cached);
     maskPipelineCached = requestPipeline(src_causal_mask_cached);
     weightedSumPipelineCached = requestPipeline(src_weighted_sum_cached);
+    flashAttentionKVCache = requestPipeline(src_flash_attention_kvcache);
 
     // Create descriptor sets
     qkvProjDescSet = qkvProjection.descSetLayout(0).newDescSet(gDestSetPool);
@@ -837,6 +1008,7 @@ MultiHeadAttentionNode::MultiHeadAttentionNode(uint32_t d_in, uint32_t d_out, ui
     weightedSumDescSet = weightedSum.descSetLayout(0).newDescSet(gDestSetPool);
     weightedSumCachedDescSet = weightedSumPipelineCached.descSetLayout(0).newDescSet(gDestSetPool);
     combineDescSet = combineHeads.descSetLayout(0).newDescSet(gDestSetPool);
+    flashAttnDescSet = flashAttentionKVCache.descSetLayout(0).newDescSet(gDestSetPool);
 
     // Output projection pipeline and descriptor set (used in both modes)
     outputProjection = requestPipeline(src_linear);
@@ -968,10 +1140,38 @@ void MultiHeadAttentionNode::run(CommandBuffer cmdBuff)
         }
 
         // Step 5: Compute attention with cached K, V
-        computeAttentionScoresCached(cmdBuff, Q_reshaped, tensors.K_full, tensors.scores, B, H, new_S, total_S, HD);
-        applyCausalMaskCached(cmdBuff, tensors.scores, B, H, new_S, total_S, cache_len);
-        computeSoftmaxCached(cmdBuff, tensors, B, H, new_S, total_S);
-        computeWeightedSumCached(cmdBuff, tensors, B, H, new_S, total_S, HD);
+        // Flash Attention: Enabled (with barrier fix)
+        if (new_S == 1) {
+            // Flash Attention path (autoregressive only)
+            flashAttnDescSet.write({
+                tensors.context.buffer(),
+                Q_reshaped.buffer(),
+                tensors.K_full.buffer(),
+                tensors.V_full.buffer()
+            });
+
+            float scale = 1.0f / std::sqrt(static_cast<float>(HD));
+            struct {
+                int B, H, S_q, S_kv, HD;
+                float scale;
+                int cache_len;
+            } constants = {
+                (int)B, (int)H, (int)new_S, (int)total_S, (int)HD, scale, (int)cache_len
+            };
+
+            // Dispatch: (B*H, S_q) workgroups, each with 32 threads (llama.cpp style)
+            cmdBuff.bindPipeline(flashAttentionKVCache)
+                   .setPushConstants(0, sizeof(constants), &constants)
+                   .bindDescSets({flashAttnDescSet})
+                   .dispatch0(B * H, new_S)
+                   .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE) / tensors.context.buffer() / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+        } else {
+            // Standard 4-pass attention for batch processing
+            computeAttentionScoresCached(cmdBuff, Q_reshaped, tensors.K_full, tensors.scores, B, H, new_S, total_S, HD);
+            applyCausalMaskCached(cmdBuff, tensors.scores, B, H, new_S, total_S, cache_len);
+            computeSoftmaxCached(cmdBuff, tensors, B, H, new_S, total_S);
+            computeWeightedSumCached(cmdBuff, tensors, B, H, new_S, total_S, HD);
+        }
 
         // Step 6: Combine heads and project (same as standard path)
         combineHeadsAndProject(cmdBuff, tensors, W_out, B_out, output, B, new_S, D_out, H, HD);
@@ -1298,7 +1498,7 @@ void MultiHeadAttentionNode::concatenateWithCache(CommandBuffer& cmdBuff, Interm
     concatDescSetK.write({
         tensors.K_full.buffer(),
         kv_cache->K.buffer(),
-        tensors.K_flat.buffer()  // K_new should be placed here (reshaped)
+        tensors.K_flat.buffer()  // K_new in [B, H, new_S, HD] format (assigned from K_new_reshaped)
     });
 
     int k_constants[] = {(int)B, (int)H, (int)cache_len, (int)new_S, (int)max_len, (int)HD};
@@ -1314,7 +1514,7 @@ void MultiHeadAttentionNode::concatenateWithCache(CommandBuffer& cmdBuff, Interm
     concatDescSetV.write({
         tensors.V_full.buffer(),
         kv_cache->V.buffer(),
-        tensors.V_flat.buffer()  // V_new should be placed here (reshaped)
+        tensors.V_flat.buffer()  // V_new in [B, H, new_S, HD] format (assigned from V_new_reshaped)
     });
 
     cmdBuff

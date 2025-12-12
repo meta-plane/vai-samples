@@ -465,14 +465,14 @@ inline std::vector<int> generate_gpt2_with_cache(
         total_sampling_ms += std::chrono::duration<double, std::milli>(t7 - t6).count();
 
         // Print per-token timing for analysis (every 50 tokens)
-        if (enable_profiling && ((i + 1) % 50 == 0 || i == 1)) {
-            double token_time = std::chrono::duration<double, std::milli>(t7 - t0).count();
-            std::cout << "  Token " << (i + 1) << "/" << max_new_tokens
-                      << " (cache_len=" << gpt2Net.getCacheLength() << ")"
-                      << " - Time: " << std::fixed << std::setprecision(2) << token_time << " ms" << std::endl;
-        } else {
-            std::cout << "  Generated " << (i + 1) << "/" << max_new_tokens << " tokens (cache_len=" << gpt2Net.getCacheLength() << ")..." << std::endl;
-        }
+        //if (enable_profiling && ((i + 1) % 50 == 0 || i == 1)) {
+        //    double token_time = std::chrono::duration<double, std::milli>(t7 - t0).count();
+        //    std::cout << "  Token " << (i + 1) << "/" << max_new_tokens
+        //              << " (cache_len=" << gpt2Net.getCacheLength() << ")"
+        //              << " - Time: " << std::fixed << std::setprecision(2) << token_time << " ms" << std::endl;
+        //} else {
+        //    std::cout << "  Generated " << (i + 1) << "/" << max_new_tokens << " tokens (cache_len=" << gpt2Net.getCacheLength() << ")..." << std::endl;
+        //}
     }
 
     std::cout << "  Generation complete! Total tokens: " << generated.size() << std::endl;
