@@ -253,29 +253,6 @@ if(BUILD_TESTING)
     add_test(NAME MaxPooling1D COMMAND $<TARGET_FILE:test_maxpool>)
     
     # =========================================================================
-    # Test 9: MLP + MaxPool (TNet first part)
-    # =========================================================================
-    add_executable(test_mlp_maxpool test/mlp_maxpool/test_mlp_maxpool.cpp)
-    
-    target_include_directories(test_mlp_maxpool PRIVATE 
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/library
-        ${CMAKE_CURRENT_SOURCE_DIR}/networks/include
-        ${Vulkan_INCLUDE_DIRS}
-    )
-
-    target_link_libraries(test_mlp_maxpool PRIVATE
-        VAI_LIBRARY
-        POINTNET_LIBRARY
-    )
-    
-    set_target_properties(test_mlp_maxpool PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
-    )
-    
-    add_test(NAME MLPMaxPool COMMAND $<TARGET_FILE:test_mlp_maxpool>)
-    
-    # =========================================================================
     # Test 10: AddIdentityNode
     # =========================================================================
     add_executable(test_add_identity test/add_identity/test_add_identity.cpp)
@@ -342,52 +319,6 @@ if(BUILD_TESTING)
     
     add_test(NAME FCBNSequence COMMAND $<TARGET_FILE:test_fcbn_seq>)
     
-    # Test: MLP + MaxPool + FC (T-Net path without reshape/identity/matmul)
-    add_executable(test_mlp_maxpool_fc
-        test/mlp_maxpool_fc/test_mlp_maxpool_fc.cpp
-    )
-
-    target_include_directories(test_mlp_maxpool_fc PRIVATE 
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/library
-        ${CMAKE_CURRENT_SOURCE_DIR}/networks/include
-        ${Vulkan_INCLUDE_DIRS}
-    )
-
-    target_link_libraries(test_mlp_maxpool_fc PRIVATE
-        VAI_LIBRARY
-        POINTNET_LIBRARY
-    )
-    
-    set_target_properties(test_mlp_maxpool_fc PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
-    )
-    
-    add_test(NAME MLPMaxPoolFC COMMAND $<TARGET_FILE:test_mlp_maxpool_fc>)
-    
-    # Test: Transform Path (MLP -> MaxPool -> FC -> Reshape -> AddIdentity)
-    add_executable(test_transform_path
-        test/tnet_transform_path/test_transform_path.cpp
-    )
-
-    target_include_directories(test_transform_path PRIVATE 
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/library
-        ${CMAKE_CURRENT_SOURCE_DIR}/networks/include
-        ${Vulkan_INCLUDE_DIRS}
-    )
-
-    target_link_libraries(test_transform_path PRIVATE
-        VAI_LIBRARY
-        POINTNET_LIBRARY
-    )
-    
-    set_target_properties(test_transform_path PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
-    )
-    
-    add_test(NAME TransformPath COMMAND $<TARGET_FILE:test_transform_path>)
-    
     # Test: PointNetEncoder (full encoder pipeline with intermediate checks)
     add_executable(test_encoder
         test/encoder/test_encoder.cpp
@@ -411,29 +342,28 @@ if(BUILD_TESTING)
     
     add_test(NAME PointNetEncoder COMMAND $<TARGET_FILE:test_encoder>)
     
-    # Test: Accuracy comparison (Vulkan vs PyTorch)
-    add_executable(test_accuracy
-        test/validation/test_accuracy.cpp
+    # Test: PointNetSegment (full segmentation pipeline)
+    add_executable(test_segment
+        test/segment/test_segment.cpp
     )
 
-    target_include_directories(test_accuracy PRIVATE 
+    target_include_directories(test_segment PRIVATE 
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/library
         ${CMAKE_CURRENT_SOURCE_DIR}/networks/include
         ${Vulkan_INCLUDE_DIRS}
     )
 
-    target_link_libraries(test_accuracy PRIVATE
+    target_link_libraries(test_segment PRIVATE
         VAI_LIBRARY
         POINTNET_LIBRARY
     )
     
-    set_target_properties(test_accuracy PROPERTIES
+    set_target_properties(test_segment PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
     )
     
-    add_test(NAME AccuracyComparison COMMAND $<TARGET_FILE:test_accuracy>)
-    
+    add_test(NAME PointNetSegment COMMAND $<TARGET_FILE:test_segment>)    
 else()
     message(STATUS "✗ Tests disabled")
     message(STATUS "  Enable with: cmake -DBUILD_TESTING=ON ..")

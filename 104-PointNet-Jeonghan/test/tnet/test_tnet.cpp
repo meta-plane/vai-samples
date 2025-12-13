@@ -23,10 +23,8 @@ using namespace networks;
 /**
  * Test network wrapper for TNetBlock
  * 
- * NOTE: TNetBlock currently uses 2 inputs for clarity:
- * - in0: MLP path (generates transformation matrix)
- * - in1: MatMul path (points to be transformed)
- * Both receive the SAME input data externally.
+ * TNetBlock now only generates transformation matrix [K, K]
+ * MatMul is separate and applies the transformation to points
  * 
  * Outputs:
  * - out0: Transformed points [N, K]
@@ -34,19 +32,27 @@ using namespace networks;
  */
 class TNetTestNet : public NeuralNet {
     TNetBlock tnet;
+    MatMulNode matmul;
     
 public:
     TNetTestNet(Device& device, uint32_t K)
     : NeuralNet(device, 1, 2)  // 1 input, 2 outputs
     , tnet(K)
+    , matmul()
     {
-        // Connect same input to both TNet paths
-        input(0) - "in0" / tnet;        // MLP path: generates transform matrix
-        input(0) - "in1" / tnet;        // MatMul path: points to transform
+        // Clean architecture: TNet generates matrix, MatMul applies it
+        // Input → TNet → Transform matrix [K,K] → MatMul.in1
+        // Input ──────────────────────────────→ MatMul.in0
+        //                                        ↓
+        //                               Transformed points
+        
+        input(0) - tnet;  // Generate transformation matrix
+        tnet.slot("out0") - matmul.slot("in1");  // Matrix → MatMul
+        input(0).slot("out0") - matmul.slot("in0");  // Points → MatMul
         
         // Connect outputs
-        tnet / "out0" - output(0);      // Transformed points
-        tnet / "out1" - output(1);      // Transform matrix
+        matmul - output(0);              // Transformed points
+        tnet / "out0" - output(1);       // Transform matrix
     }
     
     Tensor& operator[](const std::string& name) {

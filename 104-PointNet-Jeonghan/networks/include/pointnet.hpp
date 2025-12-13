@@ -211,11 +211,11 @@ public:
         // Simple linear pipeline: Generate transformation matrix only
         // Input [N, K] → MLP → MaxPool → FC → Reshape → AddIdentity → Output [K, K]
         
-        defineSlot("in0", mlp.slot("in0"));  // Input: point cloud [N, K]
         
         // Connect pipeline
         mlp - maxpool - fc - reshape_matrix - add_identity;
         
+        defineSlot("in0", mlp.slot("in0"));  // Input: point cloud [N, K]
         defineSlot("out0", add_identity.slot("out0"));  // Output: transform matrix [K, K]
     }
 
@@ -307,7 +307,6 @@ public:
     }
 };
 
-
 // PointNetSegment class - Proper implementation following the paper
 class PointNetSegment : public NeuralNet
 {
@@ -348,22 +347,18 @@ public:
         //             ↓
         //         output
         
-        // 1. Input → Encoder (TNet handles dual-path internally)
-        input(0) - encoder;  // Single connection - much cleaner!
+        // 1. Input → Encoder
+        input(0) - encoder;
         
-        // 2. Global feature branch: encoder → maxpool → reshape → broadcast.in0
-        encoder.slot("out0") - maxpool.slot("in0"); // encoder.out0 → maxpool.in0 [N, 1024] → [1024]
-        maxpool.slot("out0") - reshape_global.slot("in0"); // maxpool [1024] → reshape [1, 1024]
-        reshape_global.slot("out0") - broadcast.slot("in0"); // reshape → broadcast.in0 (global feature [1, 1024])
+        // 2. Split encoder output for two paths:
+        //    Path A: encoder → concat.in0 (point features [N, 1024])
+        //    Path B: encoder → maxpool → reshape → broadcast → concat.in1 (global feature [N, 1024])
+        encoder - concat;                                  // Point features to concat.in0
+        encoder - maxpool - reshape_global - broadcast;    // Global [1,C] to broadcast.in0
+        encoder - "in1" / broadcast;                       // Point features [N,C] to broadcast.in1 (shape reference)
+        broadcast - "in1" / concat;                        // Broadcasted global to concat.in1
         
-        // 3. Broadcast shape reference: encoder → broadcast.in1
-        encoder.slot("out0") - broadcast.slot("in1"); // encoder.out0 → broadcast.in1 (shape reference [N, 1024])
-        
-        // 4. Concatenate point features + global features
-        encoder.slot("out0") - concat.slot("in0");  // point-wise features [N, 1024]
-        broadcast.slot("out0") - concat.slot("in1"); // broadcasted global [N, 1024]
-        
-        // 5. Segmentation head: concat → segHead → output
+        // 3. Segmentation head
         concat - segHead - output(0);
     }
 
@@ -375,6 +370,10 @@ public:
             return segHead[name.substr(8)];  // "segHead." 제거
         throw std::runtime_error("Unknown parameter: " + name);
     }
+    
+    // Public accessors for testing
+    PointNetEncoder& getEncoder() { return encoder; }
+    MLPSequence<3>& getSegHead() { return segHead; }
 };
 
 

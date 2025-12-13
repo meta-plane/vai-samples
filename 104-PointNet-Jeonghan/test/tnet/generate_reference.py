@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
 Generate PyTorch reference data for TNetBlock test
-TNetBlock: Spatial Transformer Network
+TNetBlock: Spatial Transformer Network (Matrix Generator Only)
 - Input: [N, K] point cloud
-- Output: [N, K] transformed point cloud via learned K×K transformation matrix
+- TNet Output: [K, K] transformation matrix
+- MatMul Output: [N, K] transformed points (applied separately)
+
+Architecture change: TNet and MatMul are now separate components
 """
 
 import torch
@@ -18,7 +21,8 @@ np.random.seed(42)
 class TNetBlock(nn.Module):
     """
     TNet: Spatial Transformer Network
-    Learns a K×K transformation matrix and applies it to input
+    Generates K×K transformation matrix (does NOT apply it)
+    MatMul is separate - matches new Vulkan architecture
     Includes BatchNorm for compatibility with Vulkan implementation
     """
     def __init__(self, K):
@@ -43,11 +47,11 @@ class TNetBlock(nn.Module):
     def forward(self, x):
         """
         x: [N, K] input points
-        Returns: [N, K] transformed points
+        Returns: [K, K] transformation matrix (NOT transformed points)
         """
         N, K = x.shape
         
-        # Path A: Generate transformation matrix
+        # Generate transformation matrix
         # x: [N, K] -> [N, K, 1] for conv1d
         feat = x.unsqueeze(2)  # [N, K, 1]
         
@@ -81,10 +85,6 @@ class TNetBlock(nn.Module):
         identity = torch.eye(K)  # [K, K]
         transform = transform_no_id + identity  # [K, K]
         
-        # Path B: Apply transformation
-        # x: [N, K] @ transform: [K, K] = [N, K]
-        output = torch.matmul(x, transform)
-        
         # Store intermediates for debugging
         self._intermediates = {
             'pooled': pooled,
@@ -94,7 +94,7 @@ class TNetBlock(nn.Module):
             'transform_no_identity': transform_no_id,
         }
         
-        return output, transform
+        return transform
 
 def main():
     # Test configuration
@@ -115,7 +115,8 @@ def main():
     
     # Forward pass
     with torch.no_grad():
-        output, transform = model(x)
+        transform = model(x)  # TNet now returns only transform matrix
+        output = torch.matmul(x, transform)  # Apply MatMul separately
     
     # Collect weights
     weights = {

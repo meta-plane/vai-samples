@@ -249,12 +249,26 @@ Example: See `BroadcastNode` and `ConcatNode`
 ### Testing
 
 ```bash
-# Generate test data
-python utils/prepare_sample_data.py --num_points 2048
+# Build with tests
+./build.sh --test
 
-# Run with test data
-./build/bin/debug/104-PointNet-Jeonghan
+# Run all tests
+cd ../build/104-PointNet-Jeonghan
+ctest --output-on-failure
+
+# Run specific test
+/home/jeong/workspace/vai-samples/bin/debug/test_encoder
+/home/jeong/workspace/vai-samples/bin/debug/test_segment
 ```
+
+**Test Results** (see [test/TEST_RESULTS.md](test/TEST_RESULTS.md) for details):
+
+| Component | Test Points | Errors | Max Error | Status |
+|-----------|-------------|--------|-----------|--------|
+| PointNetEncoder | 1024 | 0 | 1.19e-07 | ✅ PASSED |
+| PointNetSegment | 64 | 0 | 0.045 | ✅ PASSED |
+
+All tests compare Vulkan compute shader outputs against PyTorch reference implementations with tolerance of 1e-3.
 
 ## 📊 Performance
 
