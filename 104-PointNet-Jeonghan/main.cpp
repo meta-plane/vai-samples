@@ -33,7 +33,7 @@ int main()
 
     // Configuration
     InferenceConfig config;
-    config.weights_file = "assets/weights/pointnet_weights.json";
+    config.weights_file = "assets/weights/pointnet_weights.safetensors";  // Use SafeTensors format
     config.num_classes = 10;
     config.verbose = true;
 

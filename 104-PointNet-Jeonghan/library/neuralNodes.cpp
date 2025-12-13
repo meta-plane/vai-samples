@@ -1528,3 +1528,29 @@ void AddIdentityNode::run(CommandBuffer cmdBuff)
             / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
         );
 }
+
+// IdentityNode - Pass-through node for signal splitting
+// Allows one input to fan out to multiple outputs without computation
+IdentityNode::IdentityNode()
+{
+    addSlot("in0", NodeSlot::input);
+    addSlot("out0", NodeSlot::output);  // First output
+    addSlot("out1", NodeSlot::output);  // Second output for splitting
+}
+
+void IdentityNode::prepare()
+{
+    Tensor& in0 = (*this)["in0"];
+    
+    _ASSERT(in0.validShape());
+    
+    // Both outputs are identical copies (same shape and data)
+    (*this)["out0"] = in0;  // Reference to input (no copy)
+    (*this)["out1"] = in0;  // Reference to input (no copy)
+}
+
+void IdentityNode::run(CommandBuffer cmdBuff)
+{
+    // No computation needed - outputs reference the same buffer as input
+    // This is a logical node for graph connectivity only
+}

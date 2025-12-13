@@ -196,6 +196,15 @@ public:
     void run(CommandBuffer cmdBuff) override;
 };
 
+// IdentityNode - Pass-through with multiple outputs for signal splitting
+class IdentityNode : public Node
+{
+public:
+    IdentityNode();
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
 extern Device netGlobalDevice; // Global device for neural network operations
 
 

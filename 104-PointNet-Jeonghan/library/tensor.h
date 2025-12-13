@@ -3,6 +3,7 @@
 
 
 #include "jsonParser.h"
+#include "safeTensorsParser.h"
 #include "vulkanApp.h"
 #include "error.h"
 #include <memory>
@@ -107,6 +108,13 @@ public:
     Tensor(const JsonParserRef& json) : _data(std::make_shared<TensorData>())
     {
         set(json.parseNDArray(_shape));
+        _isConstant = true;
+    }
+    
+    Tensor(const SafeTensorsParserRef& st) : _data(std::make_shared<TensorData>())
+    {
+        _shape = st.getShape();
+        set(st.parseNDArray());
         _isConstant = true;
     }
     

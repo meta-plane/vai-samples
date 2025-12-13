@@ -388,6 +388,52 @@ if(BUILD_TESTING)
     
     add_test(NAME TransformPath COMMAND $<TARGET_FILE:test_transform_path>)
     
+    # Test: PointNetEncoder (full encoder pipeline with intermediate checks)
+    add_executable(test_encoder
+        test/encoder/test_encoder.cpp
+    )
+
+    target_include_directories(test_encoder PRIVATE 
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/library
+        ${CMAKE_CURRENT_SOURCE_DIR}/networks/include
+        ${Vulkan_INCLUDE_DIRS}
+    )
+
+    target_link_libraries(test_encoder PRIVATE
+        VAI_LIBRARY
+        POINTNET_LIBRARY
+    )
+    
+    set_target_properties(test_encoder PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+    )
+    
+    add_test(NAME PointNetEncoder COMMAND $<TARGET_FILE:test_encoder>)
+    
+    # Test: Accuracy comparison (Vulkan vs PyTorch)
+    add_executable(test_accuracy
+        test/validation/test_accuracy.cpp
+    )
+
+    target_include_directories(test_accuracy PRIVATE 
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/library
+        ${CMAKE_CURRENT_SOURCE_DIR}/networks/include
+        ${Vulkan_INCLUDE_DIRS}
+    )
+
+    target_link_libraries(test_accuracy PRIVATE
+        VAI_LIBRARY
+        POINTNET_LIBRARY
+    )
+    
+    set_target_properties(test_accuracy PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+    )
+    
+    add_test(NAME AccuracyComparison COMMAND $<TARGET_FILE:test_accuracy>)
+    
 else()
     message(STATUS "✗ Tests disabled")
     message(STATUS "  Enable with: cmake -DBUILD_TESTING=ON ..")

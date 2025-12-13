@@ -7,6 +7,8 @@
 #include "tensor.h"
 #include <memory>
 #include <string>
+#include <stdexcept>
+#include <map>
 
 namespace networks
 {
@@ -39,7 +41,7 @@ public:
         for (uint32_t i = 0; i < nBlocks; ++i)
         {
             const std::string prefix = "fc" + std::to_string(i) + ".";
-            if (name.starts_with(prefix))
+            if (name.compare(0, prefix.length(), prefix) == 0)
                 return (*blocks[i])[name.substr(prefix.length())];
         }
         throw std::runtime_error("No such layer in FCSequence: " + name);
@@ -128,13 +130,14 @@ public:
         for (uint32_t i = 0; i < nBlocks - 1; ++i)
         {
             const std::string prefix = "block" + std::to_string(i) + ".";
-            if (name.starts_with(prefix))
+            if (name.compare(0, prefix.length(), prefix) == 0)
                 return (*blocks[i])[name.substr(prefix.length())];
         }
         
-        // Check last FC block
-        if (name.starts_with("lastBlock."))
-            return (*lastBlock)[name.substr(10)];  // "lastBlock." length = 10
+        // Check last FC block (FullyConnectedNode - only has "weight" and "bias" slots)
+        if (name.compare(0, 10, "lastBlock.") == 0) {
+            return static_cast<Node&>(*lastBlock)[name.substr(10)];  // "lastBlock." length = 10
+        }
         
         throw std::runtime_error("No such layer in FCBNSequence: " + name);
     }
@@ -171,7 +174,7 @@ public:
         for (uint32_t i = 0; i < nBlocks; ++i)
         {
             const std::string prefix = "mlp" + std::to_string(i) + ".";
-            if (name.starts_with(prefix))
+            if (name.compare(0, prefix.length(), prefix) == 0)
                 return (*blocks[i])[name.substr(prefix.length())];
         }
         throw std::runtime_error("No such layer in MLPSequence: " + name);
@@ -181,59 +184,50 @@ template<std::size_t N>
 MLPSequence(const uint32_t (&)[N]) -> MLPSequence<N - 1>;
 
 
-// TNetBlock class - Spatial Transformer Network
+// TNetBlock class - Transformation Matrix Generator
+// Simplified: Only generates transformation matrix (MatMul separated)
 // Input: [N, K] point cloud
-// Output: [N, K] transformed point cloud
+// Output: [K, K] transformation matrix
 class TNetBlock : public NodeGroup
 {
     uint32_t K;
-
-    MLPSequence<3> mlp;          // K -> 64 -> 128 -> 1024
-    MaxPooling1DNode maxpool;    // [N, 1024] -> [1024]
-    FCBNSequence<3> fc;          // 1024 -> 512 -> 256 -> K*K (with BN+ReLU, matches paper)
-    ReShapeNode reshape;         // [K*K] -> [K, K]
-    AddIdentityNode addIdentity; // [K, K] + I -> [K, K] (matches paper)
-    MatMulNode matmul;           // [N, K] @ [K, K] -> [N, K]
+    
+    // Transformation matrix generation pipeline
+    MLPSequence<3> mlp;              // [N, K] → [N, 64] → [N, 128] → [N, 1024]
+    MaxPooling1DNode maxpool;        // [N, 1024] → [1024]
+    FCBNSequence<3> fc;              // [1024] → [512] → [256] → [K²]
+    ReShapeNode reshape_matrix;      // [K²] → [K, K]
+    AddIdentityNode add_identity;    // [K, K] + I → [K, K]
 
 public:
     TNetBlock(uint32_t inputDim)
     : K(inputDim)
-    , mlp({K, 64, 128, 1024})
+    , mlp({inputDim, 64, 128, 1024})
     , maxpool()
-    , fc({1024, 512, 256, K*K})
-    , reshape({K, K})            // Initialize with target shape [K, K]
-    , addIdentity()
-    , matmul()
+    , fc({1024, 512, 256, K * K})
+    , reshape_matrix({K, K})
+    , add_identity()
     {
-        // Path A: Generate transformation matrix
-        // input [N, K] -> MLP -> MaxPool -> FC -> Reshape -> AddIdentity -> [K, K] matrix
-        mlp - maxpool - fc - reshape - addIdentity;
-
-        // Path B: Apply transformation
-        // matmul.in0 = input [N, K] (from external)
-        // matmul.in1 = transform [K, K] from addIdentity
-        addIdentity - "in1" / matmul;
-
-        // Define external slots
-        // NOTE: Currently uses 2 inputs for simplicity (both receive same data externally)
-        // in0: input to MLP path (generates transformation)
-        // in1: input to MatMul path (points to transform)
-        // out0: transformed output from MatMul
-        // out1: transformation matrix [K, K] for debugging/analysis
-        defineSlot("in0", mlp.slot("in0"));           // MLP path input
-        defineSlot("in1", matmul.slot("in0"));        // MatMul path input
-        defineSlot("out0", matmul.slot("out0"));      // Output from matmul
-        defineSlot("out1", addIdentity.slot("out0")); // Transform matrix (with identity added)
+        // Simple linear pipeline: Generate transformation matrix only
+        // Input [N, K] → MLP → MaxPool → FC → Reshape → AddIdentity → Output [K, K]
+        
+        defineSlot("in0", mlp.slot("in0"));  // Input: point cloud [N, K]
+        
+        // Connect pipeline
+        mlp - maxpool - fc - reshape_matrix - add_identity;
+        
+        defineSlot("out0", add_identity.slot("out0"));  // Output: transform matrix [K, K]
     }
 
     Tensor& operator[](const std::string& name)
     {
-        if (name.starts_with("mlp."))
-            return mlp[name.substr(4)]; // Remove "mlp." prefix
-        if (name.starts_with("fc."))
-            return fc[name.substr(3)]; // Remove "fc." prefix
-
-        throw std::runtime_error("No such layer in TNetBlock: " + name);
+        // Route to appropriate sub-network
+        if (name.compare(0, 4, "mlp.") == 0)
+            return mlp[name.substr(4)];   // "mlp.mlp0.weight" → mlp["mlp0.weight"]
+        if (name.compare(0, 3, "fc.") == 0)
+            return fc[name.substr(3)];    // "fc.block0.weight" → fc["block0.weight"]
+        
+        throw std::runtime_error("Unknown parameter in TNetBlock: " + name);
     }
 };
 
@@ -243,42 +237,71 @@ public:
 // Output: [N, 1024] point-wise features
 class PointNetEncoder : public NodeGroup
 {
+    IdentityNode split1;       // Split input for TNet1 dual-path
+    IdentityNode split2;       // Split MLP1 output for TNet2 dual-path
+    
 public:  // Make public for direct access
-    TNetBlock tnet1;           // input transform (3x3)
+    TNetBlock tnet1;           // input transform: generates 3x3 matrix
+    MatMulNode matmul1;        // apply transform: [N,3] @ [3,3] → [N,3]
     MLPSequence<2> mlp1;       // (3 → 64 → 64)
-    TNetBlock tnet2;           // feature transform (64x64)
+    TNetBlock tnet2;           // feature transform: generates 64x64 matrix
+    MatMulNode matmul2;        // apply transform: [N,64] @ [64,64] → [N,64]
     MLPSequence<2> mlp2;       // (64 → 128 → 1024)
 
 public:
     PointNetEncoder()
-    : tnet1(3)
+    : NodeGroup()
+    , split1()
+    , split2()
+    , tnet1(3)
+    , matmul1()
     , mlp1({3, 64, 64})
     , tnet2(64)
+    , matmul2()
     , mlp2({64, 128, 1024})
     {
-        // Architecture flow (논문 구조):
+        // Full PointNet Encoder Architecture with IdentityNode for signal splitting:
+        //
+        // Input [N, 3]
+        //   ↓
+        // Split1 (IdentityNode)
+        //   ├→ out0 → TNet1 → [3,3] matrix → MatMul1.in1
+        //   └→ out1 ─────────────────────→ MatMul1.in0
+        //                                     ↓
+        //   MatMul1 output [N, 3] → MLP1 → [N, 64]
+        //                            ↓
+        //                         Split2 (IdentityNode)
+        //   ├→ out0 → TNet2 → [64,64] matrix → MatMul2.in1
+        //   └→ out1 ──────────────────────→ MatMul2.in0
+        //                                     ↓
+        //   MatMul2 output [N, 64] → MLP2 → [N, 1024]
         
-        // Define encoder's input slot (only for MLP path)
-        defineSlot("in0", tnet1.slot("in0"));
+        // Single external input - much cleaner!
+        defineSlot("in0", split1.slot("in0"));
         
-        // TNet1 -> MLP1
-        tnet1 - mlp1;
+        // TNet1 path: Split input to TNet and MatMul
+        // MatMul expects: in0=[N,K] (points), in1=[K,K] (transform matrix)
+        split1 / "out0" - "in0" / matmul1;  // Input → MatMul1.in0 (points [N,3])
+        split1 / "out1" - tnet1 - "in1" / matmul1;  // Input → TNet1 → MatMul1.in1 (matrix [3,3])
+        matmul1 - mlp1;
+        // MLP1: Point-wise features
         
-        // TNet2: TEMPORARY bypass mode, only one input
-        mlp1 - tnet2 / "in0";                           // MLP path
+        mlp1 - split2;
+        // TNet2 path: Same pattern
+        split2 / "out0" - "in0" / matmul2;  // MLP1 output → MatMul2.in0 (features [N,64])
+        split2 / "out1" - tnet2 - "in1" / matmul2;  // MLP1 output → TNet2 → MatMul2.in1 (matrix [64,64])
+        // MLP2: Final features
+        matmul2 - mlp2;
         
-        // TNet2 -> MLP2
-        tnet2 - mlp2;
-        
-        defineSlot("out0", mlp2.slot("out0"));
+        defineSlot("out0", mlp2.slot("out0"));  // Output
     }
 
     Tensor& operator[](const std::string& name)
     {
-        if (name.starts_with("tnet1.")) return tnet1[name.substr(6)]; // Remove "tnet1." prefix
-        if (name.starts_with("mlp1."))  return mlp1[name.substr(5)];  // Remove "mlp1." prefix
-        if (name.starts_with("tnet2.")) return tnet2[name.substr(6)]; // Remove "tnet2." prefix
-        if (name.starts_with("mlp2."))  return mlp2[name.substr(5)];  // Remove "mlp2." prefix
+        if (name.compare(0, 6, "tnet1.") == 0) return tnet1[name.substr(6)]; // Remove "tnet1." prefix
+        if (name.compare(0, 5, "mlp1.") == 0)  return mlp1[name.substr(5)];  // Remove "mlp1." prefix
+        if (name.compare(0, 6, "tnet2.") == 0) return tnet2[name.substr(6)]; // Remove "tnet2." prefix
+        if (name.compare(0, 5, "mlp2.") == 0)  return mlp2[name.substr(5)];  // Remove "mlp2." prefix
 
         throw std::runtime_error("Unknown parameter: " + name);
     }
@@ -289,7 +312,8 @@ public:
 class PointNetSegment : public NeuralNet
 {
     PointNetEncoder encoder;    // PointNet encoder: [N, 3] → [N, 1024]
-    MaxPooling1DNode maxpool;   // Global max pooling: [N, 1024] → [1, 1024]
+    MaxPooling1DNode maxpool;   // Global max pooling: [N, 1024] → [1024]
+    ReShapeNode reshape_global; // Reshape: [1024] → [1, 1024]
     BroadcastNode broadcast;    // Broadcast global feature: [1, 1024] → [N, 1024]
     ConcatNode concat;          // Concatenate: [N, 1024] + [N, 1024] → [N, 2048]
     MLPSequence<3> segHead;     // Segmentation head: [N, 2048] → [N, 512] → [N, 256] → [N, numClasses]
@@ -304,6 +328,7 @@ public:
     , numClasses(numClasses)
     , encoder()
     , maxpool()
+    , reshape_global({1, 1024})  // Reshape [1024] → [1, 1024]
     , broadcast()
     , concat()
     , segHead({2048, 512, 256, numClasses})  // 1024 (point feature) + 1024 (global feature) = 2048
@@ -323,29 +348,30 @@ public:
         //             ↓
         //         output
         
-        // 1. Main path: input → encoder
-        // TEMPORARY: TNet bypass mode, only one input needed
-        input(0) - encoder.tnet1 / "in0";              // -> TNet1 (identity transform)
+        // 1. Input → Encoder (TNet handles dual-path internally)
+        input(0) - encoder;  // Single connection - much cleaner!
         
-        // Connect TNet1 output to rest of encoder (already done in encoder constructor)
+        // 2. Global feature branch: encoder → maxpool → reshape → broadcast.in0
+        encoder.slot("out0") - maxpool.slot("in0"); // encoder.out0 → maxpool.in0 [N, 1024] → [1024]
+        maxpool.slot("out0") - reshape_global.slot("in0"); // maxpool [1024] → reshape [1, 1024]
+        reshape_global.slot("out0") - broadcast.slot("in0"); // reshape → broadcast.in0 (global feature [1, 1024])
         
-        // 2. Global feature branch: encoder → maxpool → broadcast
-        encoder - maxpool - broadcast / "in0";      // global feature path
-        encoder / "out0" - broadcast / "in1";       // shape reference for broadcast
+        // 3. Broadcast shape reference: encoder → broadcast.in1
+        encoder.slot("out0") - broadcast.slot("in1"); // encoder.out0 → broadcast.in1 (shape reference [N, 1024])
         
-        // 3. Concatenate point features + global features
-        encoder - concat / "in0";                   // point-wise features [N, 1024]
-        broadcast - concat / "in1";                 // broadcasted global [N, 1024]
+        // 4. Concatenate point features + global features
+        encoder.slot("out0") - concat.slot("in0");  // point-wise features [N, 1024]
+        broadcast.slot("out0") - concat.slot("in1"); // broadcasted global [N, 1024]
         
-        // 4. Segmentation head: concat → segHead → output
+        // 5. Segmentation head: concat → segHead → output
         concat - segHead - output(0);
     }
 
     Tensor& operator[](const std::string& name)
     {
-        if (name.starts_with("encoder."))
+        if (name.compare(0, 8, "encoder.") == 0)
             return encoder[name.substr(8)];  // "encoder." 제거
-        if (name.starts_with("segHead."))
+        if (name.compare(0, 8, "segHead.") == 0)
             return segHead[name.substr(8)];  // "segHead." 제거
         throw std::runtime_error("Unknown parameter: " + name);
     }
