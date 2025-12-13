@@ -220,6 +220,7 @@ class NeuralNet
     uint8_t* uploadBufferMappedAddress = nullptr;
     size_t uploadBufferOffset = 0; 
     const size_t uploadBufferSize = 1024 * 1024 * 64; // 64 MB
+    bool retainTensors = false;
 
     std::vector<InputNode> _inputs;
     std::vector<OutputNode> _outputs;
@@ -255,6 +256,9 @@ public:
     void sortNodes(bool buildChains = false);
     void prepare();
     void run();
+
+    // Debug: keep tensors after run (skip clearing). Default false.
+    void setRetainTensors(bool retain) { retainTensors = retain; }
 
     /*
         TODO: At the moment, only r-value tensors can return their underlying buffers 
@@ -508,15 +512,18 @@ inline void NeuralNet::run()
         }
 
         // invlaidate the tensor to return the bound buffer to the pool
-        for (auto& [name, slot] : node->slots)
+        if (!retainTensors)
         {
-            if (slot.type() == NodeSlot::output && slot.edges.size() == 0)
-                continue;
+            for (auto& [name, slot] : node->slots)
+            {
+                if (slot.type() == NodeSlot::output && slot.edges.size() == 0)
+                    continue;
 
-            if (slot.getValueRef().isConstant())
-                continue;
+                if (slot.getValueRef().isConstant())
+                    continue;
 
-            slot.getValueRef() = Tensor(); 
+                slot.getValueRef() = Tensor(); 
+            }
         }
     }
 

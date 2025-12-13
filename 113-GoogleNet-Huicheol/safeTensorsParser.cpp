@@ -2,6 +2,8 @@
 #include "safeTensorsParser.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
+#include <numeric>
+#include <functional>
 
 
 struct SafeTensorsParserImpl
@@ -128,6 +130,12 @@ std::vector<float> SafeTensorsParserRef::parseNDArray() const
 
     const size_t numElements = std::accumulate(shape.begin(), shape.end(), size_t(1), std::multiplies<size_t>());
     const size_t byteSize = endOffset - startOffset;
+
+    if (endOffset > pImpl->tensorData.size())
+        throw std::runtime_error("Tensor offset out of bounds: endOffset=" + std::to_string(endOffset) + ", dataSize=" + std::to_string(pImpl->tensorData.size()));
+
+    if (dtypeStr != "F32")
+        throw std::runtime_error("Unsupported dtype: " + dtypeStr + " (expected F32)");
 
     std::vector<float> result;
     result.reserve(numElements);

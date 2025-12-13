@@ -82,22 +82,30 @@ void test()
     std::vector<uint8_t> srcImage;
     try
     {
-        auto loaded = readImage<channels>(PROJECT_ROOT_DIR"/113-GoogleNet-Huicheol/data/cat.jpg");
+        auto loaded = readImage<channels>(PROJECT_ROOT_DIR"/113-GoogleNet-Huicheol/data/dog.jpg");
         srcImage = std::get<0>(loaded);
         W = std::get<1>(loaded);
         H = std::get<2>(loaded);
-        std::cout << "Loaded cat.jpg (" << W << "x" << H << ")" << std::endl;
+        std::cout << "Loaded dog.jpg (" << W << "x" << H << ")" << std::endl;
     }
     catch (const std::exception& e)
     {
-        std::cout << "cat.jpg not found, using zero image: " << e.what() << std::endl;
+        std::cout << "dog.jpg not found, using zero image: " << e.what() << std::endl;
         srcImage.assign(H * W * channels, 0);
     }
 
+    // Preprocess to match torchvision GoogLeNet: scale to [0,1] then normalize with ImageNet mean/std
+    // (mean/std taken from torchvision models)
+    const float mean[3] = {0.485f, 0.456f, 0.406f};
+    const float stdv[3] = {0.229f, 0.224f, 0.225f};
+
     Tensor inputTensor(H, W, 3);
     std::vector<float> inputData(H * W * 3);
-    for (size_t i = 0; i < inputData.size(); ++i)
-        inputData[i] = (float)srcImage[i % srcImage.size()] / 255.0f;
+    for (size_t i = 0; i < inputData.size(); ++i) {
+        float v = static_cast<float>(srcImage[i % srcImage.size()]) / 255.0f;
+        int c = static_cast<int>(i % 3);
+        inputData[i] = (v - mean[c]) / stdv[c];
+    }
 
     inputTensor.set(std::move(inputData));
 
@@ -125,9 +133,35 @@ void test()
     }
 
     GoogleNet googleNet(netGlobalDevice);
+    googleNet.setRetainTensors(true); // keep intermediates for debug stats
     std::cout << "GoogleNet constructed" << std::endl;
     runStage("loadWeights", [&]{ googleNet.loadWeights(weights.get(), st.get()); });
     std::cout << "Weights loaded (or zero-initialized)" << std::endl;
+
+    // Quick sanity: check that loaded weights are non-zero to catch parsing/mapping issues.
+    auto tensorStats = [](const Tensor& t)
+    {
+        const float* p = t.hostData();
+        if (!p) return std::tuple<float, float, float>{0.f, 0.f, 0.f};
+        size_t n = t.numElements();
+        float minv = p[0], maxv = p[0], sum = 0.f;
+        for (size_t i = 0; i < n; ++i) {
+            float v = p[i];
+            minv = std::min(minv, v);
+            maxv = std::max(maxv, v);
+            sum += v;
+        }
+        return std::tuple<float, float, float>{minv, maxv, sum / float(n)};
+    };
+
+    auto [wmin, wmax, wmean] = tensorStats(googleNet["conv1.weight"]);
+    auto [bmin, bmax, bmean] = tensorStats(googleNet["conv1.bias"]);
+    auto [fcmin, fcmax, fcmean] = tensorStats(googleNet["fc.weight"]);
+    auto [fbmin, fbmax, fbmean] = tensorStats(googleNet["fc.bias"]);
+    std::cout << "conv1.weight stats (min/max/mean): " << wmin << " / " << wmax << " / " << wmean << std::endl;
+    std::cout << "conv1.bias   stats (min/max/mean): " << bmin << " / " << bmax << " / " << bmean << std::endl;
+    std::cout << "fc.weight    stats (min/max/mean): " << fcmin << " / " << fcmax << " / " << fcmean << std::endl;
+    std::cout << "fc.bias      stats (min/max/mean): " << fbmin << " / " << fbmax << " / " << fbmean << std::endl;
     
     // We don't have weights, so we just run the graph to verify structure
     std::cout << "Graph constructed. Running inference..." << std::endl;
@@ -138,6 +172,66 @@ void test()
     runStage("inference", [&]{
         auto results = googleNet(inputTensor);
         Tensor& result = results[0];
+
+        auto debugCapture = [&](const char* label, Tensor& t)
+        {
+            if (!t.hasDeviceData()) {
+                std::cout << "[dbg] " << label << ": no device data" << std::endl;
+                return;
+            }
+            const size_t byteSize = t.numElements() * sizeof(float);
+            vk::Buffer hostBuffer = netGlobalDevice.createBuffer({
+                .size = byteSize,
+                .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                .reqMemProps = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            });
+
+            netGlobalDevice.newCommandBuffer(queue_compute)
+                .begin()
+                .copyBuffer(hostBuffer, t.buffer())
+                .end()
+                .submit()
+                .wait();
+
+            const float* dataPtr = reinterpret_cast<const float*>(hostBuffer.map());
+            size_t N = t.numElements();
+            float mn = dataPtr[0], mx = dataPtr[0], sum = 0.f, sum2 = 0.f;
+            for (size_t i = 0; i < N; ++i) {
+                float v = dataPtr[i];
+                if (v < mn) mn = v;
+                if (v > mx) mx = v;
+                sum += v;
+                sum2 += v * v;
+            }
+            float mean = sum / N;
+            float var = sum2 / N - mean * mean;
+            float stddev = var > 0.f ? std::sqrt(var) : 0.f;
+            std::cout << "[dbg] " << label << " stats (min/max/mean/std): "
+                      << mn << " / " << mx << " / " << mean << " / " << stddev
+                      << " shape=";
+            for (auto s : t.shape()) std::cout << s << " ";
+            std::cout << std::endl;
+        };
+
+        debugCapture("conv1.out", googleNet.debugTensor("conv1.out"));
+        debugCapture("pool1.out", googleNet.debugTensor("pool1.out"));
+        debugCapture("lrn1.out",  googleNet.debugTensor("lrn1.out"));
+        debugCapture("conv2.out", googleNet.debugTensor("conv2.out"));
+        debugCapture("lrn2.out",  googleNet.debugTensor("lrn2.out"));
+        debugCapture("pool2.out", googleNet.debugTensor("pool2.out"));
+        debugCapture("inception3a.out", googleNet.debugTensor("inception3a.out"));
+        debugCapture("inception3b.out", googleNet.debugTensor("inception3b.out"));
+        debugCapture("pool3.out", googleNet.debugTensor("pool3.out"));
+        debugCapture("inception4a.out", googleNet.debugTensor("inception4a.out"));
+        debugCapture("inception4b.out", googleNet.debugTensor("inception4b.out"));
+        debugCapture("inception4c.out", googleNet.debugTensor("inception4c.out"));
+        debugCapture("inception4d.out", googleNet.debugTensor("inception4d.out"));
+        debugCapture("inception4e.out", googleNet.debugTensor("inception4e.out"));
+        debugCapture("pool4.out", googleNet.debugTensor("pool4.out"));
+        debugCapture("inception5a.out", googleNet.debugTensor("inception5a.out"));
+        debugCapture("inception5b.out", googleNet.debugTensor("inception5b.out"));
+        debugCapture("avgpool.out", googleNet.debugTensor("avgpool.out"));
+        debugCapture("flatten.out", googleNet.debugTensor("flatten.out"));
         
         // Print output shape
         auto shape = result.shape();
@@ -169,6 +263,15 @@ void test()
 
         // Softmax + Top-5 (CPU-side)
         std::vector<float> logits(data, data + N);
+        // Logit stats to see distribution
+        {
+            float mn = logits[0], mx = logits[0], sum = 0.f, sum2 = 0.f;
+            for (float v : logits) { mn = std::min(mn, v); mx = std::max(mx, v); sum += v; sum2 += v * v; }
+            float mean = sum / N;
+            float var = sum2 / N - mean * mean;
+            float stddev = var > 0.f ? std::sqrt(var) : 0.f;
+            std::cout << "logits stats (min/max/mean/std): " << mn << " / " << mx << " / " << mean << " / " << stddev << std::endl;
+        }
         float maxLogit = *std::max_element(logits.begin(), logits.end());
         float denom = 0.0f;
         for (float& v : logits) { v = std::exp(v - maxLogit); denom += v; }

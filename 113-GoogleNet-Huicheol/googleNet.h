@@ -76,10 +76,12 @@ class GoogleNet : public NeuralNet
     ConvolutionNode conv1;
     ReluNode relu1;
     MaxPoolingNode pool1;
+    std::unique_ptr<LRNNode> lrn1;
     ConvolutionNode conv2_reduce;
     ReluNode relu2_reduce;
     ConvolutionNode conv2;
     ReluNode relu2;
+    std::unique_ptr<LRNNode> lrn2;
     MaxPoolingNode pool2;
 
     // Inception blocks
@@ -108,6 +110,9 @@ public:
     Tensor& operator[](const std::string& name);
     void loadWeights(const JsonParser* json = nullptr, const SafeTensorsParser* safetensors = nullptr);
     void loadWeights(const SafeTensorsParser* safetensors);
+
+    // Debug: access intermediate activations
+    Tensor& debugTensor(const std::string& name);
 };
 
 #endif // GOOGLENET_H

@@ -242,11 +242,10 @@ InceptionBlockNode::InceptionBlockNode(uint32_t inChannels, uint32_t ch1x1, uint
     conv3x3 = std::make_unique<ConvolutionNode>(ch3x3red, ch3x3, 3, 1, 1);
     relu3x3 = std::make_unique<ReluNode>();
 
-    // 5x5 branch
+    // 5x5 branch (single 5x5 conv as in torchvision GoogLeNet)
     conv5x5_reduce = std::make_unique<ConvolutionNode>(inChannels, ch5x5red, 1);
     relu5x5_reduce = std::make_unique<ReluNode>();
-    // torchvision GoogLeNet uses 3x3 here (5x5 path factorized), keep name for consistency
-    conv5x5 = std::make_unique<ConvolutionNode>(ch5x5red, ch5x5, 3, 1, 1);
+    conv5x5 = std::make_unique<ConvolutionNode>(ch5x5red, ch5x5, 5, 1, 2);
     relu5x5 = std::make_unique<ReluNode>();
 
     // Pooling branch
@@ -287,6 +286,7 @@ InceptionBlockNode::InceptionBlockNode(uint32_t inChannels, uint32_t ch1x1, uint
 
 Tensor& InceptionBlockNode::operator[](const std::string& name)
 {
+    if (name == "out0") return (*concat)["out0"];
     if (name.starts_with("1x1.")) return (*conv1x1)[name.substr(4)];
     if (name.starts_with("3x3_reduce.")) return (*conv3x3_reduce)[name.substr(11)];
     if (name.starts_with("3x3.")) return (*conv3x3)[name.substr(4)];
@@ -309,7 +309,7 @@ void InceptionBlockNode::loadWeights(const JsonParser* json, const SafeTensorsPa
     loadConv(*conv3x3_reduce, inChannels, ch3x3redOut, 1, "3x3_reduce");
     loadConv(*conv3x3, ch3x3redOut, ch3x3Out, 3, "3x3");
     loadConv(*conv5x5_reduce, inChannels, ch5x5redOut, 1, "5x5_reduce");
-    loadConv(*conv5x5, ch5x5redOut, ch5x5Out, 3, "5x5");
+    loadConv(*conv5x5, ch5x5redOut, ch5x5Out, 5, "5x5");
     loadConv(*pool_proj, inChannels, poolProjOut, 1, "pool_proj");
 }
 
@@ -323,10 +323,12 @@ GoogleNet::GoogleNet(Device& device, uint32_t numClasses)
     , conv1(3, 64, 7, 2, 3) // stride 2, pad 3
     , relu1()
     , pool1(3, 2, 1)
+    , lrn1(std::make_unique<LRNNode>())
     , conv2_reduce(64, 64, 1)
     , relu2_reduce()
     , conv2(64, 192, 3, 1, 1) // pad 1
     , relu2()
+    , lrn2(std::make_unique<LRNNode>())
     , pool2(3, 2, 1)
     , pool3(3, 2, 1)
     , pool4(3, 2, 1)
@@ -349,7 +351,7 @@ GoogleNet::GoogleNet(Device& device, uint32_t numClasses)
 
     // Connect layers
     // Stem
-    input(0) - conv1 - relu1 - pool1 - conv2_reduce - relu2_reduce - conv2 - relu2 - pool2;
+    input(0) - conv1 - relu1 - pool1 - *lrn1 - conv2_reduce - relu2_reduce - conv2 - relu2 - *lrn2 - pool2;
 
     // Inception 3a
     // Note: We need to connect pool2 output to ALL branches of inception3a.
@@ -420,4 +422,30 @@ Tensor& GoogleNet::operator[](const std::string& name)
     if (name.starts_with("inception5b.")) return (*inception5b)[name.substr(12)];
 
     throw std::runtime_error("Unknown layer name in GoogleNet: " + name);
+}
+
+Tensor& GoogleNet::debugTensor(const std::string& name)
+{
+    if (name == "conv1.out") return conv1["out0"];
+    if (name == "pool1.out") return pool1["out0"];
+    if (name == "lrn1.out")  return (*lrn1)["out0"];
+    if (name == "conv2.out") return conv2["out0"];
+    if (name == "pool2.out") return pool2["out0"];
+    if (name == "lrn2.out")  return (*lrn2)["out0"];
+    if (name == "inception3a.out") return (*inception3a)["out0"];
+    if (name == "inception3b.out") return (*inception3b)["out0"];
+    if (name == "pool3.out") return pool3["out0"];
+    if (name == "inception4a.out") return (*inception4a)["out0"];
+    if (name == "inception4b.out") return (*inception4b)["out0"];
+    if (name == "inception4c.out") return (*inception4c)["out0"];
+    if (name == "inception4d.out") return (*inception4d)["out0"];
+    if (name == "inception4e.out") return (*inception4e)["out0"];
+    if (name == "pool4.out") return pool4["out0"];
+    if (name == "inception5a.out") return (*inception5a)["out0"];
+    if (name == "inception5b.out") return (*inception5b)["out0"];
+    if (name == "avgpool.out") return avgPool["out0"];
+    if (name == "flatten.out") return flatten["out0"];
+    if (name == "fc.out") return fc["out0"];
+
+    throw std::runtime_error("Unknown debug tensor name: " + name);
 }

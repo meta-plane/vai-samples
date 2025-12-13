@@ -52,6 +52,18 @@ public:
     void run(CommandBuffer cmdBuff) override;
 };
 
+class LRNNode : public Node
+{
+    // Local Response Normalization across channels
+    ComputePipeline lrn;
+    DescriptorSet lrnDescSet;
+    // Using GoogLeNet defaults: size=5, alpha=1e-4, beta=0.75, k=1.0
+public:
+    LRNNode();
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
 
 class GlobalAvgPoolNode : public Node
 {

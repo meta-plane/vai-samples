@@ -216,6 +216,12 @@ public:
         return _data->hostData.data();
     }
 
+    const float* hostData() const
+    {
+        if (!_data || _data->hostData.empty()) return nullptr;
+        return _data->hostData.data();
+    }
+
     void clearHostData()
     {
         _ASSERT(_data);

@@ -50,6 +50,47 @@ void main()
     out0[o] = 0.0;
 })";
 
+static const char* src_lrn = R"(
+#version 450
+// Local Response Normalization across channels (GoogLeNet style)
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };
+layout(set = 0, binding = 1) buffer InBuffer { float in0[]; };
+layout(push_constant) uniform PushConstants {
+    int H;
+    int W;
+    int C;
+    int size;    // window size across channels (e.g., 5)
+    float alpha; // usually 1e-4
+    float beta;  // usually 0.75
+    float k;     // usually 1.0
+};
+
+void main()
+{
+    int idx = int(gl_GlobalInvocationID.x);
+    int HW = H * W;
+    int total = HW * C;
+    if (idx >= total) return;
+
+    int hw = idx / C;
+    int c = idx - hw * C;
+    int h = hw / W;
+    int w = hw - h * W;
+
+    int halfWindow = size / 2;
+    float sumSq = 0.0;
+    for (int cc = max(0, c - halfWindow); cc <= min(C - 1, c + halfWindow); ++cc)
+    {
+        float v = in0[(h * W + w) * C + cc];
+        sumSq += v * v;
+    }
+
+    float norm = pow(k + (alpha / float(size)) * sumSq, beta);
+    out0[idx] = in0[idx] / norm;
+}
+)";
+
 static const char* src_maxpool = R"(
 #version 450
 #define FLT_MIN -3.402823466e+38
@@ -91,9 +132,7 @@ void main()
         {
             int w = w0 + dw;
 
-        #ifndef DISCARD_TAIL
-            if (h < H && w < W) 
-        #endif
+            if (0 <= h && h < H && 0 <= w && w < W) 
             {
                 maxVal = max(maxVal, in0[(h * W + w) * C + c]);
             }
@@ -602,6 +641,7 @@ void loadShaders()
     requestPipeline(src_relu);
     // requestPipeline(src_copy);
     requestPipeline(src_setZero);
+    requestPipeline(src_lrn);
     requestPipeline(src_maxpool);
     requestPipeline(src_im2col);
     requestPipeline(src_gemm_naive);
@@ -696,7 +736,7 @@ void ConvolutionNode::run(CommandBuffer cmdBuff)
             / (*this)["out0"].buffer()
             / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
         );
-}  
+}
 
 
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -740,7 +780,55 @@ void ReluNode::run(CommandBuffer cmdBuff)
             / (*this)["out0"].buffer()
             / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
         );
-}  
+}
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// LRNNode
+/////////////////////////////////////////////////////////////////////////////////////////
+LRNNode::LRNNode()
+{
+    addSlot("in0", NodeSlot::input);
+    addSlot("out0", NodeSlot::output);
+
+    lrn = requestPipeline(src_lrn);
+    lrnDescSet = lrn.descSetLayout(0).newDescSet(gDestSetPool);
+}
+
+void LRNNode::prepare()
+{
+    _ASSERT((*this)["in0"].validShape());
+    (*this)["out0"] = Tensor((*this)["in0"].shape());
+}
+
+void LRNNode::run(CommandBuffer cmdBuff)
+{
+    const auto& inShape = (*this)["in0"].shape();
+    uint32_t H = inShape[0], W = inShape[1], C = inShape[2];
+
+    lrnDescSet.write({
+        (*this)["out0"].buffer(),
+        (*this)["in0"].buffer(),
+    });
+
+    struct { int H, W, C, size; float alpha, beta, k; } push{};
+    push.H = (int)H; push.W = (int)W; push.C = (int)C;
+    push.size = 5;     // matching AlexNet/GoogLeNet style
+    push.alpha = 1e-4f;
+    push.beta = 0.75f;
+    push.k = 1.0f;
+
+    cmdBuff
+        .bindPipeline(lrn)
+        .bindDescSets({lrnDescSet})
+        .setPushConstants(0, sizeof(push), &push)
+        .dispatch(H * W * C)
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["out0"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
 
 
 /////////////////////////////////////////////////////////////////////////////////////////
