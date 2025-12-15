@@ -27,6 +27,7 @@ class MobileNetV2 : public NeuralNet
     GlobalAvgPoolNode globalAvgPool;
     FlattenNode flatten;
     FullyConnectedNode classifier;
+    SoftmaxNode softmax;
 
 public:
     MobileNetV2(Device& device, uint32_t numClasses = 1000);
@@ -35,6 +36,9 @@ public:
     Tensor& getInputTensor() { return stem.slot("in0").getValueRef(); };
     Tensor& getOutputTensor() { return output(0).slot("out0").getValueRef(); }
 
+    void setNodeNameFromParam(const std::string& cppName); // Set node names based on parameter names
+
+    // Access to Inverted Residual Blocks for weight loading
     std::vector<std::unique_ptr<InvertedResidualBlock>>& blocks() {
         return invertedResidualBlocks;
     }

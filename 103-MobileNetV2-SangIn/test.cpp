@@ -4,6 +4,8 @@
 #include "library/vulkanApp.h"
 #include "library/timeChecker.hpp"
 #include "models/MobileNetV2.h"
+#include "utils/utils.h"
+#include "utils/test_layers.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb/stb_image.h>
@@ -12,6 +14,8 @@
 #include <cstring>
 #include <iostream>
 #include <filesystem>
+
+// #define DEBUG_INFO
 
 
 template<uint32_t Channels>
@@ -46,6 +50,24 @@ std::vector<float> preprocess(const std::vector<uint8_t>& image, int w, int h) {
             result[i * 3 + c] = (val - mean[c]) / std[c];
         }
     }
+
+    #if defined(DEBUG_INFO)
+    // Debug: print 
+    for (auto [x,y] : {std::pair{0,0}, {56,56}, {112,112}}) 
+    {
+        uint32_t idx = (y * w + x) * 3;
+        
+        printf("Debug Preprocess Check at (%u,%u):\n", x, y);
+        printf("[Before] (%u, %u, %u) // [After] (%f, %f, %f)\n",
+            image[idx],
+            image[idx+1],
+            image[idx+2],
+            result[idx],
+            result[idx+1],
+            result[idx+2]);        
+    }
+    #endif
+
     return result;
 }
 
@@ -65,6 +87,8 @@ void loadWeights(MobileNetV2& net, const SafeTensorsParser& weights)
             if (cppName.find("depthwise.weight") != std::string::npos) {
                 if (shape.size() == 4 && shape[1] == 1) {
                     tensor.reshape(shape[0], shape[2], shape[3]); // [C_out, 1, K, K] -> [C_out, K, K]
+                    tensor.permute(1, 2, 0); // make it [K, K, C_out]
+                    tensor.reshape(shape[1] * shape[2], shape[0]); // flatten to [K*K, C_out]
                 }
             }
             else if (cppName.find(".weight") != std::string::npos) {
@@ -79,8 +103,25 @@ void loadWeights(MobileNetV2& net, const SafeTensorsParser& weights)
             }
             
             net[cppName] = std::move(tensor);
+            net.setNodeNameFromParam(cppName);
             
-            #if 1
+            // // print loaded tensor shape and first 10 elements (weight)
+            // printf("Tensor: %s shape=[", cppName.c_str());
+            // const auto& finalShape = net[cppName].shape();
+            // for(size_t i=0; i<finalShape.size() - 1; ++i) {
+            //     printf("%d x ", finalShape[i]);
+            // }
+            // printf("%d]\n", finalShape[finalShape.size() - 1]);
+            
+            // printf(" First 10 elements: [");
+            // const auto& data = net[cppName].hostData();
+            // for (size_t i = 0; i < std::min<size_t>(10 , net[cppName].numElements()); ++i) {
+            //     printf("%f%s", data[i], i < std::min<size_t>(10, net[cppName].numElements()) - 1 ? ", " : "");
+            // }
+            // printf("]\n");
+
+            #if defined(DEBUG_INFO)
+
             // Debug info
             const auto& finalShape = net[cppName].shape();
             printf("✓ Loaded %-40s <- %-40s shape=[", cppName.c_str(), ptName.c_str());
@@ -173,7 +214,7 @@ Tensor eval_ImageNet(const std::vector<float>& srcImage, uint32_t W, uint32_t H,
     }
     
     Tensor inputTensor(H, W, 3); // srcImage layout: [H][W][C]
-    inputTensor.set(srcImage);   // 데이터 복사
+    inputTensor.set(srcImage);   // data copy
     printf("Input Tensor Shape: [%d, %d, %d]\n", inputTensor.shape()[0], inputTensor.shape()[1], inputTensor.shape()[2]);
 
     Tensor result;
@@ -185,34 +226,6 @@ Tensor eval_ImageNet(const std::vector<float>& srcImage, uint32_t W, uint32_t H,
     }
 
     return result;
-}
-
-std::vector<float> downloadTensor(const Tensor& tensor)
-{
-    if (!tensor.numElements())
-        return {};
-
-    auto device = VulkanApp::get().device();
-    const size_t byteSize = tensor.numElements() * sizeof(float);
-
-    Buffer staging = device.createBuffer({
-        .size = byteSize,
-        .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        .reqMemProps = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-    });
-
-    device.newCommandBuffer(queue_compute)
-        .begin()
-        .copyBuffer(staging, tensor.buffer())
-        .end()
-        .submit()
-        .wait();
-
-    std::vector<float> host(tensor.numElements());
-    std::memcpy(host.data(), staging.map(), byteSize);
-    staging.unmap();
-
-    return host;
 }
 
 // smart pointer를 사용하여 SafeTensorsParser 객체를 반환하거나, 실패 시 nullptr를 반환
@@ -259,7 +272,7 @@ void test()
     // Load image and normalize
     const uint8_t channels = 3U;
     const uint32_t resolution = 224U;
-    std::string imagePath = std::string(PROJECT_CURRENT_DIR) + "/utils/shark.png";
+    std::string imagePath = std::string(PROJECT_CURRENT_DIR) + "/img/shark.png";
 
     std::cout << "Loading image from " << imagePath << "..." << std::endl;
     auto [srcImage, width, height] = readImage<channels>(imagePath.c_str()); // (H, W, C) == (224, 224, 3)
@@ -267,6 +280,17 @@ void test()
     _ASSERT(width == resolution && height == resolution);
 
     auto inputData = preprocess(srcImage, resolution, resolution);
+
+
+#if defined(DEBUG_INFO)
+    // Individual Node Tests
+    testRelu6();
+    testDepthwiseConv();
+    testPointwiseConv();
+    testInvertedResidualBlock();
+    testGlobalAvgPool();
+    testConvBnReLU6();
+#endif
 
     // Eval MobileNetV2
     const uint8_t iter = 1U;

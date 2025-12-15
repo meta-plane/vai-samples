@@ -528,7 +528,6 @@ void main()
 /////////////////////////////////////////////////////////////////////////////////////////
 // MobileNetV2-specific shaders
 /////////////////////////////////////////////////////////////////////////////////////////
-
 static const char* src_depthwise_conv = R"(
 #version 450
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
@@ -570,8 +569,8 @@ void main()
             if (h_in >= 0 && h_in < H && w_in >= 0 && w_in < W)
             {
                 int input_idx = (h_in * W + w_in) * C + c;
-                int weight_idx = c * K * K + kh * K + kw;
-                sum += in0[input_idx] * weight[weight_idx];
+                int k = kh * K + kw;
+                sum += in0[input_idx] * weight[k * C + c]; // [K*K, C] row-major 가정
             }
         }
     }
@@ -687,6 +686,42 @@ void main()
 }
 )";
 
+const char* src_softmax = R"(
+#version 450
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) buffer Output { float y[]; };
+layout(set = 0, binding = 1) buffer Input { float x[]; };
+
+layout(push_constant) uniform PushConstants {
+    int num_rows;
+    int row_size;
+};
+
+void main() {
+    int row = int(gl_GlobalInvocationID.x);
+    if (row >= num_rows) return;
+
+    int offset = row * row_size;
+
+    // Find max value
+    float max_val = x[offset];
+    for (int i = 1; i < row_size; ++i) {
+        max_val = max(max_val, x[offset + i]);
+    }
+
+    // Compute exp and sum
+    float sum_exp = 0.0;
+    for (int i = 0; i < row_size; ++i) {
+        sum_exp += exp(x[offset + i] - max_val);
+    }
+
+    // Normalize
+    for (int i = 0; i < row_size; ++i) {
+        y[offset + i] = exp(x[offset + i] - max_val) / sum_exp;
+    }
+}
+)";
 
 Device netGlobalDevice = VulkanApp::get().device();
 
@@ -759,6 +794,7 @@ void loadShaders()
     requestPipeline(src_global_avg_pool);
     requestPipeline(src_batchnorm);
     requestPipeline(src_relu6);
+    requestPipeline(src_softmax);
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -782,6 +818,9 @@ ConvolutionNode::ConvolutionNode(uint32_t inChannels, uint32_t outChannels, uint
     gemm = requestPipeline(gemmSrc);
     gemmTileSize = gGemmTileSize.at(gemmSrc);
     gemmDescSet = gemm.descSetLayout(0).newDescSet(gDestSetPool);
+
+    // setname
+    setName("ConvolutionNode");
 }
 
 void ConvolutionNode::prepare()
@@ -880,6 +919,9 @@ DepthwiseConvNode::DepthwiseConvNode(uint32_t channels, uint32_t kernelWidth, ui
     
     depthwiseConv = requestPipeline(src_depthwise_conv);
     depthwiseConvDescSet = depthwiseConv.descSetLayout(0).newDescSet(gDestSetPool);
+
+    // setname
+    setName("DepthwiseConvNode");
 }
 
 void DepthwiseConvNode::prepare()
@@ -935,7 +977,7 @@ void DepthwiseConvNode::run(CommandBuffer cmdBuff)
         .bindPipeline(depthwiseConv)
         .bindDescSets({depthwiseConvDescSet})
         .setPushConstants(0, sizeof(constants), constants)
-        .dispatch(CEIL_DIV(H_out, 16), CEIL_DIV(W_out, 16), C)
+        .dispatch(CEIL_DIV(W_out, 16), CEIL_DIV(H_out, 16), C)
         .barrier( 
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["out0"].buffer()
@@ -961,6 +1003,9 @@ PointwiseConvNode::PointwiseConvNode(uint32_t inChannels, uint32_t outChannels)
     gemmDescSet = gemm.descSetLayout(0).newDescSet(gDestSetPool);
 
     _ASSERT(gemmTileSize == 32);
+
+    // setname
+    setName("PointwiseConvNode");
 }
 
 void PointwiseConvNode::prepare()
@@ -1021,6 +1066,9 @@ AddNode::AddNode()
 
     add = requestPipeline(src_add);
     addDescSet = add.descSetLayout(0).newDescSet(gDestSetPool);
+
+    // setname
+    setName("AddNode");
 }
 
 void AddNode::prepare()
@@ -1069,6 +1117,9 @@ BatchNormNode::BatchNormNode(float epsilon)
 
     batchNorm = requestPipeline(src_batchnorm);
     batchNormDescSet = batchNorm.descSetLayout(0).newDescSet(gDestSetPool);
+
+    // setname
+    setName("BatchNormNode");
 }
 
 void BatchNormNode::prepare()
@@ -1132,6 +1183,9 @@ ReluNode::ReluNode()
 
     relu = requestPipeline(src_relu);
     reluDescSet = relu.descSetLayout(0).newDescSet(gDestSetPool);
+
+    // setname
+    setName("ReluNode");
 }
 
 void ReluNode::prepare()
@@ -1175,6 +1229,9 @@ Relu6Node::Relu6Node()
 
     relu6 = requestPipeline(src_relu6);
     relu6DescSet = relu6.descSetLayout(0).newDescSet(gDestSetPool);
+
+    // setname
+    setName("Relu6Node");
 }
 
 void Relu6Node::prepare()
@@ -1217,6 +1274,9 @@ MaxPoolingNode::MaxPoolingNode(uint32_t poolSize)
 
     maxpool = requestPipeline(src_maxpool);
     maxpoolDescSet = maxpool.descSetLayout(0).newDescSet(gDestSetPool);
+
+    // setname
+    setName("MaxPoolingNode");
 }
 
 void MaxPoolingNode::prepare()
@@ -1267,6 +1327,9 @@ GlobalAvgPoolNode::GlobalAvgPoolNode()
 
     globalAvgPool = requestPipeline(src_global_avg_pool);
     globalAvgPoolDescSet = globalAvgPool.descSetLayout(0).newDescSet(gDestSetPool);
+
+    // setname
+    setName("GlobalAvgPoolNode");
 }
 
 void GlobalAvgPoolNode::prepare()
@@ -1311,6 +1374,9 @@ FlattenNode::FlattenNode()
 {
     addSlot("in0", NodeSlot::input);
     addSlot("out0", NodeSlot::output);
+
+    // setname
+    setName("FlattenNode");
 }
 
 void FlattenNode::prepare()
@@ -1324,6 +1390,60 @@ void FlattenNode::run(CommandBuffer cmdBuff)
 {
 }  
 
+/////////////////////////////////////////////////////////////////////////////////////////
+// SoftmaxNode
+/////////////////////////////////////////////////////////////////////////////////////////
+SoftmaxNode::SoftmaxNode()
+{
+    addSlot("in0", NodeSlot::input);
+    addSlot("out0", NodeSlot::output);
+
+    softmax = requestPipeline(src_softmax);
+    softmaxDescSet = softmax.descSetLayout(0).newDescSet(gDestSetPool);
+
+    // setname
+    setName("SoftmaxNode");
+}
+
+void SoftmaxNode::prepare()
+{
+    Tensor& input = (*this)["in0"];
+    _ASSERT(input.validShape());
+
+    // Output has same shape as input
+    (*this)["out0"] = Tensor(input.shape());
+}
+
+void SoftmaxNode::run(CommandBuffer cmdBuff)
+{
+    Tensor& input = (*this)["in0"];
+    Tensor& output = (*this)["out0"];
+
+    auto shape = input.shape();
+    int num_rows = 1;
+    for (size_t i = 0; i < shape.size() - 1; ++i) {
+        num_rows *= shape[i];
+    }
+    int row_size = shape.back();
+
+    softmaxDescSet.write({
+        output.buffer(),
+        input.buffer()
+    });
+
+    int constants[] = {num_rows, row_size};
+
+    cmdBuff
+        .bindPipeline(softmax)
+        .setPushConstants(0, sizeof(constants), constants)
+        .bindDescSets({softmaxDescSet})
+        .dispatch0(CEIL_DIV(num_rows, 64))
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / output.buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // FullyConnectedNode
@@ -1346,6 +1466,9 @@ FullyConnectedNode::FullyConnectedNode(uint32_t inDim, uint32_t outDim)
 
 	setZero = requestPipeline(src_setZero);
     setZeroDescSet = setZero.descSetLayout(0).newDescSet(gDestSetPool);
+
+    // setname
+    setName("FullyConnectedNode");
 }
 
 void FullyConnectedNode::prepare() 
@@ -1360,7 +1483,7 @@ void FullyConnectedNode::prepare()
         bias.set(zeros);
     }
     _ASSERT((*this)["bias"].isShapeOf(O));
-    (*this)["out0"] = Tensor(O); 
+    (*this)["out0"] = Tensor(O);
 }
 
 void FullyConnectedNode::run(CommandBuffer cmdBuff) 
@@ -1562,8 +1685,7 @@ Tensor& PWConvBN::operator[](const std::string& slotName)
 
 DWConvBNReLU6::DWConvBNReLU6(uint32_t channels,
                              uint32_t kernel,
-                             uint32_t stride,
-                             uint32_t padding)
+                             uint32_t stride)
 {
     // 1) primitive Node 생성
     depthwiseConv = std::make_unique<DepthwiseConvNode>(channels,
@@ -1619,77 +1741,65 @@ InvertedResidualBlock::InvertedResidualBlock(uint32_t inChannels,
                                              uint32_t stride)
 {
     const uint32_t expandedChannels = inChannels * expansionFactor;
-    useResidual = (stride == 1 && inChannels == outChannels); // Skip connection 유무 확인
+    useResidual = ((stride == 1) && (inChannels == outChannels));
 
-    NodeSlot* mainIn  = nullptr;  // main branch 입력
-    NodeSlot* mainOut = nullptr;  // main branch 현재 출력
-    NodeSlot* skipOut = nullptr;  // skip branch 입력(=원본)
+    NodeSlot* cur = nullptr;
+    NodeSlot* skipOut = nullptr;
 
-    // ── 0) residual이면 InputNode로 입력을 분기 ─────────────────────
-    if (useResidual) {
+    if (useResidual)
+    {
         inputSplit = std::make_unique<InputNode>();
-
         defineSlot("in0", inputSplit->slot("in0"));
 
-        mainIn  = &inputSplit->slot("out0");
-        skipOut = &inputSplit->slot("out0");
+        cur = &inputSplit->slot("out0");
+        skipOut = cur;
     }
 
-    // ── 1) expand stage (expansionFactor == 1이면 생략) ─────────────────────
+    // 1) expand
     if (expansionFactor != 1)
     {
         pwConvBNReLU6 = std::make_unique<PWConvBNReLU6>(inChannels, expandedChannels);
 
         if (useResidual)
-        {
-            *mainIn - pwConvBNReLU6->slot("in0");
-        }
+            *cur - pwConvBNReLU6->slot("in0");
         else
-        {
             defineSlot("in0", pwConvBNReLU6->slot("in0"));
-        }
-        mainOut = &pwConvBNReLU6->slot("out0");
+
+        cur = &pwConvBNReLU6->slot("out0");
     }
 
-    // ── 2) depthwise stage ────────────────────────────────
+    // 2) depthwise (여기가 expansionFactor==1인 경우의 첫 연산이 될 수 있음)
     const uint32_t dwInChannels = (expansionFactor != 1) ? expandedChannels : inChannels;
-    dwConvBNReLU6 = std::make_unique<DWConvBNReLU6>(dwInChannels, 3, stride, 0);
+    dwConvBNReLU6 = std::make_unique<DWConvBNReLU6>(dwInChannels, 3, stride);
 
-    if (mainOut)
+    if (cur)
     {
-        *mainOut - dwConvBNReLU6->slot("in0");
+        *cur - dwConvBNReLU6->slot("in0");
     }
     else
     {
-        if (useResidual)
-        {
-            *mainIn - dwConvBNReLU6->slot("in0");
-        }
-        else
-        {
-            defineSlot("in0", dwConvBNReLU6->slot("in0"));
-        }
+        // useResidual == false 이면서 expand도 없는 케이스
+        defineSlot("in0", dwConvBNReLU6->slot("in0"));
     }
-    mainOut = &dwConvBNReLU6->slot("out0");
-    
-    // ── 3) project stage ──────────────────────────────────
+
+    cur = &dwConvBNReLU6->slot("out0");
+
+    // 3) project
     pwConvBN = std::make_unique<PWConvBN>(dwInChannels, outChannels);
-    *mainOut - pwConvBN->slot("in0");
-    mainOut = &pwConvBN->slot("out0");
-    
-    // ── 4) residual add ───────────────────────────────────
+    *cur - pwConvBN->slot("in0");
+    cur = &pwConvBN->slot("out0");
+
+    // 4) residual add
     if (useResidual)
     {
         add = std::make_unique<AddNode>();
-
-        *skipOut    - add->slot("in0");
-        *mainOut    - add->slot("in1");
-
+        *skipOut - add->slot("in0");
+        *cur     - add->slot("in1");
         defineSlot("out0", add->slot("out0"));
     }
     else
     {
-        defineSlot("out0", *mainOut);
+        defineSlot("out0", *cur);
     }
 }
 

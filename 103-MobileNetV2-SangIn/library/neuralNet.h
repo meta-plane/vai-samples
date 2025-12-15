@@ -9,7 +9,10 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <cstring>  // memcpy
+#include <iostream> // for debug
 
+#define PRINT_LAYER_OUTPUT
+#include "../utils/utils.h"
 
 using namespace vk;
 
@@ -408,11 +411,29 @@ inline void NeuralNet::prepare()
 {
 }
 
+static void printTensorShape(const std::string& nodeTag,
+    const std::string& slotName,
+    const Tensor& t)
+{
+    printf("[%s] %s shape=[", nodeTag.c_str(), slotName.c_str());
+    const auto& s = t.shape();
+    for (size_t i = 0; i < s.size(); ++i)
+        printf("%u%s", s[i], (i + 1 < s.size()) ? "x" : "");
+    printf("] elems=%zu host=%d dev=%d\n",
+        t.numElements(),
+        t.hasHostData() ? 1 : 0,
+        t.hasDeviceData() ? 1 : 0);
+}
+
 /*
 Assume that tensors are assigned only to input slots that require explicit user input.
 */
 inline void NeuralNet::run()
 {
+    #if defined(PRINT_LAYER_OUTPUT)
+    std::vector<std::pair<std::string, Tensor>> pendingDumps;
+    #endif
+
     if (sortedNodes.empty())
         sortNodes();
 
@@ -423,6 +444,29 @@ inline void NeuralNet::run()
         // - Verify whether each input slot is assigned to a tensor and the tensor has the correct shape.
         // - Assign tensor for output/internal slots
         node->prepare();
+
+        #if 0
+        // Debug: print tensor shapes of convolution-like nodes
+        bool isConvLike =
+            (node->slots.count("weight") > 0) ||
+            (node->slots.count("depthwiseConv.weight") > 0) ||
+            (node->slots.count("pointwiseConv.weight") > 0);
+
+        if (isConvLike) {
+            char nodeId[64];
+            snprintf(nodeId, sizeof(nodeId), "node@%p", (void*)node);
+
+            auto itIn = node->slots.find("in0");
+            if (itIn != node->slots.end())
+                printTensorShape(nodeId, "in0", itIn->second.getValueRef());
+
+            auto itOut = node->slots.find("out0");
+            if (itOut != node->slots.end())
+                printTensorShape(nodeId, "out0", itOut->second.getValueRef());
+
+            printf("--------------------------------------------------\n");
+        }
+        #endif
 
         // - Share tensor of output slots with connected input slots
         // - Input slots are classified as two types 
@@ -449,7 +493,7 @@ inline void NeuralNet::run()
                         
                         Buffer buffer = bufferPool.requestBuffer(
                             device,
-                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, 
+                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, 
                             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                             byteSize,
                             // tensor.isConstant() ? byteSize * 1.5f : byteSize * 4.0f
@@ -506,6 +550,13 @@ inline void NeuralNet::run()
         // Record the command buffer for executing the program of the node
         node->run(cmdBuffer);        
 
+        #if defined(PRINT_LAYER_OUTPUT)
+        pendingDumps.emplace_back(node->name + ".in0", node->slot("in0").getValueRef());
+        if (node->slots.count("weight") > 0)       
+            pendingDumps.emplace_back(node->name + ".weight", node->slot("weight").getValueRef());
+        pendingDumps.emplace_back(node->name + ".out0", node->slot("out0").getValueRef());
+        #endif
+
         // invlaidate the tensor to return the bound buffer to the pool
         for (auto& [name, slot] : node->slots)
         {
@@ -520,6 +571,26 @@ inline void NeuralNet::run()
     }
 
     device.queue() << cmdBuffer.end() << waiting;
+
+    #if defined(PRINT_LAYER_OUTPUT)
+    for (auto& [tag, tensor] : pendingDumps)
+    {
+        auto data = downloadTensor(tensor);
+
+        std::cout << "[DUMP] " << tag << " : \n";
+        
+        std::cout << "  Shape: ";
+        const auto& shape = tensor.shape();
+        for (size_t i = 0; i < shape.size(); ++i)
+            std::cout << shape[i] << (i + 1 < shape.size() ? " x " : "\n");
+
+        std::cout << "  Data (first 10 elements): ";
+        for (size_t i = 0; i < std::min<size_t>(10, data.size()); ++i)
+            std::cout << data[i] << " ";
+        std::cout << "\n\n";
+    }
+    #endif
+
     uploadBufferOffset = 0; 
 }
 

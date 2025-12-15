@@ -63,9 +63,13 @@ MobileNetV2::MobileNetV2(Device& device, uint32_t numClasses)
     lastOutput = &flatten.slot("out0");
 
     *lastOutput - classifier.slot("in0");
+    lastOutput = &classifier.slot("out0");
+    
+    *lastOutput - softmax.slot("in0");
+    lastOutput = &softmax.slot("out0");
 
     // Connect output node
-    classifier.slot("out0") - output(0).slot("in0");
+    *lastOutput - output(0).slot("in0");
 }
 
 Tensor& MobileNetV2::operator[](const std::string& name)
@@ -88,4 +92,80 @@ Tensor& MobileNetV2::operator[](const std::string& name)
         return classifier[name.substr(11)];
 
     throw std::runtime_error("MobileNetV2: Tensor not found: " + name);
+}
+
+void MobileNetV2::setNodeNameFromParam(const std::string& cppName)
+{
+    // nodePath: "stem.conv", "features.0.dwConvBNReLU6.depthwiseConv" ...
+    std::string nodePath;
+    size_t lastDot = cppName.rfind('.');
+    if (lastDot != std::string::npos)
+        nodePath = cppName.substr(0, lastDot);
+    else
+        nodePath = cppName;
+
+    // stem.*
+    if (nodePath.rfind("stem.", 0) == 0) {
+        std::string sub = nodePath.substr(5); // after "stem."
+        if (sub == "conv" && stem.convNode()) stem.convNode()->setName("stem.conv");
+        else if (sub == "bn" && stem.bnNode()) stem.bnNode()->setName("stem.bn");
+        return;
+    }
+
+    // finalConv.*
+    if (nodePath.rfind("finalConv.", 0) == 0) {
+       std::string sub = nodePath.substr(10);
+       if (sub == "pointwiseConv" && finalConv.pointwiseConvNode())
+           finalConv.pointwiseConvNode()->setName("finalConv.pointwiseConv");
+       else if (sub == "bn" && finalConv.bnNode())
+           finalConv.bnNode()->setName("finalConv.bn");
+       return;
+    }
+
+    // features.N....
+    if (nodePath.rfind("features.", 0) == 0) {
+       size_t idxStart = 9;
+       size_t dotPos = nodePath.find('.', idxStart);
+       if (dotPos == std::string::npos) return;
+       int blockIdx = std::stoi(nodePath.substr(idxStart, dotPos - idxStart));
+       if (blockIdx < 0 || (size_t)blockIdx >= invertedResidualBlocks.size()) return;
+       std::string rest = nodePath.substr(dotPos + 1); // e.g., "dwConvBNReLU6.depthwiseConv"
+
+       auto& block = *invertedResidualBlocks[blockIdx];
+
+       // dwConvBNReLU6.*
+       if (rest.rfind("dwConvBNReLU6.", 0) == 0) {
+           std::string sub = rest.substr(strlen("dwConvBNReLU6."));
+           if (sub == "depthwiseConv" && block.dw() && block.dw()->depthwiseConvNode())
+               block.dw()->depthwiseConvNode()->setName("features." + std::to_string(blockIdx) + ".dwConvBNReLU6.depthwiseConv");
+           else if (sub == "bn" && block.dw() && block.dw()->bnNode())
+               block.dw()->bnNode()->setName("features." + std::to_string(blockIdx) + ".dwConvBNReLU6.bn");
+           return;
+       }
+
+       // pwConvBN.*
+       if (rest.rfind("pwConvBN.", 0) == 0) {
+           std::string sub = rest.substr(strlen("pwConvBN."));
+           if (sub == "pointwiseConv" && block.pw() && block.pw()->pointwiseConvNode())
+               block.pw()->pointwiseConvNode()->setName("features." + std::to_string(blockIdx) + ".pwConvBN.pointwiseConv");
+           else if (sub == "bn" && block.pw() && block.pw()->bnNode())
+               block.pw()->bnNode()->setName("features." + std::to_string(blockIdx) + ".pwConvBN.bn");
+           return;
+       }
+
+       // pwConvBNReLU6.*
+       if (rest.rfind("pwConvBNReLU6.", 0) == 0) {
+           std::string sub = rest.substr(strlen("pwConvBNReLU6."));
+           if (sub == "pointwiseConv" && block.expandPW() && block.expandPW()->pointwiseConvNode())
+               block.expandPW()->pointwiseConvNode()->setName("features." + std::to_string(blockIdx) + ".pwConvBNReLU6.pointwiseConv");
+           else if (sub == "bn" && block.expandPW() && block.expandPW()->bnNode())
+               block.expandPW()->bnNode()->setName("features." + std::to_string(blockIdx) + ".pwConvBNReLU6.bn");
+           return;
+       }
+    }
+
+    // classifier (fully connected)
+    if (nodePath.rfind("classifier", 0) == 0) {
+       classifier.setName("classifier");
+    }
 }

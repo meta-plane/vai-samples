@@ -10,7 +10,9 @@ add_executable(${PROJECT_NAME}
     library/neuralNodes.cpp
     library/spirvHelpers.cpp
     library/jsonParser.cpp
-    library/safeTensorsParser.cpp
+    library/safeTensorsParser.cpp    
+    utils/utils.cpp
+    utils/test_layers.cpp    
 )
 
 add_definitions(

@@ -1,7 +1,6 @@
 #ifndef NEURAL_NODES_H
 #define NEURAL_NODES_H
 
-
 #include "neuralNet.h"
 
 
@@ -128,14 +127,25 @@ public:
     void run(CommandBuffer cmdBuff) override;
 };
 
-
 class FlattenNode : public Node
 {
-    ComputePipeline copy;
-    DescriptorSet copyDescSet;
+    ComputePipeline flatten;
+    DescriptorSet flattenDescSet;
 
 public:
     FlattenNode();
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+class SoftmaxNode : public Node
+{
+    ComputePipeline softmax;
+    DescriptorSet softmaxDescSet;
+
+public:
+    SoftmaxNode();
+
     void prepare() override;
     void run(CommandBuffer cmdBuff) override;
 };
@@ -172,6 +182,11 @@ public:
                 uint32_t padding = 0);
 
     Tensor& operator[](const std::string& slotName);
+
+    // accessors for naming
+    ConvolutionNode* convNode() { return conv.get(); }
+    BatchNormNode*   bnNode()   { return bn.get(); }
+    Relu6Node*       reluNode() { return relu.get(); }
 };
 
 class PWConvBNReLU6 : public NodeGroup
@@ -185,6 +200,11 @@ public:
                   uint32_t outChannels);
     
     Tensor& operator[](const std::string& slotName);
+
+    // accessors for naming
+    PointwiseConvNode* pointwiseConvNode() { return pointwiseConv.get(); }
+    BatchNormNode*     bnNode()            { return bn.get(); }
+    Relu6Node*         reluNode()          { return relu.get(); }
 };
 
 class PWConvBN : public NodeGroup
@@ -197,6 +217,10 @@ public:
               uint32_t outChannels);
     
     Tensor& operator[](const std::string& slotName);
+
+    // accessors for naming
+    PointwiseConvNode* pointwiseConvNode() { return pointwiseConv.get(); }
+    BatchNormNode*     bnNode()            { return bn.get(); }
 };
 
 class DWConvBNReLU6 : public NodeGroup
@@ -208,10 +232,14 @@ class DWConvBNReLU6 : public NodeGroup
 public:
     DWConvBNReLU6(uint32_t channels,
                   uint32_t kernel,
-                  uint32_t stride = 1,
-                  uint32_t padding = 0);
+                  uint32_t stride = 1);
 
     Tensor& operator[](const std::string& slotName);
+
+    // accessors for naming
+    DepthwiseConvNode* depthwiseConvNode() { return depthwiseConv.get(); }
+    BatchNormNode*     bnNode()            { return bn.get(); }
+    Relu6Node*         reluNode()          { return relu.get(); }
 };
 
 class InvertedResidualBlock : public NodeGroup
@@ -231,6 +259,12 @@ public:
                           uint32_t stride);
 
     Tensor& operator[](const std::string& slotName);
+
+    // accessors to inner groups/nodes
+    PWConvBNReLU6* expandPW() { return pwConvBNReLU6.get(); }
+    DWConvBNReLU6* dw()       { return dwConvBNReLU6.get(); }
+    PWConvBN*      pw()       { return pwConvBN.get(); }
+    AddNode*       addNode()   { return add.get(); }
 };
 
 extern Device netGlobalDevice; // Global device for neural network operations
