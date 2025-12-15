@@ -76,7 +76,6 @@ public:
 
 	Tensor& operator[](const std::string& name)
 	{
-		// 구분자 "." 의 위치를 찾음
 		size_t delimiterPos = name.find(".");
 
 		if (delimiterPos == std::string::npos)

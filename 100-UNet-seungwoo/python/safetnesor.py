@@ -32,6 +32,7 @@ def conv_to_vkB(w_tensor, is_deconv=False):
         # Case 1: ConvTranspose2d (Deconvolution)
         # PyTorch 저장 형태: [In, Out, kH, kW]
         # ---------------------------------------------------------
+        w = w[:, :, ::-1, ::-1]
         I, O, kH, kW = w.shape
         
         # 목표: [In * kH * kW, Out]

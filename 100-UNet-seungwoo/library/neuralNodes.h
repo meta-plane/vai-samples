@@ -4,25 +4,33 @@
 #include "../shaders/shaders.hpp"
 #include "neuralNet.h"
 
-class ConCatNode : public Node
+class SigmoidNode : public Node
 {
-    uint32_t        dim_;
-
-    ComputePipeline concat;
-    DescriptorSet concatDescSet;
+    ComputePipeline sigmoid;
+    DescriptorSet sigmoidDescSet;
 
 public:
-    ConCatNode(uint32_t dim);
-    ~ConCatNode() override = default;
+    SigmoidNode();
+    ~SigmoidNode() override = default;
 
     void prepare() override;
     void run(CommandBuffer cmdBuff) override;
 };
 
+class ConcatNode : public Node
+{
+    ComputePipeline concat;
+    DescriptorSet concatDescSet;
+
+public:
+    ConcatNode();
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
 class ConvTransposeNode : public Node
 {
 public:
-    ConvTransposeNode(uint32_t inChannels,uint32_t outChannels,uint32_t kernelSize,uint32_t stride = 2,uint32_t padding = 0);
+    ConvTransposeNode(uint32_t inChannels, uint32_t outChannels, uint32_t kernelSize, uint32_t stride = 2, uint32_t padding = 0);
 
     void prepare() override;
     void run(CommandBuffer cmdBuff) override;

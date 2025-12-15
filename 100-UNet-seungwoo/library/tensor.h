@@ -10,6 +10,7 @@
 #include <vector>
 #include <map>
 #include <unordered_map>
+#include <fstream>
 
 
 class BufferPool
@@ -93,6 +94,9 @@ class Tensor
     bool _isConstant = false;
 
 public:
+    static Tensor   fromFile(const std::string& filename);
+    static bool     toFile(const std::string& filename, Tensor&& tensor);
+
     template <typename... Ts>
     Tensor(Ts... dims) : _data(std::make_shared<TensorData>())
     {
@@ -308,6 +312,59 @@ inline Tensor& Tensor::permute(Ts... Perms)
     _shape = std::move(dstShape);
     _data->hostData = std::move(dstData);
     return *this;
+}
+
+inline Tensor Tensor::fromFile(const std::string& filename)
+{
+    std::ifstream file(filename, std::ios::binary);
+    if (!file)
+        throw std::runtime_error("Failed to open file: " + filename);
+
+    uint32_t rank = 0;
+    file.read(reinterpret_cast<char*>(&rank), sizeof(rank));
+    if (rank == 0 || rank > 32)
+        throw std::runtime_error("Invalid rank in file.");
+    
+    std::vector<uint32_t> shape(rank);
+    file.read(reinterpret_cast<char*>(shape.data()), sizeof(uint32_t) * rank);
+
+    Tensor tensor(shape);
+    size_t elemCount = tensor.numElements();
+
+    // data
+    std::vector<float> data(elemCount);
+    file.read(reinterpret_cast<char*>(data.data()), sizeof(float) * elemCount);
+
+    tensor.set(std::move(data));
+
+    return tensor;
+}
+
+inline bool Tensor::toFile(const std::string& filename, Tensor&& tensor)
+{
+    if (!tensor.validShape())
+        throw std::runtime_error("Invalid tensor shape.");
+
+    std::ofstream file(filename, std::ios::binary);
+    if (!file)
+        throw std::runtime_error("Failed to open file for writing: " + filename);
+
+    auto shape = tensor.shape();
+    uint32_t rank = static_cast<uint32_t>(shape.size());
+    size_t elemCount = tensor.numElements();
+
+	const float* data = tensor.hostData();
+
+    // rank
+    file.write(reinterpret_cast<const char*>(&rank), sizeof(rank));
+    
+    // shape
+    file.write(reinterpret_cast<const char*>(shape.data()), sizeof(uint32_t) * rank);
+    
+    // data
+    file.write(reinterpret_cast<const char*>(data), elemCount * sizeof(float));
+	
+    return true;
 }
 
 #endif // TENSOR_H

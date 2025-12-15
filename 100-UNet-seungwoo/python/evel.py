@@ -6,6 +6,8 @@ import cv2
 import matplotlib.pyplot as plt
 import os
 
+from utils import save_tensor_bin
+
 from models.unet import Unet
 
 def run_inference(pth_path, image_path, in_channels=1, img_size=(256, 256)):
@@ -41,6 +43,28 @@ def run_inference(pth_path, image_path, in_channels=1, img_size=(256, 256)):
     # 3. 모델을 평가 모드로 전환 (Dropout, BatchNorm 등의 동작 고정)
     model.eval()
 
+    SAVE_DIR = "./debug_layers/"  # 저장할 폴더
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    hook_handles = []
+
+    def get_save_hook(name):
+        """레이어의 출력을 가로채서 bin 파일로 저장하는 Hook 함수"""
+        def hook(model, input, output):
+            file_name = f"{name}.bin"
+            save_path = os.path.join(SAVE_DIR, file_name)
+            save_tensor_bin(save_path, output)
+        return hook
+
+    print("\n=== Registering Hooks for Layer Outputs ===")
+    # 모델의 직계 자식 모듈(encoderConv1_, pool1_ 등)에 훅 등록
+    for name, module in model.named_children():
+        print(f" -> Hook registered: {name}")
+        handle = module.register_forward_hook(get_save_hook(name))
+        hook_handles.append(handle)
+    print("===========================================\n")
+    # ---------------------------------------------------------
+
+
     # 4. 이미지 전처리
     if in_channels == 1:
         # 흑백으로 읽기
@@ -53,12 +77,13 @@ def run_inference(pth_path, image_path, in_channels=1, img_size=(256, 256)):
     if original_img is None:
         print("Error: Image not found!")
         return
-
-    # 이미지 리사이즈 (모델 학습 시 크기에 맞춤)
-    img = cv2.resize(original_img, img_size)
     
     # 정규화 (0~255 -> 0.0~1.0)
-    img = img.astype(np.float32) / 255.0
+    img = original_img.astype(np.float32) / 255.0
+
+    tensor = torch.from_numpy(img)
+    
+    save_tensor_bin('image.bin', tensor)
 
     # 텐서 변환 및 차원 추가
     if in_channels == 1:
@@ -80,8 +105,13 @@ def run_inference(pth_path, image_path, in_channels=1, img_size=(256, 256)):
         prediction = torch.sigmoid(output)
         
         # 임계값 적용 (0.5 이상이면 1, 아니면 0) - 필요시 사용
-        mask = (prediction > 0.5).float()
+        # mask = (prediction > 0.5).float()
+        mask = prediction
 
+
+    for handle in hook_handles:
+        handle.remove()
+    print("\n=== Hooks Removed & Inference Done ===\n")
     # 6. 결과 시각화 (Tensor -> Numpy 변환)
     # [1, 1, H, W] -> [H, W]
     pred_mask = mask.squeeze().cpu().numpy()
@@ -102,11 +132,12 @@ def run_inference(pth_path, image_path, in_channels=1, img_size=(256, 256)):
     plt.imshow(pred_mask, cmap='gray') # 마스크는 보통 흑백으로 표현
     
     plt.show()
+    plt.waitforbuttonpress()
 
 # --- 실행 예시 ---
 # 실제 파일 경로로 수정해서 실행하세요.
 # 예: CHECK_POINT_DIR/epoch_0010/unet.pth
-PTH_FILE = "workspace/checkpoint/epoch_0049/unet.pth" 
+PTH_FILE = "D:/VAI/weight/unet.pth" 
 IMG_FILE = "D:/VAI/images/image.png"
 
 if __name__ == "__main__":

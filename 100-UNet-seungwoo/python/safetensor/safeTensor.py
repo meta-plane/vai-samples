@@ -94,8 +94,9 @@ import numpy as np
 from safetensors.torch import save_file
 from collections import OrderedDict
 
-INPUT_PTH = './weight/unet.pth'
-OUTPUT_SAFE = './weight/unet.safetensors'
+ROOT_PATH = 'D://VAI//weight//'
+INPUT_PTH = 'unet.pth'
+OUTPUT_SAFE = 'unet.safetensors'
 
 # --- [변환 헬퍼 함수 시작] ---
 def _to_cpu_np(t):
@@ -112,12 +113,38 @@ def conv_to_vkB(w_tensor):
     Returns np.float32 array of shape [I*K*K, O].
     """
     w = _to_cpu_np(w_tensor)
-    if w.ndim != 4:
-        return w # 4차원이 아니면 원본 반환 (예외 처리)
+    w_t = w.transpose(1, 2, 3, 0)
+
+    I = w_t.shape[0] # In Channel
+    H = w_t.shape[1] # Kernel Height
+    W = w_t.shape[2] # Kernel Width
+    O = w_t.shape[3] # Out Channel
         
-    O, I, kH, kW = w.shape
     # [Out, In, H, W] -> [Out, In*H*W] -> [In*H*W, Out] (Transpose)
-    return w.reshape(O, I * kH * kW).transpose(1, 0).astype(np.float32, copy=True)
+    return w_t.reshape(I * H * W, O).astype(np.float32, copy=True)
+
+def conv_transpose_to_vkB(w_tensor):
+    """
+    [C++ Logic Mapping]
+    Origin: [In, Out, H, W]
+    Permute: (0, 2, 3, 1) -> [In, H, W, Out]
+    Reshape: (In * H * W, Out)
+    """
+    w = _to_cpu_np(w_tensor) # Shape: (In, Out, H, W)
+
+    # 1. Permute (순서 변경): [In, Out, H, W] -> [In, H, W, Out]
+    # C++: w.permute(0, 2, 3, 1)
+    w_t = w.transpose(0, 2, 3, 1)
+
+    I = w_t.shape[0] # In Channel
+    H = w_t.shape[1] # Kernel Height
+    W = w_t.shape[2] # Kernel Width
+    O = w_t.shape[3] # Out Channel
+
+    # 2. Reshape (모양 변경): [In * H * W, Out]
+    # C++: reshape(shape[0] * shape[2] * shape[3], shape[1])
+    # 파이썬에서는 -1을 쓰면 자동으로 계산해주지만, C++ 코드와 똑같이 명시하면 아래와 같습니다.
+    return w_t.reshape(I * H * W, O).astype(np.float32, copy=True)
 
 def linear_to_vkB(w_tensor):
     """
@@ -201,12 +228,15 @@ def convert_to_safetensors(input_path, output_path):
         if isinstance(value, torch.Tensor):
             # 3-1. Convolution Weight 감지 (4차원 + 이름에 weight 포함)
             if value.ndim == 4 and "weight" in key:
-                # [Out, In, kH, kW] -> [In*k*k, Out] 변환
-                np_converted = conv_to_vkB(value)
+                
+                if "trans" in key or "up" in key or "deconv" in key:
+                    print(f" [ConvTranspose 변환] {key}")
+                    np_converted = conv_transpose_to_vkB(value)
+                else:
+                    np_converted = conv_to_vkB(value)
+            
                 clean_state_dict[key] = _tn(np_converted)
                 converted_count += 1
-                # 로그가 너무 많으면 주석 처리하세요
-                # print(f" [Conv 변환] {key}: {value.shape} -> {clean_state_dict[key].shape}")
             
             # 3-2. Linear Weight 감지 (2차원 + 이름에 weight 포함)
             elif value.ndim == 2 and "weight" in key:
@@ -218,8 +248,15 @@ def convert_to_safetensors(input_path, output_path):
 
             # 3-3. 그 외 (Bias, BatchNorm 등) -> 그대로 저장
             else:
-                # 안전하게 Contiguous Float32로 통일
-                clean_state_dict[key] = value.contiguous()
+                if "num_batches_tracked" in key:
+                    continue
+
+                # Bias, BN Running Mean/Var 등은 1D이지만 float32로 통일해야 합니다.
+                np_converted = _to_cpu_np(value) # CPU로 이동 & Numpy 변환
+                target_tensor = _tn(np_converted) # Float32 & Contiguous 강제
+
+                # 딕셔너리에 저장
+                clean_state_dict[key] = target_tensor
         else:
             print(f" [경고] 텐서가 아닌 데이터 제외됨: {key} (타입: {type(value)})")
 
@@ -240,13 +277,4 @@ def convert_to_safetensors(input_path, output_path):
 from safetensors import safe_open
 
 if __name__ == "__main__":
-    # convert_to_safetensors(INPUT_PTH, OUTPUT_SAFE)
-
-    with safe_open(OUTPUT_SAFE, framework="torch") as f:
-        print("keys:", f.keys())
-        total_bytes = 0
-        for k in f.keys():
-            t = f.get_tensor(k)
-            print(k, t.shape, t.dtype)
-            total_bytes += t.numel() * t.element_size()
-        print("총 크기:", total_bytes / (1024**2), "MB")
+    convert_to_safetensors(os.path.join(ROOT_PATH,INPUT_PTH), os.path.join(ROOT_PATH,OUTPUT_SAFE))

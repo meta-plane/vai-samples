@@ -581,12 +581,55 @@ void loadShaders()
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
+// SigmoidNode
+/////////////////////////////////////////////////////////////////////////////////////////
+
+SigmoidNode::SigmoidNode()
+{
+    addSlot("in0", NodeSlot::input);
+    addSlot("out0", NodeSlot::output);
+    sigmoid = requestPipeline(src_sigmoid);
+    sigmoidDescSet = sigmoid.descSetLayout(0).newDescSet(gDestSetPool);
+}
+void SigmoidNode::prepare()
+{
+    const auto& inShape = (*this)["in0"].shape();
+    (*this)["out0"] = Tensor(inShape);
+}
+void SigmoidNode::run(CommandBuffer cmdBuff)
+{
+    const auto& inShape = (*this)["in0"].shape();
+    int total = 1;
+
+    for (auto d : inShape)
+        total *= d;
+
+    sigmoidDescSet.write({
+        (*this)["out0"].buffer(),
+        (*this)["in0"].buffer(),
+        });
+
+    int num_elements[] = { total };
+
+
+    cmdBuff
+        .bindPipeline(sigmoid)
+        .bindDescSets({ sigmoidDescSet })
+        .setPushConstants(0, sizeof(num_elements), &num_elements)
+        .dispatch(total)
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["out0"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
 // ConCatNode
 /////////////////////////////////////////////////////////////////////////////////////////
 
 //Concat 기준은 무조건 0 뒤에 붙이는 걸로 한다
-ConCatNode::ConCatNode(uint32_t dim)
-    : dim_(dim)
+ConcatNode::ConcatNode()
 {
     addSlot("in0", NodeSlot::input);
     addSlot("in1", NodeSlot::input);
@@ -596,65 +639,31 @@ ConCatNode::ConCatNode(uint32_t dim)
     concatDescSet = concat.descSetLayout(0).newDescSet(gDestSetPool);
 }
 
-void ConCatNode::prepare()
+void ConcatNode::prepare()
 {
     const auto& s0 = (*this)["in0"].shape();
     const auto& s1 = (*this)["in1"].shape();
+    _ASSERT(s0.size() == 3 && s1.size() == 3);
+    _ASSERT(s0[0] == s1[0] && s0[1] == s1[1]);
 
-    // HWC 전제: [H, W, C]
-    _ASSERT(s0.size() == 3);
-    _ASSERT(s1.size() == 3);
-    _ASSERT(s0.size() == s1.size());
-    _ASSERT(dim_ < s0.size());       // dim_ ∈ {0(H), 1(W), 2(C)}
+    uint32_t H = s0[0];
+    uint32_t W = s0[1];
+    uint32_t C0 = s0[2];
+    uint32_t C1 = s1[2];
 
-    size_t ndim = s0.size();
-    std::vector<uint32_t> out_shape;
-    out_shape.reserve(ndim);
-
-    for (size_t i = 0; i < ndim; ++i)
-    {
-        if (i == dim_)
-        {
-            // concat 축(H/W/C) → 둘의 크기를 더함
-            out_shape.push_back(s0[i] + s1[i]);
-        }
-        else
-        {
-            // 다른 축은 동일해야 함
-            _ASSERT(s0[i] == s1[i]);
-            out_shape.push_back(s0[i]);
-        }
-    }
-
-    // out0도 HWC 유지
-    (*this)["out0"] = Tensor(out_shape);
+    (*this)["out0"] = Tensor(H, W, C0 + C1);
 }
 
-void ConCatNode::run(CommandBuffer cmdBuff)
+void ConcatNode::run(CommandBuffer cmdBuff)
 {
     const auto& s0 = (*this)["in0"].shape();
     const auto& s1 = (*this)["in1"].shape();
-    const auto& out = (*this)["out0"].shape();
-
-    const uint32_t rank = s0.size();
-    _ASSERT(rank == 3); // [H, W, C]
-
-    // HWC 전제이지만, flatten할 때는 다시 [Outer, Axis, Inner] 개념으로 바꿔서 보냄
-    uint32_t outer_size = 1; // concat 축 이전 차원들의 곱 (없으면 1)
-    uint32_t inner_size = 1; // concat 축 이후 차원들의 곱 (없으면 1)
-    uint32_t axis_dim0 = s0[dim_];
-    uint32_t axis_dim1 = s1[dim_];
-
-    // Outer: Axis 이전 차원들의 곱
-    for (int i = 0; i < (int)dim_; ++i)
-        outer_size *= s0[i];
-
-    // Inner: Axis 이후 차원들의 곱
-    for (int i = (int)dim_ + 1; i < (int)rank; ++i)
-        inner_size *= s0[i];
-
-    uint32_t axis_total = axis_dim0 + axis_dim1;
-    uint32_t total = outer_size * axis_total * inner_size;
+    uint32_t H = s0[0];
+    uint32_t W = s0[1];
+    uint32_t C0 = s0[2];
+    uint32_t C1 = s1[2];
+    uint32_t C = C0 + C1;
+    uint32_t total = H * W * C;
 
     concatDescSet.write({
         (*this)["out0"].buffer(),
@@ -662,19 +671,13 @@ void ConCatNode::run(CommandBuffer cmdBuff)
         (*this)["in1"].buffer(),
         });
 
-    struct PushConsts {
-        uint32_t outer_size;
-        uint32_t inner_size;
-        uint32_t axis_dim0;
-        uint32_t axis_dim1;
-    } push{ outer_size, inner_size, axis_dim0, axis_dim1 };
+    struct { int H, W, C0, C1; } push{ int(H), int(W), int(C0), int(C1) };
 
     cmdBuff
         .bindPipeline(concat)
         .bindDescSets({ concatDescSet })
         .setPushConstants(0, sizeof(push), &push)
-        // local_size_x = 256 → 256으로 나눠야 함
-        .dispatch(CEIL_DIV(total, 256))
+        .dispatch(total)
         .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["out0"].buffer()
@@ -697,9 +700,9 @@ ConvTransposeNode::ConvTransposeNode(uint32_t inChannels,
     , S(stride)
     , P(padding)
 {
-    addSlot("in0", NodeSlot::input);   // [C_in, H_in, W_in]
+    addSlot("in0", NodeSlot::input);    // [C_in, H_in, W_in]
     addSlot("out0", NodeSlot::output);  // [C_out, H_out, W_out]
-    addSlot("weight", NodeSlot::input);   // [C_in*K*K, C_out]
+    addSlot("weight", NodeSlot::input); // [C_in*K*K, C_out]
     addSlot("bias", NodeSlot::input);   // [C_out]
 
     convtranspose = requestPipeline(src_conv_transpose);
@@ -716,16 +719,12 @@ void ConvTransposeNode::prepare()
     uint32_t c_in = inShape[2];
 
     _ASSERT(c_in == C_in);
-
-    // weight: [C_in*K*K, C_out]  (파이썬 conv_to_vkB와 일치)
     _ASSERT((*this)["weight"].isShapeOf(C_in * K * K, C_out));
-
-    // bias: [C_out]
     _ASSERT((*this)["bias"].isShapeOf(C_out));
 
     // ConvTranspose2D 출력 크기 공식 (PyTorch ConvTranspose2d와 동일)
-    uint32_t h_out = (h_in - 1) * S - 2 * P + K;
-    uint32_t w_out = (w_in - 1) * S - 2 * P + K;
+    uint32_t h_out = (h_in - 1) * S  + K - (2 * P);
+    uint32_t w_out = (w_in - 1) * S  + K - (2 * P);
 
     // out0: [H_out, W_out, C_out]  ← HWC 고정
     (*this)["out0"] = Tensor(h_out, w_out, C_out);
@@ -782,9 +781,9 @@ void ConvTransposeNode::run(CommandBuffer cmdBuff)
         // local_size_x = 8, local_size_y = 8, local_size_z = 4
         // 여기서는 x = H_out, y = W_out, z = C_out 로 사용
         .dispatch(
-            CEIL_DIV(h_out, 8),
-            CEIL_DIV(w_out, 8),
-            CEIL_DIV(c_out, 4)
+            h_out,
+            w_out,
+            c_out
         )
         .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
@@ -876,7 +875,7 @@ void BatchNormNode::run(CommandBuffer cmdBuff)
         .bindDescSets({ bacthnromDescSet })
         .setPushConstants(0, sizeof(push), &push)
         // 전체 element 수만큼 1D dispatch (local_size_x=64)
-        .dispatch(CEIL_DIV(totalElems, 64))
+        .dispatch(H* W* C)
         .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["out0"].buffer()
