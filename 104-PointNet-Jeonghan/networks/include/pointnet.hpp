@@ -22,6 +22,7 @@ class FCSequence : public NodeGroup
 
 public:
     FCSequence(const uint32_t(&channels)[nBlocks + 1])
+    : NodeGroup()
     {
         for (uint32_t i = 0; i <= nBlocks; ++i)
             dims[i] = channels[i];
@@ -63,7 +64,8 @@ class FCBNNode : public NodeGroup
 
 public:
     FCBNNode(uint32_t inDim, uint32_t outDim)
-    : fc(inDim, outDim)
+    : NodeGroup()
+    , fc(inDim, outDim)
     , reshape_in({1, outDim})   // Reshape FC output to [1, outDim]
     , bn(outDim)                // BatchNorm needs [N, C] format
     , reshape_out({outDim})     // Reshape back to [outDim]
@@ -102,6 +104,7 @@ class FCBNSequence : public NodeGroup
 
 public:
     FCBNSequence(const uint32_t(&channels)[nBlocks + 1])
+    : NodeGroup()
     {
         for (uint32_t i = 0; i <= nBlocks; ++i)
             dims[i] = channels[i];
@@ -155,6 +158,7 @@ class MLPSequence : public NodeGroup
 
 public:
     MLPSequence(const uint32_t(&channels)[nBlocks + 1])
+    : NodeGroup()
     {
         for (uint32_t i = 0; i <= nBlocks; ++i)
             dims[i] = channels[i];
@@ -201,7 +205,8 @@ class TNetBlock : public NodeGroup
 
 public:
     TNetBlock(uint32_t inputDim)
-    : K(inputDim)
+    : NodeGroup()
+    , K(inputDim)
     , mlp({inputDim, 64, 128, 1024})
     , maxpool()
     , fc({1024, 512, 256, K * K})
