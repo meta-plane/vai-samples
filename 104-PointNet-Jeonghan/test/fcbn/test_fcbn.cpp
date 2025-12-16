@@ -1,5 +1,5 @@
 /**
- * FCBNNode Vulkan Test (JSON-based)
+ * FCBNNode Vulkan Test (SafeTensors-based)
  * Tests FullyConnected + BatchNorm + ReLU node against PyTorch reference
  */
 
@@ -8,7 +8,7 @@
 #include <cmath>
 #include "neuralNet.h"
 #include "vulkanApp.h"
-#include "jsonParser.h"
+#include "safeTensorsParser.h"
 #include "../networks/include/pointnet.hpp"
 
 using namespace vk;
@@ -38,7 +38,7 @@ public:
  */
 Tensor eval_fcbn(uint32_t inDim, uint32_t outDim,
                  const std::vector<float>& input_data,
-                 JsonParser& json) {
+                 SafeTensorsParser& json) {
     // Create network
     FCBNTestNet net(netGlobalDevice, inDim, outDim);
     
@@ -76,7 +76,7 @@ void test() {
     std::cout << std::endl;
     
     // Load reference data
-    JsonParser json(PROJECT_CURRENT_DIR"/test/fcbn/reference.json");
+    SafeTensorsParser json(PROJECT_CURRENT_DIR"/test/fcbn/reference.safetensors");
     
     // Parse configuration
     std::vector<float> shape = json["shape"].parseNDArray();

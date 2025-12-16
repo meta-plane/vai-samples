@@ -1,5 +1,5 @@
 /**
- * FullyConnected Vulkan Test (JSON-based)
+ * FullyConnected Vulkan Test (SafeTensors-based)
  * Tests FullyConnectedNode against PyTorch reference
  */
 
@@ -9,7 +9,7 @@
 #include "neuralNet.h"
 #include "neuralNodes.h"
 #include "vulkanApp.h"
-#include "jsonParser.h"
+#include "safeTensorsParser.h"
 
 using namespace vk;
 
@@ -36,7 +36,7 @@ public:
 /**
  * Run FullyConnected inference
  */
-Tensor eval_fc(const std::vector<float>& inputData, const JsonParser& json, 
+Tensor eval_fc(const std::vector<float>& inputData, const SafeTensorsParser& json, 
                uint32_t I, uint32_t O) {
     // Create network
     FCTestNet net(netGlobalDevice, I, O);
@@ -66,7 +66,7 @@ void test() {
     loadShaders();
     
     // Load reference data
-    JsonParser json = JsonParser(PROJECT_CURRENT_DIR"/test/fc/reference.json");
+    SafeTensorsParser json = SafeTensorsParser(PROJECT_CURRENT_DIR"/test/fc/reference.safetensors");
     
     // Extract shape from array [I, O]
     std::vector<float> shape_data = json["shape"].parseNDArray();

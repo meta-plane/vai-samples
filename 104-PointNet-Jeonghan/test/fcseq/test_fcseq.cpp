@@ -1,5 +1,5 @@
 /**
- * FCSequence Vulkan Test (JSON-based)
+ * FCSequence Vulkan Test (SafeTensors-based)
  * Tests FCSequence (chain of FullyConnectedNodes) against PyTorch reference
  */
 
@@ -9,7 +9,7 @@
 #include "neuralNet.h"
 #include "neuralNodes.h"
 #include "vulkanApp.h"
-#include "jsonParser.h"
+#include "safeTensorsParser.h"
 #include "pointnet.hpp"  // For FCSequence template
 
 using namespace vk;
@@ -38,7 +38,7 @@ public:
 /**
  * Run FCSequence inference
  */
-Tensor eval_fcseq(const std::vector<float>& inputData, const JsonParser& json, 
+Tensor eval_fcseq(const std::vector<float>& inputData, const SafeTensorsParser& json, 
                   const uint32_t(&channels)[4]) {
     // Create network
     FCSeqTestNet net(netGlobalDevice, channels);
@@ -73,7 +73,7 @@ void test() {
     loadShaders();
     
     // Load reference data
-    JsonParser json = JsonParser(PROJECT_CURRENT_DIR"/test/fcseq/reference.json");
+    SafeTensorsParser json = SafeTensorsParser(PROJECT_CURRENT_DIR"/test/fcseq/reference.safetensors");
     
     // Extract channels [128, 256, 512, 64]
     std::vector<float> channels_data = json["channels"].parseNDArray();

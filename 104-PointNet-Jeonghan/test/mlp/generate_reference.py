@@ -9,6 +9,7 @@ import torch.nn as nn
 import numpy as np
 import json
 from pathlib import Path
+from safetensors.torch import save_file
 
 # Fixed seed
 torch.manual_seed(42)
@@ -80,15 +81,33 @@ data = {
     "shape": [float(N), float(C_in), float(C_out)]  # [8, 3, 64]
 }
 
-# Save JSON
+# Prepare output directory
 output_dir = Path("test/mlp")
 output_dir.mkdir(parents=True, exist_ok=True)
 
+# Save JSON (backward compatibility)
 json_path = output_dir / "reference.json"
 with open(json_path, 'w') as f:
     json.dump(data, f, indent=2)
 
-print("PointWiseMLP Reference Generated (JSON)")
+# Save SafeTensors (preferred format) - ensure all tensors are contiguous
+tensors = {
+    "input": torch.from_numpy(input_nc).contiguous(),            # [8, 3]
+    "expected": torch.from_numpy(output_nc).contiguous(),        # [8, 64]
+    "conv_weight": torch.from_numpy(conv_weight).contiguous(),   # [3, 64]
+    "conv_bias": torch.from_numpy(conv_bias).contiguous(),       # [64]
+    "bn_mean": torch.from_numpy(bn_mean).contiguous(),           # [64]
+    "bn_var": torch.from_numpy(bn_var).contiguous(),             # [64]
+    "bn_gamma": torch.from_numpy(bn_gamma).contiguous(),         # [64]
+    "bn_beta": torch.from_numpy(bn_beta).contiguous(),           # [64]
+    "bn_eps": torch.tensor([mlp.bn.eps], dtype=torch.float32),   # [1]
+    "shape": torch.tensor([N, C_in, C_out], dtype=torch.float32)  # [3]
+}
+
+safetensors_path = output_dir / "reference.safetensors"
+save_file(tensors, str(safetensors_path))
+
+print("PointWiseMLP Reference Generated")
 print(f"  Input shape:  {input_nc.shape} -> {input_nc.size} values")
 print(f"  Output shape: {output_nc.shape} -> {output_nc.size} values")
 print(f"  Conv weight:  {conv_weight.shape}")
@@ -98,4 +117,6 @@ print(f"  BN var:       {bn_var.shape}")
 print(f"  BN gamma:     {bn_gamma.shape}")
 print(f"  BN beta:      {bn_beta.shape}")
 print(f"  BN eps:       {mlp.bn.eps}")
-print(f"\n✓ Saved to {json_path}")
+print(f"\n✅ Saved to:")
+print(f"  - {json_path} (legacy)")
+print(f"  - {safetensors_path} (preferred)")

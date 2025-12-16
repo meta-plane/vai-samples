@@ -1,5 +1,5 @@
 /**
- * BatchNorm1D Vulkan Test (JSON-based)
+ * BatchNorm1D Vulkan Test (SafeTensors-based)
  * Tests BatchNorm1D implementation against PyTorch reference
  */
 
@@ -9,7 +9,7 @@
 #include "neuralNet.h"
 #include "neuralNodes.h"
 #include "vulkanApp.h"
-#include "jsonParser.h"
+#include "safeTensorsParser.h"
 
 using namespace vk;
 
@@ -35,7 +35,7 @@ public:
 /**
  * Run BatchNorm1D inference
  */
-Tensor eval_batchnorm(const std::vector<float>& inputData, const JsonParser& json, uint32_t N, uint32_t C) {
+Tensor eval_batchnorm(const std::vector<float>& inputData, const SafeTensorsParser& json, uint32_t N, uint32_t C) {
     // Create network
     BatchNormTestNet net(netGlobalDevice, C);
     
@@ -62,7 +62,7 @@ void test() {
     loadShaders();
     
     // Load reference data
-    JsonParser json = JsonParser(PROJECT_CURRENT_DIR"/test/batchnorm/reference.json");
+    SafeTensorsParser json = SafeTensorsParser(PROJECT_CURRENT_DIR"/test/batchnorm/reference.safetensors");
     
     // Extract shape from array [N, C]
     std::vector<float> shape_data = json["shape"].parseNDArray();

@@ -13,7 +13,7 @@
 #include <cmath>
 #include "neuralNet.h"
 #include "vulkanApp.h"
-#include "jsonParser.h"
+#include "safeTensorsParser.h"
 #include "../networks/include/pointnet.hpp"
 
 using namespace vk;
@@ -23,7 +23,7 @@ void test_segment() {
     std::cout << "=== PointNet Segmentation Test ===\n\n";
     
     // Load reference data
-    JsonParser json(PROJECT_CURRENT_DIR"/test/segment/reference.json");
+    SafeTensorsParser json(PROJECT_CURRENT_DIR"/test/segment/reference.safetensors");
     
     uint32_t N = 16;
     uint32_t numClasses = 4;

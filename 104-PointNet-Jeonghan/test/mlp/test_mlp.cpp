@@ -1,5 +1,5 @@
 /**
- * PointWiseMLP Vulkan Test (JSON-based)
+ * PointWiseMLP Vulkan Test (SafeTensors-based)
  * Tests PointWiseMLPNode + BatchNorm1D + ReLU chain against PyTorch reference
  */
 
@@ -9,7 +9,7 @@
 #include "neuralNet.h"
 #include "neuralNodes.h"
 #include "vulkanApp.h"
-#include "jsonParser.h"
+#include "safeTensorsParser.h"
 
 using namespace vk;
 
@@ -37,20 +37,20 @@ public:
 /**
  * Run PointWiseMLP inference
  */
-Tensor eval_mlp(const std::vector<float>& inputData, const JsonParser& json, 
+Tensor eval_mlp(const std::vector<float>& inputData, const SafeTensorsParser& weights, 
                 uint32_t N, uint32_t C_in, uint32_t C_out) {
     // Create network
     MLPTestNet net(netGlobalDevice, C_in, C_out);
     
-    // Set Conv parameters
-    net["weight"] = Tensor(json["conv_weight"]);
-    net["bias"] = Tensor(json["conv_bias"]);
+    // Set Conv parameters (SafeTensors - direct tensor loading)
+    net["weight"] = Tensor(weights["conv_weight"]);
+    net["bias"] = Tensor(weights["conv_bias"]);
     
     // Set BatchNorm parameters
-    net["bn_mean"] = Tensor(json["bn_mean"]);
-    net["bn_var"] = Tensor(json["bn_var"]);
-    net["bn_gamma"] = Tensor(json["bn_gamma"]);
-    net["bn_beta"] = Tensor(json["bn_beta"]);
+    net["bn_mean"] = Tensor(weights["bn_mean"]);
+    net["bn_var"] = Tensor(weights["bn_var"]);
+    net["bn_gamma"] = Tensor(weights["bn_gamma"]);
+    net["bn_beta"] = Tensor(weights["bn_beta"]);
     
     // Prepare network
     net.prepare();
@@ -68,17 +68,18 @@ void test() {
     void loadShaders();
     loadShaders();
     
-    // Load reference data
-    JsonParser json = JsonParser(PROJECT_CURRENT_DIR"/test/mlp/reference.json");
+    // Load reference data (SafeTensors format - preferred)
+    SafeTensorsParser data(PROJECT_CURRENT_DIR"/test/mlp/reference.safetensors");
     
-    // Extract shape from array [N, C_in, C_out]
-    std::vector<float> shape_data = json["shape"].parseNDArray();
+    // Extract shape from tensor - direct access
+    std::vector<float> shape_data = data["shape"].parseNDArray();
     uint32_t N = static_cast<uint32_t>(shape_data[0]);
     uint32_t C_in = static_cast<uint32_t>(shape_data[1]);
     uint32_t C_out = static_cast<uint32_t>(shape_data[2]);
     
     std::cout << "╔══════════════════════════════════════════╗\n";
     std::cout << "║   PointWiseMLP Vulkan Compute Test      ║\n";
+    std::cout << "║   (SafeTensors format)                   ║\n";
     std::cout << "╚══════════════════════════════════════════╝\n\n";
     
     std::cout << "Test configuration:\n";
@@ -87,11 +88,11 @@ void test() {
     std::cout << "  Output size: " << (N * C_out) << " values\n\n";
     
     // Get input data
-    std::vector<float> inputData = json["input"].parseNDArray();
+    std::vector<float> inputData = data["input"].parseNDArray();
     
     // Run inference
     std::cout << "Running PointWiseMLP on GPU...\n";
-    Tensor result = eval_mlp(inputData, json, N, C_in, C_out);
+    Tensor result = eval_mlp(inputData, data, N, C_in, C_out);
     
     // Download result from GPU to CPU
     Buffer outBuffer = netGlobalDevice.createBuffer({
@@ -110,7 +111,7 @@ void test() {
     float* output = (float*)outBuffer.map();
     
     // Get expected values
-    std::vector<float> expected = json["expected"].parseNDArray();
+    std::vector<float> expected = data["expected"].parseNDArray();
     
     // Compare results
     std::cout << "\n" << std::string(60, '=') << "\n";

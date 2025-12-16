@@ -1,5 +1,5 @@
 /**
- * TNetBlock Vulkan Test (JSON-based)
+ * TNetBlock Vulkan Test (SafeTensors-based)
  * Tests TNetBlock (Spatial Transformer) against PyTorch reference
  * 
  * TNetBlock architecture:
@@ -14,7 +14,7 @@
 #include <utility>
 #include "neuralNet.h"
 #include "vulkanApp.h"
-#include "jsonParser.h"
+#include "safeTensorsParser.h"
 #include "../networks/include/pointnet.hpp"
 
 using namespace vk;
@@ -63,7 +63,7 @@ public:
  */
 std::pair<Tensor, Tensor> eval_tnet(uint32_t N, uint32_t K,
                  const std::vector<float>& input_data,
-                 JsonParser& json) {
+                 SafeTensorsParser& json) {
     std::cout << "Creating TNetTestNet...\n";
     // Create network
     TNetTestNet net(netGlobalDevice, K);
@@ -196,7 +196,7 @@ void test() {
     std::cout << std::endl;
     
     // Load reference data
-    JsonParser json(PROJECT_CURRENT_DIR"/test/tnet/reference.json");
+    SafeTensorsParser json(PROJECT_CURRENT_DIR"/test/tnet/reference.safetensors");
     
     // Parse configuration
     std::vector<float> shape = json["shape"].parseNDArray();

@@ -11,7 +11,7 @@
 #include "neuralNet.h"
 #include "neuralNodes.h"
 #include "vulkanApp.h"
-#include "jsonParser.h"
+#include "safeTensorsParser.h"
 
 using namespace vk;
 
@@ -58,7 +58,7 @@ void test() {
     std::cout << std::endl;
     
     // Load reference data
-    JsonParser json(PROJECT_CURRENT_DIR"/test/maxpool/reference.json");
+    SafeTensorsParser json(PROJECT_CURRENT_DIR"/test/maxpool/reference.safetensors");
     
     // Parse configuration
     std::vector<float> shape = json["shape"].parseNDArray();

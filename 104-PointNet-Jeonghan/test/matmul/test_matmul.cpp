@@ -1,5 +1,5 @@
 /**
- * MatMul Vulkan Test (JSON-based)
+ * MatMul Vulkan Test (SafeTensors-based)
  * Tests MatMulNode against PyTorch reference
  */
 
@@ -9,7 +9,7 @@
 #include "neuralNet.h"
 #include "neuralNodes.h"
 #include "vulkanApp.h"
-#include "jsonParser.h"
+#include "safeTensorsParser.h"
 
 using namespace vk;
 
@@ -59,7 +59,7 @@ void test() {
     loadShaders();
     
     // Load reference data
-    JsonParser json = JsonParser(PROJECT_CURRENT_DIR"/test/matmul/reference.json");
+    SafeTensorsParser json = SafeTensorsParser(PROJECT_CURRENT_DIR"/test/matmul/reference.safetensors");
     
     // Parse dimensions
     std::vector<float> shape = json["shape"].parseNDArray();

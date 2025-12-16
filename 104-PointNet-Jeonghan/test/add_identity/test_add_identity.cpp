@@ -9,7 +9,7 @@
 #include "neuralNet.h"
 #include "neuralNodes.h"
 #include "vulkanApp.h"
-#include "jsonParser.h"
+#include "safeTensorsParser.h"
 
 using namespace vk;
 
@@ -31,7 +31,7 @@ void test() {
     std::cout << "║      AddIdentity Vulkan Test            ║\n";
     std::cout << "╚══════════════════════════════════════════╝\n\n";
     
-    JsonParser json(PROJECT_CURRENT_DIR"/test/add_identity/reference.json");
+    SafeTensorsParser json(PROJECT_CURRENT_DIR"/test/add_identity/reference.safetensors");
     
     std::vector<float> k_vec = json["K"].parseNDArray();
     uint32_t K = static_cast<uint32_t>(k_vec[0]);

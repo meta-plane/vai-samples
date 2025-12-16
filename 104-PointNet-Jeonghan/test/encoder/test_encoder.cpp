@@ -12,7 +12,7 @@
 #include <cmath>
 #include "neuralNet.h"
 #include "vulkanApp.h"
-#include "jsonParser.h"
+#include "safeTensorsParser.h"
 #include "../networks/include/pointnet.hpp"
 
 using namespace vk;
@@ -21,7 +21,7 @@ using namespace networks;
 /**
  * Helper: Load TNet weights from JSON
  */
-void loadTNetWeights(TNetBlock& tnet, JsonParser& json, const std::string& prefix) {
+void loadTNetWeights(TNetBlock& tnet, SafeTensorsParser& json, const std::string& prefix) {
     std::cout << "Loading " << prefix << " weights...\n";
     
     // MLP layers (3 layers)
@@ -107,7 +107,7 @@ void loadTNetWeights(TNetBlock& tnet, JsonParser& json, const std::string& prefi
 /**
  * Helper: Load MLPSequence weights
  */
-void loadMLPSequenceWeights(MLPSequence<2>& mlp, JsonParser& json, 
+void loadMLPSequenceWeights(MLPSequence<2>& mlp, SafeTensorsParser& json, 
                             const std::string& prefix,
                             uint32_t in_dim, uint32_t mid_dim, uint32_t out_dim) {
     std::cout << "Loading " << prefix << " weights...\n";
@@ -180,7 +180,7 @@ public:
 /**
  * Run PointNetEncoder inference
  */
-Tensor eval_encoder(uint32_t N, const std::vector<float>& input_data, JsonParser& json) {
+Tensor eval_encoder(uint32_t N, const std::vector<float>& input_data, SafeTensorsParser& json) {
     std::cout << "Creating EncoderTestNet...\n";
     EncoderTestNet net(netGlobalDevice);
     PointNetEncoder& encoder = net.getEncoder();
@@ -211,7 +211,7 @@ void test_encoder() {
     std::cout << "=== PointNetEncoder Test ===\n\n";
     
     // Load reference data
-    JsonParser json = JsonParser(PROJECT_CURRENT_DIR"/test/encoder/reference.json");
+    SafeTensorsParser json = SafeTensorsParser(PROJECT_CURRENT_DIR"/test/encoder/reference.safetensors");
     
     // Parse parameters
     std::vector<float> shape_data = json["input_shape"].parseNDArray();

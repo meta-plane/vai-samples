@@ -1,5 +1,5 @@
 /**
- * MLPSequence Vulkan Test (JSON-based)
+ * MLPSequence Vulkan Test (SafeTensors-based)
  * Tests MLPSequence (chain of PointWiseMLPNodes) against PyTorch reference
  */
 
@@ -9,7 +9,7 @@
 #include "neuralNet.h"
 #include "neuralNodes.h"
 #include "vulkanApp.h"
-#include "jsonParser.h"
+#include "safeTensorsParser.h"
 #include "pointnet.hpp"
 
 using namespace vk;
@@ -32,7 +32,7 @@ public:
 };
 
 Tensor eval_mlpseq(uint32_t N, const std::vector<float>& inputData, 
-                   const JsonParser& json, const uint32_t(&channels)[4]) {
+                   const SafeTensorsParser& json, const uint32_t(&channels)[4]) {
     MLPSeqTestNet net(netGlobalDevice, channels);
     
     for (int i = 0; i < 3; ++i) {
@@ -67,7 +67,7 @@ void test() {
     void loadShaders();
     loadShaders();
     
-    JsonParser json = JsonParser(PROJECT_CURRENT_DIR"/test/mlpseq/reference.json");
+    SafeTensorsParser json = SafeTensorsParser(PROJECT_CURRENT_DIR"/test/mlpseq/reference.safetensors");
     
     std::vector<float> shape = json["shape"].parseNDArray();
     uint32_t N = static_cast<uint32_t>(shape[0]);

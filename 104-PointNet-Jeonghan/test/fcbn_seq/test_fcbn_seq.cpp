@@ -1,5 +1,5 @@
 /**
- * FCBNSequence Vulkan Test (JSON-based)
+ * FCBNSequence Vulkan Test (SafeTensors-based)
  * Tests sequence of FC+BN+ReLU blocks against PyTorch reference
  * Last block is FC only (no BN+ReLU)
  */
@@ -9,7 +9,7 @@
 #include <cmath>
 #include "neuralNet.h"
 #include "vulkanApp.h"
-#include "jsonParser.h"
+#include "safeTensorsParser.h"
 #include "../networks/include/pointnet.hpp"
 
 using namespace vk;
@@ -39,7 +39,7 @@ public:
  */
 Tensor eval_fcbn_seq(const uint32_t (&dims)[4],
                      const std::vector<float>& input_data,
-                     JsonParser& json) {
+                     SafeTensorsParser& json) {
     // Create network
     FCBNSeqTestNet net(netGlobalDevice, dims);
     
@@ -100,7 +100,7 @@ void test() {
     std::cout << std::endl;
     
     // Load reference data
-    JsonParser json(PROJECT_CURRENT_DIR"/test/fcbn_seq/reference.json");
+    SafeTensorsParser json(PROJECT_CURRENT_DIR"/test/fcbn_seq/reference.safetensors");
     
     // Parse dimensions
     std::vector<float> shape_vec = json["shape"].parseNDArray();
