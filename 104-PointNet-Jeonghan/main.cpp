@@ -2,6 +2,8 @@
 #include <iomanip>
 #include <cstdlib>
 #include <ctime>
+#include <chrono>
+#include <algorithm>
 #include "inference.h"
 #include "pointCloudLoader.h"
 
@@ -41,75 +43,110 @@ int main()
     // Initialize random seed
     srand(static_cast<unsigned int>(time(nullptr)));
 
-    // Configuration (yanx27: 3-dim xyz input, 13 semantic classes)
-    // Note: yanx27 weights are for S3DIS semantic segmentation (3D xyz input)
+    // Configuration (yanx27: 9-dim xyz input, 13 semantic classes)
     InferenceConfig config;
     config.weights_file = "assets/weights/pointnet_yanx27.json";  // yanx27 pretrained weights
     config.num_classes = 13;  // S3DIS semantic segmentation
-    config.channel = 9;
+    config.channel = 3;
     config.verbose = true;
 
     // Load and segment from ModelNet40
     const std::string modelnet_path = "assets/datasets/ModelNet40";
     
     if (std::filesystem::exists(modelnet_path)) {
-        std::cout << "\nLoading ModelNet40 sample...\n";
+
+        std::cout << "\nLoading pretrained model...\n";
+        PointNetSegment* model = loadPretrainedModel(config);
+        
+        if (!model) {
+            printUsage();
+            return 1;
+        }
+        
+        // Run segmentation benchmark (10 iterations)
+        std::cout << "\nRunning inference benchmark (10 iterations)...\n";
+        
+        const int num_iterations = 10;
+        std::vector<double> iteration_times;
+        SegmentationResult result;
         
         auto [class_name, class_idx, point_cloud] = 
             modelnet40::loadSample(modelnet_path, 1024, "test");
-        
-        if (!point_cloud.empty()) {
-            // Load model
-            std::cout << "\nLoading pretrained model...\n";
-            PointNetSegment* model = loadPretrainedModel(config);
-            
-            if (!model) {
-                printUsage();
-                return 1;
+        for (int iter = 0; iter < num_iterations; ++iter) {
+
+            if (point_cloud.empty()) {
+                std::cout << "Failed to load ModelNet40 sample\n";
+                break;
             }
             
-            // Run segmentation (note: yanx27 is semantic seg, not classification)
-            std::cout << "\nRunning inference...\n";
-            SegmentationResult result = segment(*model, point_cloud, config);
+            auto start = std::chrono::high_resolution_clock::now();
+            result = segment(*model, point_cloud, config);
+            auto end = std::chrono::high_resolution_clock::now();
             
-            if (result.success) {
-                std::cout << "\n" << std::string(56, '=') << "\n";
-                std::cout << "Segmentation Result\n";
-                std::cout << std::string(56, '=') << "\n";
-                std::cout << "Object: " << class_name << " (ModelNet40 class " << class_idx << ")\n";
-                std::cout << "Points: " << result.num_points << "\n";
-                
-                // Count predicted semantic classes
-                std::vector<int> class_counts(config.num_classes, 0);
-                for (uint32_t j = 0; j < result.num_points; ++j) {
-                    class_counts[result.predicted_labels[j]]++;
-                }
-                
-                // Show top 3 predicted semantic classes
-                std::cout << "\nTop semantic classes detected:\n";
-                std::vector<std::pair<int, int>> counts;
-                for (int c = 0; c < config.num_classes; ++c) {
-                    counts.push_back({class_counts[c], c});
-                }
-                std::sort(counts.rbegin(), counts.rend());
-                
-                for (int k = 0; k < 3 && k < config.num_classes; ++k) {
-                    float percentage = 100.0f * counts[k].first / result.num_points;
-                    std::cout << "  Class " << counts[k].second << ": " 
-                              << std::fixed << std::setprecision(1) << percentage 
-                              << "% (" << counts[k].first << " points)\n";
-                }
-                
-                std::cout << "\nPerformance: " << std::fixed << std::setprecision(0)
-                          << result.points_per_sec << " points/sec\n";
-                std::cout << std::string(56, '=') << "\n";
-            }
+            double elapsed_us = std::chrono::duration<double, std::micro>(end - start).count();
+            iteration_times.push_back(elapsed_us);
             
-            // Cleanup
-            delete model;
-        } else {
-            std::cout << "Failed to load ModelNet40 sample\n";
+            std::cout << "  Iteration " << (iter + 1) << ": " 
+                        << "(" << std::fixed << std::setprecision(3) << elapsed_us << " μs)\n";
         }
+        
+        // Calculate statistics
+        double total_time = 0.0;
+        for (double t : iteration_times) total_time += t;
+        double avg_time = total_time / num_iterations;
+        
+        double min_time = *std::min_element(iteration_times.begin(), iteration_times.end());
+        double max_time = *std::max_element(iteration_times.begin(), iteration_times.end());
+        
+        if (result.success) {
+            std::cout << "\n" << std::string(56, '=') << "\n";
+            std::cout << "Segmentation Result\n";
+            std::cout << std::string(56, '=') << "\n";
+            std::cout << "ModelNet40 Sample: " << class_name << " (" << class_idx << ")\n";
+            std::cout << "Points: " << result.num_points << "\n";
+            
+            // Count predicted semantic classes
+            std::vector<int> class_counts(config.num_classes, 0);
+            for (uint32_t j = 0; j < result.num_points; ++j) {
+                class_counts[result.predicted_labels[j]]++;
+            }
+            
+            // Show top 3 predicted semantic classes
+            std::cout << "\nTop semantic classes detected:\n";
+            std::vector<std::pair<int, int>> counts;
+            for (int c = 0; c < config.num_classes; ++c) {
+                counts.push_back({class_counts[c], c});
+            }
+            std::sort(counts.rbegin(), counts.rend());
+            
+            for (int k = 0; k < 3 && k < config.num_classes; ++k) {
+                float percentage = 100.0f * counts[k].first / result.num_points;
+                std::cout << "  Class " << counts[k].second << ": " 
+                            << std::fixed << std::setprecision(1) << percentage 
+                            << "% (" << counts[k].first << " points)\n";
+            }
+            
+            std::cout << "\n" << std::string(56, '-') << "\n";
+            std::cout << "Performance Benchmark (" << num_iterations << " iterations)\n";
+            std::cout << std::string(56, '-') << "\n";
+            std::cout << "Average time: " << std::fixed << std::setprecision(5) << avg_time << " ms";
+            std::cout << " (" << std::fixed << std::setprecision(0) << (avg_time) << " μs)\n";
+            std::cout << "Min time:     " << std::fixed << std::setprecision(5) << min_time << " ms";
+            std::cout << " (" << std::fixed << std::setprecision(0) << (min_time) << " μs)\n";
+            std::cout << "Max time:     " << std::fixed << std::setprecision(5) << max_time << " ms";
+            std::cout << " (" << std::fixed << std::setprecision(0) << (max_time) << " μs)\n";
+            std::cout << "Throughput:   " << std::fixed << std::setprecision(0) 
+                        << (result.num_points / (avg_time / 1000.0)) << " points/sec\n";
+            std::cout << "FPS (1024pt): " << std::fixed << std::setprecision(1) 
+                        << (1000.0 / avg_time) << " fps\n";
+            std::cout << std::string(56, '=') << "\n";
+        }
+        else {
+            std::cout << "Segmentation failed: " << result.error_message << "\n";
+        }
+        
+        // Cleanup
+        delete model;
     } else {
         std::cout << "ModelNet40 not found at: " << modelnet_path << "\n";
         std::cout << "Please download ModelNet40 dataset.\n";
