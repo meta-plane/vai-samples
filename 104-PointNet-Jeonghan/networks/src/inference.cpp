@@ -26,10 +26,11 @@ PointNetSegment* loadPretrainedModel(const InferenceConfig& config) {
             std::cout << "Loading PointNet Segmentation model..." << std::endl;
             std::cout << "  Weights: " << config.weights_file << std::endl;
             std::cout << "  Num classes: " << config.num_classes << std::endl;
+            std::cout << "  Input channels: " << config.channel << std::endl;
         }
 
-        // Create network
-        PointNetSegment* model = new PointNetSegment(netGlobalDevice, config.num_classes);
+        // Create network with specified channel dimension
+        PointNetSegment* model = new PointNetSegment(netGlobalDevice, config.num_classes, config.channel);
         
         if (config.verbose) {
             std::cout << "✓ Network created" << std::endl;
@@ -62,18 +63,38 @@ SegmentationResult segment(
     SegmentationResult result;
     
     try {
-        // Validate input
-        if (point_cloud.empty() || point_cloud.size() % 3 != 0) {
-            result.error_message = "Invalid point cloud: size must be multiple of 3";
+        // Use config.channel if specified, otherwise auto-detect
+        uint32_t channels = config.channel;
+        if (channels == 0) {
+            // Auto-detect input dimension (3 for xyz-only, 9 for xyz+rgb+normalized)
+            channels = 3;  // Default: xyz only
+            if (point_cloud.size() % 9 == 0 && point_cloud.size() % 3 == 0) {
+                // Could be either 3 or 9 - check if size is divisible by 9
+                // If divisible by 9, assume 9-dim (yanx27 format)
+                channels = 9;
+            } else if (point_cloud.size() % 3 != 0) {
+                result.error_message = "Invalid point cloud: size must be multiple of 3 or 9";
+                return result;
+            }
+        }
+        
+        // Validate that point cloud size matches expected channels
+        if (point_cloud.size() % channels != 0) {
+            result.error_message = "Invalid point cloud: size must be multiple of " + std::to_string(channels);
             return result;
         }
         
-        uint32_t num_points = point_cloud.size() / 3;
+        uint32_t num_points = point_cloud.size() / channels;
         result.num_points = num_points;
         result.num_classes = config.num_classes;
         
-        // Create input tensor [N, 3]
-        Tensor input_tensor = Tensor(num_points, 3).set(point_cloud);
+        if (config.verbose) {
+            std::cout << "Input: [" << num_points << ", " << channels << "] ";
+            std::cout << (channels == 9 ? "(xyz+rgb+normalized)" : "(xyz only)") << std::endl;
+        }
+        
+        // Create input tensor [N, channels]
+        Tensor input_tensor = Tensor(num_points, channels).set(point_cloud);
         
         // Run inference with timing
         auto start = std::chrono::high_resolution_clock::now();
@@ -161,12 +182,19 @@ std::vector<float> loadPointCloudFromFile(const std::string& filename) {
     std::string line;
     while (std::getline(file, line)) {
         std::istringstream iss(line);
-        float x, y, z;
+        std::vector<float> values;
+        float val;
         
-        if (iss >> x >> y >> z) {
-            point_cloud.push_back(x);
-            point_cloud.push_back(y);
-            point_cloud.push_back(z);
+        // Read all values from line
+        while (iss >> val) {
+            values.push_back(val);
+        }
+        
+        // Support both 3-dim (xyz) and 9-dim (xyz+rgb+normalized)
+        if (values.size() == 3 || values.size() == 9) {
+            for (float v : values) {
+                point_cloud.push_back(v);
+            }
         }
     }
     
@@ -192,7 +220,9 @@ SegmentationResult segmentFromFile(
         std::vector<float> point_cloud = loadPointCloudFromFile(filename);
         
         if (config.verbose) {
-            std::cout << "✓ Loaded " << (point_cloud.size() / 3) << " points\n" << std::endl;
+            uint32_t channels = (point_cloud.size() % 9 == 0) ? 9 : 3;
+            std::cout << "✓ Loaded " << (point_cloud.size() / channels) << " points ";
+            std::cout << "(" << channels << "-dimensional)\n" << std::endl;
         }
         
         return segment(model, point_cloud, config);

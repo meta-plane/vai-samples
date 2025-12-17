@@ -23,6 +23,7 @@ struct InferenceConfig {
     
     // Model parameters
     uint32_t num_classes = 10;
+    uint32_t channel = 9;  // Input channels (3 for xyz, 9 for xyz+rgb+normalized)
     
     // Inference settings
     uint32_t num_iterations = 1;  // For benchmarking

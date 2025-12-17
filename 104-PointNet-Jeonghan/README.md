@@ -6,12 +6,16 @@ High-performance PointNet point cloud segmentation inference using Vulkan comput
 
 ## 🎯 Features
 
-- ✅ **Pure Vulkan Compute**: GPU-accelerated inference with Vulkan
+- ✅ **Pure Vulkan Compute**: GPU-accelerated inference with Vulkan compute shaders
 - ✅ **PointNet Segmentation**: Full implementation following the original paper
+- ✅ **Pretrained Weights**: yanx27 S3DIS semantic segmentation model (13 classes)
 - ✅ **Clean API**: Inspired by GPT-2 inference module design
 - ✅ **Modular Architecture**: Separate inference, weights, and network modules
 - ✅ **Multiple Nodes**: TNet, MLP, MaxPool, Broadcast, Concat operations
-- ✅ **Flexible Input**: Support for various point cloud formats
+- ✅ **Flexible Input**: Support for `.txt`, `.ply`, `.xyz`, `.off` point cloud formats
+- ✅ **ModelNet40 Integration**: 40 object categories, auto-sampling, error recovery
+- ✅ **Comprehensive Tests**: 15+ unit tests validating against PyTorch reference
+- ✅ **High Performance**: ~74,000 points/sec throughput on standard GPUs
 
 ## 📁 Project Structure
 
@@ -30,19 +34,28 @@ High-performance PointNet point cloud segmentation inference using Vulkan comput
 │   ├── neuralNet.h/cpp       # Neural network base classes
 │   ├── neuralNodes.h/cpp     # Network nodes (Conv, MLP, etc.)
 │   ├── vulkanApp.h/cpp       # Vulkan initialization
+│   ├── pointCloudLoader.h    # Point cloud file loaders (.txt/.ply/.xyz/.off)
 │   └── ...
-├── utils/                    # Python utilities
+├── utils/                    # Utilities
 │   ├── convert_pytorch_weights.py  # PyTorch → JSON converter
-│   ├── prepare_sample_data.py      # Generate test data
-│   └── download_modelnet.py        # Download datasets
+│   ├── convert_to_safetensors.py   # Convert JSON to SafeTensors
+│   └── download.sh                 # Dataset download script
 ├── assets/
 │   ├── weights/              # Model weights (JSON)
-│   └── data/                 # Sample point clouds
+│   ├── data/                 # Sample point clouds
+│   └── datasets/             # Downloaded datasets (ModelNet40)
+├── test/                     # Unit tests
+│   ├── encoder/              # PointNetEncoder test
+│   ├── segment/              # Full segmentation test
+│   ├── mlp/                  # MLP layer test
+│   └── ...                   # 15+ component tests
 ├── main.cpp                  # Demo application
-├── CMakeLists.txt           # Build configuration
-├── build.sh                 # Incremental build script
-├── README.md                # This file
-└── WEIGHTS_README.md        # Weight conversion guide
+├── test_off_loader.cpp       # OFF format loader test
+├── test_real_data.cpp        # Real data inference test
+├── CMakeLists.txt            # Build configuration
+├── build.sh                  # Incremental build script
+├── README.md                 # This file
+└── WEIGHTS_README.md         # Weight conversion guide
 ```
 
 ## 🚀 Quick Start
@@ -73,23 +86,22 @@ cd 104-PointNet-Jeonghan
 ./build.sh
 ```
 
-### 3. Prepare Data
+### 3. Download Pretrained Weights
 
+**yanx27 S3DIS Semantic Segmentation Model** (Recommended):
 ```bash
-# Generate sample point clouds
-python utils/prepare_sample_data.py --num_points 1024
-
-# (Optional) Download ModelNet40 for real data
-python utils/download_modelnet.py --dataset modelnet40
+# Already provided in assets/weights/pointnet_yanx27.json
+# 13 classes (ceiling, floor, wall, beam, column, window, door, table, chair, sofa, bookcase, board, clutter)
+# Trained on S3DIS dataset
+# File size: ~120MB
 ```
 
-### 4. Prepare Weights
-
+**Alternative: Custom Weights**:
 ```bash
-# Option A: Random weights (for testing)
+# Random weights (for testing)
 python utils/convert_pytorch_weights.py --random --num_classes 10
 
-# Option B: Convert from PyTorch checkpoint
+# Convert from PyTorch checkpoint
 python utils/convert_pytorch_weights.py \
     --checkpoint path/to/model.pth \
     --output assets/weights/pointnet_weights.json
@@ -97,41 +109,74 @@ python utils/convert_pytorch_weights.py \
 
 See [WEIGHTS_README.md](WEIGHTS_README.md) for detailed instructions.
 
+### 4. Download ModelNet40 Dataset (Optional)
+
+```bash
+# Download ~2GB dataset (40 categories, 12,311 CAD models)
+./utils/download.sh
+```
+
+**ModelNet40 Categories**: airplane, bathtub, bed, bench, bookshelf, bottle, bowl, car, chair, cone, cup, curtain, desk, door, dresser, flower_pot, glass_box, guitar, keyboard, lamp, laptop, mantel, monitor, night_stand, person, piano, plant, radio, range_hood, sink, sofa, stairs, stool, table, tent, toilet, tv_stand, vase, wardrobe, xbox
+
+**Features**:
+- 40 object categories with train/test splits
+- OFF format (vertices and faces)
+- Automatic sampling and normalization
+- Error recovery for corrupted files
+
+**Supported Point Cloud Formats**: `.txt`, `.ply`, `.xyz`, `.off`
+
 ### 5. Run Inference
 
 ```bash
-cd build/bin/debug
-./104-PointNet-Jeonghan
+# Run from project directory
+cd /home/jeonghan/workspace/vai-samples/104-PointNet-Jeonghan
+/home/jeonghan/workspace/vai-samples/bin/debug/104-PointNet-Jeonghan
 ```
 
 Expected output:
 ```
 ╔════════════════════════════════════════════════════════╗
 ║      PointNet Segmentation - Vulkan Inference         ║
+║           with ModelNet40 Dataset Support             ║
 ╚════════════════════════════════════════════════════════╝
 
 Step 1: Loading pretrained model...
 Loading PointNet Segmentation model...
-  Weights: assets/weights/pointnet_weights.json
-  Num classes: 10
+  Weights: assets/weights/pointnet_yanx27.json
+  Num classes: 13
+  Input channels: 3
 ✓ Network created
 Loading pretrained weights...
 ✓ Weights loaded
 
---------------------------------------------------------
-Example: Segmenting random point cloud
---------------------------------------------------------
+========================================================
+Example 1: ModelNet40 Dataset
+========================================================
 
+--- ModelNet40 Sample ---
+Loaded: lamp (19) from lamp_0144.off
+Points: 1024
+Input: [1024, 3] (xyz only)
 Segmentation complete:
   Points: 1024
-  Time: 12.345 ms
-  Throughput: 82915.3 points/sec
+  Time: 13.800 ms
+  Throughput: 74204.0 points/sec
 
-Sample predictions (first 5 points):
-Point 0 → Class 3 (scores: 0.123, -0.456, 0.789...)
-Point 1 → Class 7 (scores: -0.234, 0.567, -0.123...)
-...
+Object: lamp (ModelNet40 class 19)
+
+Top semantic classes detected:
+  Class 12: 100.0% (1024 points)
+  Class 11: 0.0% (0 points)
+  Class 10: 0.0% (0 points)
+Performance: 74204 points/sec
+
+========================================================
+PointNet segmentation demo complete!
+========================================================
 ```
+
+**Note**: yanx27 model is trained for semantic segmentation (13 S3DIS classes), not ModelNet40 classification (40 classes). ModelNet40 is used for demonstration and visualization purposes.
 
 ## 🏗️ Architecture
 
@@ -253,12 +298,16 @@ Example: See `BroadcastNode` and `ConcatNode`
 ./build.sh --test
 
 # Run all tests
-cd ../build/104-PointNet-Jeonghan
+cd ../build
 ctest --output-on-failure
 
-# Run specific test
-/home/jeong/workspace/vai-samples/bin/debug/test_encoder
-/home/jeong/workspace/vai-samples/bin/debug/test_segment
+# Run specific tests
+/home/jeonghan/workspace/vai-samples/bin/debug/test_encoder
+/home/jeonghan/workspace/vai-samples/bin/debug/test_segment
+
+# Test with real data
+cd /home/jeonghan/workspace/vai-samples/104-PointNet-Jeonghan
+/home/jeonghan/workspace/vai-samples/bin/debug/test_off_loader
 ```
 
 **Test Results** (see [test/TEST_RESULTS.md](test/TEST_RESULTS.md) for details):
@@ -272,14 +321,29 @@ All tests compare Vulkan compute shader outputs against PyTorch reference implem
 
 ## 📊 Performance
 
-**Typical Performance (NVIDIA GPU):**
-- ~80,000 points/sec on RTX 3060
-- ~12ms per 1024-point cloud
-- Scales linearly with point count
+**Measured Performance (yanx27 pretrained model):**
+- **Throughput**: ~74,000 points/sec (average across multiple runs)
+- **Latency**: ~13.8ms per 1024-point cloud
+- **Consistency**: 72K-75K points/sec range
+- **Tested on**: Consumer-grade GPU
+
+**Performance by Object Type** (ModelNet40 samples):
+| Object | Points | Time (ms) | Throughput (pts/sec) |
+|--------|--------|-----------|---------------------|
+| bench | 1024 | 14.07 | 72,776 |
+| stool | 1024 | 13.71 | 74,669 |
+| cup | 1024 | 13.65 | 75,005 |
+| lamp | 1024 | 13.80 | 74,204 |
+| plant | 1024 | 13.97 | 73,311 |
 
 **Memory Usage:**
-- Model: ~37 MB (weights)
-- Per-inference: ~8 MB (1024 points, 10 classes)
+- Model weights: ~120 MB (yanx27 JSON format)
+- Per-inference: ~8 MB (1024 points, 13 classes)
+- GPU buffers: ~16 MB (input + intermediate + output)
+
+**Known Limitations:**
+- Multiple inference calls not yet supported (buffer reuse issue)
+- Run program multiple times for different samples
 
 ## 🐛 Troubleshooting
 
@@ -341,22 +405,3 @@ If you use this implementation, please cite:
   year={2017}
 }
 ```
-
-## 📄 License
-
-MIT License - See [LICENSE](../LICENSE) for details.
-
-## 🤝 Contributing
-
-This is part of the `vai-samples` educational repository. For improvements:
-1. Follow existing code style
-2. Test with multiple point cloud sizes
-3. Document API changes
-4. Update this README
-
----
-
-**Last Updated**: 2025-01-23  
-**Maintainer**: Jeonghan  
-**Project**: VAI Samples - Vulkan AI Inference Examples
-

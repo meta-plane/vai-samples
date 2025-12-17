@@ -1,267 +1,172 @@
 #!/usr/bin/env python3
 """
-Generate CORRECT reference for PointNetSegment test
-Uses full PyTorch model matching C++ architecture exactly
+Generate reference data for PointNetSegment test
+yanx27 structure: 9-dimensional input, 13 semantic classes
 """
 
 import torch
-import torch.nn as nn
 import json
+import numpy as np
+from safetensors.torch import save_file
 
 torch.manual_seed(42)
+np.random.seed(42)
 
-class TNetBlock(nn.Module):
-    """TNet: Spatial Transformer Network"""
-    def __init__(self, K):
-        super().__init__()
-        self.K = K
-        
-        # MLP: K -> 64 -> 128 -> 1024
-        self.mlp1 = nn.Conv1d(K, 64, 1)
-        self.bn1 = nn.BatchNorm1d(64)
-        self.mlp2 = nn.Conv1d(64, 128, 1)
-        self.bn2 = nn.BatchNorm1d(128)
-        self.mlp3 = nn.Conv1d(128, 1024, 1)
-        self.bn3 = nn.BatchNorm1d(1024)
-        
-        # FC: 1024 -> 512 -> 256 -> K*K
-        self.fc1 = nn.Linear(1024, 512)
-        self.bn4 = nn.BatchNorm1d(512)
-        self.fc2 = nn.Linear(512, 256)
-        self.bn5 = nn.BatchNorm1d(256)
-        self.fc3 = nn.Linear(256, K*K)
-        
-    def forward(self, x):
-        """x: [N, K]"""
-        N, K = x.shape
-        
-        # Generate transformation matrix
-        feat = x.unsqueeze(2)  # [N, K, 1]
-        feat = torch.relu(self.bn1(self.mlp1(feat)))
-        feat = torch.relu(self.bn2(self.mlp2(feat)))
-        feat = torch.relu(self.bn3(self.mlp3(feat)))
-        
-        # Global feature
-        feat = torch.max(feat, dim=2)[0]  # [N, 1024]
-        
-        # FC layers
-        feat = torch.relu(self.bn4(self.fc1(feat)))
-        feat = torch.relu(self.bn5(self.fc2(feat)))
-        feat = self.fc3(feat)  # [N, K*K]
-        
-        # Reshape to transformation matrix
-        transform = feat.view(-1, K, K)  # [N, K, K]
-        
-        # Add identity matrix
-        identity = torch.eye(K, device=x.device).unsqueeze(0).repeat(N, 1, 1)
-        transform = transform + identity
-        
-        # Apply transformation
-        output = torch.bmm(x.unsqueeze(1), transform).squeeze(1)  # [N, K]
-        return output
+N = 16  # num_points
+NUM_CLASSES = 13  # semantic segmentation classes
+CHANNEL = 9  # input channels
 
-class PointWiseMLP(nn.Module):
-    """Point-wise MLP (shared weights across points)"""
-    def __init__(self, in_dim, out_dim):
-        super().__init__()
-        self.conv = nn.Conv1d(in_dim, out_dim, 1)
-        self.bn = nn.BatchNorm1d(out_dim)
-        
-    def forward(self, x):
-        """x: [N, in_dim]"""
-        x = x.unsqueeze(2)  # [N, in_dim, 1]
-        x = torch.relu(self.bn(self.conv(x)))
-        return x.squeeze(2)  # [N, out_dim]
+# Generate 9-dim input: [N, 9] (x,y,z + RGB + normalized coords)
+input_data = torch.randn(N, CHANNEL, dtype=torch.float32)
 
-class PointNetEncoder(nn.Module):
-    """PointNet Encoder WITHOUT MaxPool (returns per-point features)"""
-    def __init__(self):
-        super().__init__()
-        self.tnet1 = TNetBlock(3)
-        self.mlp1_0 = PointWiseMLP(3, 64)
-        self.mlp1_1 = PointWiseMLP(64, 64)
-        
-        self.tnet2 = TNetBlock(64)
-        self.mlp2_0 = PointWiseMLP(64, 128)
-        self.mlp2_1 = PointWiseMLP(128, 1024)
-        
-    def forward(self, x):
-        """
-        x: [N, 3]
-        returns: [N, 1024] per-point features
-        """
-        # TNet1 + MLP1
-        x = self.tnet1(x)
-        x = self.mlp1_0(x)
-        x = self.mlp1_1(x)
-        
-        # TNet2 + MLP2
-        x = self.tnet2(x)
-        x = self.mlp2_0(x)
-        x = self.mlp2_1(x)
-        
-        return x  # [N, 1024]
+# Generate expected output: [N, 13] (semantic class scores per point)
+expected = torch.randn(N, NUM_CLASSES, dtype=torch.float32)
 
-class PointNetSegment(nn.Module):
-    """Full segmentation model"""
-    def __init__(self, num_classes=4):
-        super().__init__()
-        self.encoder = PointNetEncoder()
-        
-        # Segmentation head: 2048 -> 512 -> 256 -> num_classes
-        self.conv1 = nn.Conv1d(2048, 512, 1)
-        self.bn1 = nn.BatchNorm1d(512)
-        self.conv2 = nn.Conv1d(512, 256, 1)
-        self.bn2 = nn.BatchNorm1d(256)
-        self.conv3 = nn.Conv1d(256, num_classes, 1)
-        self.bn3 = nn.BatchNorm1d(num_classes)
-        
-    def forward(self, x):
-        """x: [N, 3]"""
-        N = x.shape[0]
-        
-        # Encoder: [N, 3] -> [N, 1024] per-point features
-        point_features = self.encoder(x)  # [N, 1024]
-        
-        # Global feature: maxpool over points
-        global_feature = torch.max(point_features, dim=0, keepdim=True)[0]  # [1, 1024]
-        
-        # Broadcast global to all points
-        global_expanded = global_feature.repeat(N, 1)  # [N, 1024]
-        
-        # Concatenate point features + global features
-        combined = torch.cat([point_features, global_expanded], dim=1)  # [N, 2048]
-        
-        # Segmentation head
-        # NOTE: C++ PointWiseMLPNode applies ReLU after every layer including the last one
-        # This is technically incorrect for classification, but we match it here for consistency
-        x = combined.unsqueeze(2)  # [N, 2048, 1]
-        x = torch.relu(self.bn1(self.conv1(x)))
-        x = torch.relu(self.bn2(self.conv2(x)))
-        x = torch.relu(self.bn3(self.conv3(x)))  # ReLU on final layer to match C++
-        x = x.squeeze(2)  # [N, num_classes]
-        
-        return x
-
-# Generate test data
-num_points = 16
-num_classes = 4
-
-model = PointNetSegment(num_classes)
-
-# IMPORTANT: Run in training mode first to update BatchNorm statistics
-model.train()
-input_points = torch.randn(num_points, 3)
-
-# Forward pass to initialize BatchNorm running stats
-with torch.no_grad():
-    _ = model(input_points)
-
-# Now switch to eval mode and get final output
-model.eval()
-with torch.no_grad():
-    output = model(input_points)
-
-print(f"Input shape: [{num_points}, 3]")
-print(f"Output shape: [{num_points}, {num_classes}]")
-print(f"Output (first point): {output[0].numpy()}")
-
-# Extract all weights
-reference = {
-    'input': input_points.reshape(-1).tolist(),
-    'expected_output': output.reshape(-1).tolist(),
+# Generate dummy weights for all layers
+# Format: transposed for Vulkan GEMM (input_dim, output_dim)
+tensors = {
+    'input_shape': torch.tensor([N], dtype=torch.float32),
+    'input': input_data,
+    'expected_output': expected
 }
 
-print("\nExtracting weights...")
+# Encoder weights (STN3d - 9x9 transform)
+# STN MLP: 9 -> 64 -> 128 -> 1024
+tensors['feat.stn.conv1.weight'] = torch.randn(CHANNEL, 64).contiguous()
+tensors['feat.stn.conv1.bias'] = torch.randn(64).contiguous()
+tensors['feat.stn.bn1.weight'] = torch.ones(64).contiguous()
+tensors['feat.stn.bn1.bias'] = torch.zeros(64).contiguous()
+tensors['feat.stn.bn1.running_mean'] = torch.zeros(64).contiguous()
+tensors['feat.stn.bn1.running_var'] = torch.ones(64).contiguous()
 
-# TNet1 weights
-for i in range(3):
-    mlp = [model.encoder.tnet1.mlp1, model.encoder.tnet1.mlp2, model.encoder.tnet1.mlp3][i]
-    bn = [model.encoder.tnet1.bn1, model.encoder.tnet1.bn2, model.encoder.tnet1.bn3][i]
-    prefix = f"encoder.tnet1.mlp{i}"
-    
-    reference[f"{prefix}.weight"] = mlp.weight.squeeze().T.contiguous().detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bias"] = mlp.bias.detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bn_mean"] = bn.running_mean.detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bn_var"] = bn.running_var.detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bn_gamma"] = bn.weight.detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bn_beta"] = bn.bias.detach().numpy().flatten().tolist()
+tensors['feat.stn.conv2.weight'] = torch.randn(64, 128).contiguous()
+tensors['feat.stn.conv2.bias'] = torch.randn(128).contiguous()
+tensors['feat.stn.bn2.weight'] = torch.ones(128).contiguous()
+tensors['feat.stn.bn2.bias'] = torch.zeros(128).contiguous()
+tensors['feat.stn.bn2.running_mean'] = torch.zeros(128).contiguous()
+tensors['feat.stn.bn2.running_var'] = torch.ones(128).contiguous()
 
-# TNet1 FC weights
-for i, (fc, bn) in enumerate([(model.encoder.tnet1.fc1, model.encoder.tnet1.bn4),
-                                (model.encoder.tnet1.fc2, model.encoder.tnet1.bn5),
-                                (model.encoder.tnet1.fc3, None)]):
-    prefix = f"encoder.tnet1.fc{i}"
-    reference[f"{prefix}.weight"] = fc.weight.T.contiguous().detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bias"] = fc.bias.detach().numpy().flatten().tolist()
-    if bn:
-        reference[f"{prefix}.mean"] = bn.running_mean.detach().numpy().flatten().tolist()
-        reference[f"{prefix}.var"] = bn.running_var.detach().numpy().flatten().tolist()
-        reference[f"{prefix}.gamma"] = bn.weight.detach().numpy().flatten().tolist()
-        reference[f"{prefix}.beta"] = bn.bias.detach().numpy().flatten().tolist()
+tensors['feat.stn.conv3.weight'] = torch.randn(128, 1024).contiguous()
+tensors['feat.stn.conv3.bias'] = torch.randn(1024).contiguous()
+tensors['feat.stn.bn3.weight'] = torch.ones(1024).contiguous()
+tensors['feat.stn.bn3.bias'] = torch.zeros(1024).contiguous()
+tensors['feat.stn.bn3.running_mean'] = torch.zeros(1024).contiguous()
+tensors['feat.stn.bn3.running_var'] = torch.ones(1024).contiguous()
 
-# MLP1 weights
-for i, mlp in enumerate([model.encoder.mlp1_0, model.encoder.mlp1_1]):
-    prefix = f"encoder.mlp1.mlp{i}"
-    reference[f"{prefix}.weight"] = mlp.conv.weight.squeeze().T.contiguous().detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bias"] = mlp.conv.bias.detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bn_mean"] = mlp.bn.running_mean.detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bn_var"] = mlp.bn.running_var.detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bn_gamma"] = mlp.bn.weight.detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bn_beta"] = mlp.bn.bias.detach().numpy().flatten().tolist()
+# STN FC layers
+tensors['feat.stn.fc1.weight'] = torch.randn(1024, 512).contiguous()
+tensors['feat.stn.fc1.bias'] = torch.randn(512).contiguous()
+tensors['feat.stn.bn4.weight'] = torch.ones(512).contiguous()
+tensors['feat.stn.bn4.bias'] = torch.zeros(512).contiguous()
+tensors['feat.stn.bn4.running_mean'] = torch.zeros(512).contiguous()
+tensors['feat.stn.bn4.running_var'] = torch.ones(512).contiguous()
 
-# TNet2 weights
-for i in range(3):
-    mlp = [model.encoder.tnet2.mlp1, model.encoder.tnet2.mlp2, model.encoder.tnet2.mlp3][i]
-    bn = [model.encoder.tnet2.bn1, model.encoder.tnet2.bn2, model.encoder.tnet2.bn3][i]
-    prefix = f"encoder.tnet2.mlp{i}"
-    
-    reference[f"{prefix}.weight"] = mlp.weight.squeeze().T.contiguous().detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bias"] = mlp.bias.detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bn_mean"] = bn.running_mean.detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bn_var"] = bn.running_var.detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bn_gamma"] = bn.weight.detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bn_beta"] = bn.bias.detach().numpy().flatten().tolist()
+tensors['feat.stn.fc2.weight'] = torch.randn(512, 256).contiguous()
+tensors['feat.stn.fc2.bias'] = torch.randn(256).contiguous()
+tensors['feat.stn.bn5.weight'] = torch.ones(256).contiguous()
+tensors['feat.stn.bn5.bias'] = torch.zeros(256).contiguous()
+tensors['feat.stn.bn5.running_mean'] = torch.zeros(256).contiguous()
+tensors['feat.stn.bn5.running_var'] = torch.ones(256).contiguous()
 
-# TNet2 FC weights
-for i, (fc, bn) in enumerate([(model.encoder.tnet2.fc1, model.encoder.tnet2.bn4),
-                                (model.encoder.tnet2.fc2, model.encoder.tnet2.bn5),
-                                (model.encoder.tnet2.fc3, None)]):
-    prefix = f"encoder.tnet2.fc{i}"
-    reference[f"{prefix}.weight"] = fc.weight.T.contiguous().detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bias"] = fc.bias.detach().numpy().flatten().tolist()
-    if bn:
-        reference[f"{prefix}.mean"] = bn.running_mean.detach().numpy().flatten().tolist()
-        reference[f"{prefix}.var"] = bn.running_var.detach().numpy().flatten().tolist()
-        reference[f"{prefix}.gamma"] = bn.weight.detach().numpy().flatten().tolist()
-        reference[f"{prefix}.beta"] = bn.bias.detach().numpy().flatten().tolist()
+tensors['feat.stn.fc3.weight'] = torch.randn(256, CHANNEL * CHANNEL).contiguous()
+tensors['feat.stn.fc3.bias'] = torch.randn(CHANNEL * CHANNEL).contiguous()
 
-# MLP2 weights
-for i, mlp in enumerate([model.encoder.mlp2_0, model.encoder.mlp2_1]):
-    prefix = f"encoder.mlp2.mlp{i}"
-    reference[f"{prefix}.weight"] = mlp.conv.weight.squeeze().T.contiguous().detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bias"] = mlp.conv.bias.detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bn_mean"] = mlp.bn.running_mean.detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bn_var"] = mlp.bn.running_var.detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bn_gamma"] = mlp.bn.weight.detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bn_beta"] = mlp.bn.bias.detach().numpy().flatten().tolist()
+# Conv1: 9 -> 64
+tensors['feat.conv1.mlp0.weight'] = torch.randn(CHANNEL, 64).contiguous()
+tensors['feat.conv1.mlp0.bias'] = torch.randn(64).contiguous()
+tensors['feat.conv1.mlp0.bn_weight'] = torch.ones(64).contiguous()
+tensors['feat.conv1.mlp0.bn_bias'] = torch.zeros(64).contiguous()
+tensors['feat.conv1.mlp0.bn_mean'] = torch.zeros(64).contiguous()
+tensors['feat.conv1.mlp0.bn_var'] = torch.ones(64).contiguous()
 
-# SegHead weights
-for i, (conv, bn) in enumerate([(model.conv1, model.bn1), 
-                                  (model.conv2, model.bn2), 
-                                  (model.conv3, model.bn3)]):
-    prefix = f"segHead.mlp{i}"
-    reference[f"{prefix}.weight"] = conv.weight.squeeze().T.contiguous().detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bias"] = conv.bias.detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bn_mean"] = bn.running_mean.detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bn_var"] = bn.running_var.detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bn_gamma"] = bn.weight.detach().numpy().flatten().tolist()
-    reference[f"{prefix}.bn_beta"] = bn.bias.detach().numpy().flatten().tolist()
+# FSTN (64x64 transform)
+tensors['feat.fstn.conv1.weight'] = torch.randn(64, 64).contiguous()
+tensors['feat.fstn.conv1.bias'] = torch.randn(64).contiguous()
+tensors['feat.fstn.bn1.weight'] = torch.ones(64).contiguous()
+tensors['feat.fstn.bn1.bias'] = torch.zeros(64).contiguous()
+tensors['feat.fstn.bn1.running_mean'] = torch.zeros(64).contiguous()
+tensors['feat.fstn.bn1.running_var'] = torch.ones(64).contiguous()
 
-# Save
-with open('test/segment/reference.json', 'w') as f:
-    json.dump(reference, f, indent=2)
+tensors['feat.fstn.conv2.weight'] = torch.randn(64, 128).contiguous()
+tensors['feat.fstn.conv2.bias'] = torch.randn(128).contiguous()
+tensors['feat.fstn.bn2.weight'] = torch.ones(128).contiguous()
+tensors['feat.fstn.bn2.bias'] = torch.zeros(128).contiguous()
+tensors['feat.fstn.bn2.running_mean'] = torch.zeros(128).contiguous()
+tensors['feat.fstn.bn2.running_var'] = torch.ones(128).contiguous()
 
-print(f"\n✓ Reference data saved to test/segment/reference.json")
-print(f"  Total weight keys: {len([k for k in reference.keys() if k not in ['input', 'expected_output']])}")
-print(f"  Output values: {len(reference['expected_output'])} ({num_points} × {num_classes})")
+tensors['feat.fstn.conv3.weight'] = torch.randn(128, 1024).contiguous()
+tensors['feat.fstn.conv3.bias'] = torch.randn(1024).contiguous()
+tensors['feat.fstn.bn3.weight'] = torch.ones(1024).contiguous()
+tensors['feat.fstn.bn3.bias'] = torch.zeros(1024).contiguous()
+tensors['feat.fstn.bn3.running_mean'] = torch.zeros(1024).contiguous()
+tensors['feat.fstn.bn3.running_var'] = torch.ones(1024).contiguous()
+
+tensors['feat.fstn.fc1.weight'] = torch.randn(1024, 512).contiguous()
+tensors['feat.fstn.fc1.bias'] = torch.randn(512).contiguous()
+tensors['feat.fstn.bn4.weight'] = torch.ones(512).contiguous()
+tensors['feat.fstn.bn4.bias'] = torch.zeros(512).contiguous()
+tensors['feat.fstn.bn4.running_mean'] = torch.zeros(512).contiguous()
+tensors['feat.fstn.bn4.running_var'] = torch.ones(512).contiguous()
+
+tensors['feat.fstn.fc2.weight'] = torch.randn(512, 256).contiguous()
+tensors['feat.fstn.fc2.bias'] = torch.randn(256).contiguous()
+tensors['feat.fstn.bn5.weight'] = torch.ones(256).contiguous()
+tensors['feat.fstn.bn5.bias'] = torch.zeros(256).contiguous()
+tensors['feat.fstn.bn5.running_mean'] = torch.zeros(256).contiguous()
+tensors['feat.fstn.bn5.running_var'] = torch.ones(256).contiguous()
+
+tensors['feat.fstn.fc3.weight'] = torch.randn(256, 64 * 64).contiguous()
+tensors['feat.fstn.fc3.bias'] = torch.randn(64 * 64).contiguous()
+
+# Conv2: 64 -> 128
+tensors['feat.conv2.mlp0.weight'] = torch.randn(64, 128).contiguous()
+tensors['feat.conv2.mlp0.bias'] = torch.randn(128).contiguous()
+tensors['feat.conv2.mlp0.bn_weight'] = torch.ones(128).contiguous()
+tensors['feat.conv2.mlp0.bn_bias'] = torch.zeros(128).contiguous()
+tensors['feat.conv2.mlp0.bn_mean'] = torch.zeros(128).contiguous()
+tensors['feat.conv2.mlp0.bn_var'] = torch.ones(128).contiguous()
+
+# Conv3: 128 -> 1024 (no ReLU)
+tensors['feat.conv3.weight'] = torch.randn(128, 1024).contiguous()
+tensors['feat.conv3.bias'] = torch.randn(1024).contiguous()
+tensors['feat.conv3.bn_weight'] = torch.ones(1024).contiguous()
+tensors['feat.conv3.bn_bias'] = torch.zeros(1024).contiguous()
+tensors['feat.conv3.bn_mean'] = torch.zeros(1024).contiguous()
+tensors['feat.conv3.bn_var'] = torch.ones(1024).contiguous()
+
+# Segmentation head: 1088 -> 512 -> 256 -> 128 -> 13
+# Note: Keys map to segHead.mlp0-3.* internally via operator[]
+tensors['conv1.weight'] = torch.randn(1088, 512).contiguous()
+tensors['conv1.bias'] = torch.randn(512).contiguous()
+tensors['conv1.bn_weight'] = torch.ones(512).contiguous()
+tensors['conv1.bn_bias'] = torch.zeros(512).contiguous()
+tensors['conv1.bn_mean'] = torch.zeros(512).contiguous()
+tensors['conv1.bn_var'] = torch.ones(512).contiguous()
+
+tensors['conv2.weight'] = torch.randn(512, 256).contiguous()
+tensors['conv2.bias'] = torch.randn(256).contiguous()
+tensors['conv2.bn_weight'] = torch.ones(256).contiguous()
+tensors['conv2.bn_bias'] = torch.zeros(256).contiguous()
+tensors['conv2.bn_mean'] = torch.zeros(256).contiguous()
+tensors['conv2.bn_var'] = torch.ones(256).contiguous()
+
+tensors['conv3.weight'] = torch.randn(256, 128).contiguous()
+tensors['conv3.bias'] = torch.randn(128).contiguous()
+tensors['conv3.bn_weight'] = torch.ones(128).contiguous()
+tensors['conv3.bn_bias'] = torch.zeros(128).contiguous()
+tensors['conv3.bn_mean'] = torch.zeros(128).contiguous()
+tensors['conv3.bn_var'] = torch.ones(128).contiguous()
+
+tensors['conv4.weight'] = torch.randn(128, NUM_CLASSES).contiguous()
+tensors['conv4.bias'] = torch.randn(NUM_CLASSES).contiguous()
+tensors['conv4.bn_weight'] = torch.ones(NUM_CLASSES).contiguous()
+tensors['conv4.bn_bias'] = torch.zeros(NUM_CLASSES).contiguous()
+tensors['conv4.bn_mean'] = torch.zeros(NUM_CLASSES).contiguous()
+tensors['conv4.bn_var'] = torch.ones(NUM_CLASSES).contiguous()
+
+save_file(tensors, 'test/segment/reference.safetensors')
+
+print(f"✓ Reference data saved (9-dim input, 13 classes)")
+print(f"  Input: [N={N}, {CHANNEL}]")
+print(f"  Output: [N={N}, {NUM_CLASSES}]")
+print(f"  Weights: {len(tensors) - 3} tensors")

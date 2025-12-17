@@ -44,6 +44,24 @@ public:
 };
 
 
+class PointWiseConvNode : public Node
+{
+    uint32_t Cin, Cout;
+
+    ComputePipeline gemm;
+    DescriptorSet gemmDesc;
+    
+    ComputePipeline batchnorm;
+    DescriptorSet batchnormDesc;
+
+public:
+    PointWiseConvNode(uint32_t inDim, uint32_t outDim);
+
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+
 class BatchNorm1DNode : public Node
 {
     uint32_t C;  // channels
@@ -207,6 +225,7 @@ public:
 
 extern Device netGlobalDevice; // Global device for neural network operations
 
-
+// Load all compute shaders (must be called before using any nodes)
+void loadShaders();
 
 #endif // NEURAL_NODES_H

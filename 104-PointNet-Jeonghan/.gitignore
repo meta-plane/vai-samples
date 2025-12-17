@@ -1,2 +1,5 @@
 *.json
 build/
+.venv/
+assets/
+temp*

@@ -943,6 +943,122 @@ void PointWiseMLPNode::run(CommandBuffer cmdBuff)
 
 
 /////////////////////////////////////////////////////////////////////////////////////////
+// PointWiseConvNode (Conv1x1 + BatchNorm1D, NO ReLU)
+// Used for the last conv layer in PointNet encoder
+/////////////////////////////////////////////////////////////////////////////////////////
+PointWiseConvNode::PointWiseConvNode(uint32_t inDim, uint32_t outDim)
+: Cin(inDim)
+, Cout(outDim)
+{
+    // Slots for Conv + BN (no ReLU)
+    addSlot("in0", NodeSlot::input);      // [N, Cin]
+    addSlot("out0", NodeSlot::output);    // [N, Cout]
+    
+    // Conv weights
+    addSlot("weight", NodeSlot::input);   // [Cin, Cout]
+    addSlot("bias", NodeSlot::input);     // [Cout]
+    
+    // BatchNorm parameters
+    addSlot("bn_mean", NodeSlot::input);  // [Cout]
+    addSlot("bn_var", NodeSlot::input);   // [Cout]
+    addSlot("bn_gamma", NodeSlot::input); // [Cout]
+    addSlot("bn_beta", NodeSlot::input);  // [Cout]
+    
+    // Intermediate tensor for Conv output
+    addSlot("conv_out", NodeSlot::internal);  // After Conv
+
+    // Create pipelines for Conv and BatchNorm only
+    gemm = requestPipeline(src_gemm_shared);
+    gemmDesc = gemm.descSetLayout(0).newDescSet(gDestSetPool);
+    
+    batchnorm = requestPipeline(src_batchnorm1d);
+    batchnormDesc = batchnorm.descSetLayout(0).newDescSet(gDestSetPool);
+}
+
+void PointWiseConvNode::prepare()
+{
+    const auto& inShape = (*this)["in0"].shape();
+    _ASSERT(inShape.size() == 2);
+    _ASSERT(inShape[1] == Cin);
+
+    (*this)["out0"] = Tensor(inShape[0], Cout);
+    (*this)["conv_out"] = Tensor(inShape[0], Cout);
+    
+    // Set default BatchNorm parameters if not provided
+    if (!(*this)["bn_mean"].validShape()) {
+        std::vector<float> zeros(Cout, 0.0f);
+        (*this)["bn_mean"] = Tensor(Cout).set(zeros);
+    }
+    if (!(*this)["bn_var"].validShape()) {
+        std::vector<float> ones(Cout, 1.0f);
+        (*this)["bn_var"] = Tensor(Cout).set(ones);
+    }
+    if (!(*this)["bn_gamma"].validShape()) {
+        std::vector<float> ones(Cout, 1.0f);
+        (*this)["bn_gamma"] = Tensor(Cout).set(ones);
+    }
+    if (!(*this)["bn_beta"].validShape()) {
+        std::vector<float> zeros(Cout, 0.0f);
+        (*this)["bn_beta"] = Tensor(Cout).set(zeros);
+    }
+}
+
+void PointWiseConvNode::run(CommandBuffer cmdBuff)
+{
+    const auto& inShape = (*this)["in0"].shape();
+    uint32_t N = inShape[0];
+
+    // Stage 1: Conv1x1 (GEMM)
+    gemmDesc.write({
+        (*this)["conv_out"].buffer(),
+        (*this)["in0"].buffer(),
+        (*this)["weight"].buffer(),
+        (*this)["bias"].buffer(),
+    });
+
+    uint32_t pc_gemm[] = {
+        N,        // M
+        Cin,      // K
+        Cout      // N
+    };
+    cmdBuff
+        .bindPipeline(gemm)
+        .bindDescSets({gemmDesc})
+        .setPushConstants(0, sizeof(pc_gemm), pc_gemm)
+        .dispatch0(CEIL_DIV(Cout, 32), CEIL_DIV(N, 32))
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["conv_out"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+
+    // Stage 2: BatchNorm (output to out0 directly, no ReLU after)
+    batchnormDesc.write({
+        (*this)["out0"].buffer(),       // Output directly to out0
+        (*this)["conv_out"].buffer(),
+        (*this)["bn_mean"].buffer(),
+        (*this)["bn_var"].buffer(),
+        (*this)["bn_gamma"].buffer(),
+        (*this)["bn_beta"].buffer()
+    });
+
+    uint32_t pc_bn[] = { N, Cout };
+    cmdBuff
+        .bindPipeline(batchnorm)
+        .bindDescSets({batchnormDesc})
+        .setPushConstants(0, sizeof(pc_bn), pc_bn)
+        .dispatch0(CEIL_DIV(N * Cout, 256))  // FIX: dispatch for all N*C elements
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["out0"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+    
+    // No ReLU stage - output is directly from BatchNorm
+}  
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
 // ReluNode
 /////////////////////////////////////////////////////////////////////////////////////////
 ReluNode::ReluNode()

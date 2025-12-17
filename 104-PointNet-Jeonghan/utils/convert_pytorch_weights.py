@@ -24,16 +24,15 @@ def convert_pointnet_weights(checkpoint_path, output_path):
     """
     Convert PointNet segmentation weights from PyTorch to JSON.
     
-    Expected PyTorch model structure (from reference repo):
-    - Input Transform Network (TNet1): 3x3
-    - MLP1: [3, 64, 64]
-    - Feature Transform Network (TNet2): 64x64
-    - MLP2: [64, 128, 1024]
-    - Segmentation Head: [2048, 512, 256, num_classes]
+    Based on yanx27/Pointnet_Pointnet2_pytorch structure:
+    - feat.stn (STN3d): Conv1d[9→64→128→1024] + FC[1024→512→256→9]
+    - feat.conv1-3: Conv1d[9→64→128→1024]
+    - feat.fstn (STNkd): Conv1d[64→64→128→1024] + FC[1024→512→256→4096]
+    - Segmentation head: Conv1d[1088→512→256→128→13]
     """
     
     print(f"Loading PyTorch checkpoint: {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     
     # Get state dict
     if 'model_state_dict' in checkpoint:
@@ -48,61 +47,125 @@ def convert_pointnet_weights(checkpoint_path, output_path):
     # Initialize output dictionary
     weights = {}
     
-    # Mapping from PyTorch keys to our JSON keys
+    # Mapping from yanx27 PyTorch keys to our JSON keys
+    # yanx27 structure: feat.stn, feat.conv1-3, feat.fstn, conv1-4, bn1-3
     key_mapping = {
-        # TNet1 (input transformation)
-        'tnet1.conv1.weight': 'tnet1.mlp.0.weight',
-        'tnet1.conv1.bias': 'tnet1.mlp.0.bias',
-        'tnet1.conv2.weight': 'tnet1.mlp.1.weight',
-        'tnet1.conv2.bias': 'tnet1.mlp.1.bias',
-        'tnet1.conv3.weight': 'tnet1.mlp.2.weight',
-        'tnet1.conv3.bias': 'tnet1.mlp.2.bias',
+        # feat.stn (STN3d): [9→64→128→1024] + FC[1024→512→256→9]
+        'feat.stn.conv1.weight': 'feat.stn.mlp.mlp0.weight',
+        'feat.stn.conv1.bias': 'feat.stn.mlp.mlp0.bias',
+        'feat.stn.conv2.weight': 'feat.stn.mlp.mlp1.weight',
+        'feat.stn.conv2.bias': 'feat.stn.mlp.mlp1.bias',
+        'feat.stn.conv3.weight': 'feat.stn.mlp.mlp2.weight',
+        'feat.stn.conv3.bias': 'feat.stn.mlp.mlp2.bias',
         
-        'tnet1.fc1.weight': 'tnet1.fc.0.weight',
-        'tnet1.fc1.bias': 'tnet1.fc.0.bias',
-        'tnet1.fc2.weight': 'tnet1.fc.1.weight',
-        'tnet1.fc2.bias': 'tnet1.fc.1.bias',
-        'tnet1.fc3.weight': 'tnet1.fc.2.weight',
-        'tnet1.fc3.bias': 'tnet1.fc.2.bias',
-        'tnet1.fc4.weight': 'tnet1.fc.3.weight',
-        'tnet1.fc4.bias': 'tnet1.fc.3.bias',
+        'feat.stn.fc1.weight': 'feat.stn.fc.block0.weight',
+        'feat.stn.fc1.bias': 'feat.stn.fc.block0.bias',
+        'feat.stn.fc2.weight': 'feat.stn.fc.block1.weight',
+        'feat.stn.fc2.bias': 'feat.stn.fc.block1.bias',
+        'feat.stn.fc3.weight': 'feat.stn.fc.lastBlock.weight',
+        'feat.stn.fc3.bias': 'feat.stn.fc.lastBlock.bias',
         
-        # MLP1 (first feature extraction)
-        'mlp1.conv1.weight': 'mlp1.0.weight',
-        'mlp1.conv1.bias': 'mlp1.0.bias',
-        'mlp1.conv2.weight': 'mlp1.1.weight',
-        'mlp1.conv2.bias': 'mlp1.1.bias',
+        # BatchNorm for STN
+        'feat.stn.bn1.weight': 'feat.stn.mlp.mlp0.gamma',
+        'feat.stn.bn1.bias': 'feat.stn.mlp.mlp0.beta',
+        'feat.stn.bn1.running_mean': 'feat.stn.mlp.mlp0.mean',
+        'feat.stn.bn1.running_var': 'feat.stn.mlp.mlp0.var',
+        'feat.stn.bn2.weight': 'feat.stn.mlp.mlp1.gamma',
+        'feat.stn.bn2.bias': 'feat.stn.mlp.mlp1.beta',
+        'feat.stn.bn2.running_mean': 'feat.stn.mlp.mlp1.mean',
+        'feat.stn.bn2.running_var': 'feat.stn.mlp.mlp1.var',
+        'feat.stn.bn3.weight': 'feat.stn.mlp.mlp2.gamma',
+        'feat.stn.bn3.bias': 'feat.stn.mlp.mlp2.beta',
+        'feat.stn.bn3.running_mean': 'feat.stn.mlp.mlp2.mean',
+        'feat.stn.bn3.running_var': 'feat.stn.mlp.mlp2.var',
+        'feat.stn.bn4.weight': 'feat.stn.fc.block0.gamma',
+        'feat.stn.bn4.bias': 'feat.stn.fc.block0.beta',
+        'feat.stn.bn4.running_mean': 'feat.stn.fc.block0.mean',
+        'feat.stn.bn4.running_var': 'feat.stn.fc.block0.var',
+        'feat.stn.bn5.weight': 'feat.stn.fc.block1.gamma',
+        'feat.stn.bn5.bias': 'feat.stn.fc.block1.beta',
+        'feat.stn.bn5.running_mean': 'feat.stn.fc.block1.mean',
+        'feat.stn.bn5.running_var': 'feat.stn.fc.block1.var',
         
-        # TNet2 (feature transformation)
-        'tnet2.conv1.weight': 'tnet2.mlp.0.weight',
-        'tnet2.conv1.bias': 'tnet2.mlp.0.bias',
-        'tnet2.conv2.weight': 'tnet2.mlp.1.weight',
-        'tnet2.conv2.bias': 'tnet2.mlp.1.bias',
-        'tnet2.conv3.weight': 'tnet2.mlp.2.weight',
-        'tnet2.conv3.bias': 'tnet2.mlp.2.bias',
+        # feat.conv1-3 (main feature extraction): [9→64→128→1024]
+        'feat.conv1.weight': 'feat.conv.mlp0.weight',
+        'feat.conv1.bias': 'feat.conv.mlp0.bias',
+        'feat.conv2.weight': 'feat.conv.mlp1.weight',
+        'feat.conv2.bias': 'feat.conv.mlp1.bias',
+        'feat.conv3.weight': 'feat.conv.mlp2.weight',
+        'feat.conv3.bias': 'feat.conv.mlp2.bias',
         
-        'tnet2.fc1.weight': 'tnet2.fc.0.weight',
-        'tnet2.fc1.bias': 'tnet2.fc.0.bias',
-        'tnet2.fc2.weight': 'tnet2.fc.1.weight',
-        'tnet2.fc2.bias': 'tnet2.fc.1.bias',
-        'tnet2.fc3.weight': 'tnet2.fc.2.weight',
-        'tnet2.fc3.bias': 'tnet2.fc.2.bias',
-        'tnet2.fc4.weight': 'tnet2.fc.3.weight',
-        'tnet2.fc4.bias': 'tnet2.fc.3.bias',
+        'feat.bn1.weight': 'feat.conv.mlp0.gamma',
+        'feat.bn1.bias': 'feat.conv.mlp0.beta',
+        'feat.bn1.running_mean': 'feat.conv.mlp0.mean',
+        'feat.bn1.running_var': 'feat.conv.mlp0.var',
+        'feat.bn2.weight': 'feat.conv.mlp1.gamma',
+        'feat.bn2.bias': 'feat.conv.mlp1.beta',
+        'feat.bn2.running_mean': 'feat.conv.mlp1.mean',
+        'feat.bn2.running_var': 'feat.conv.mlp1.var',
+        'feat.bn3.weight': 'feat.conv.mlp2.gamma',
+        'feat.bn3.bias': 'feat.conv.mlp2.beta',
+        'feat.bn3.running_mean': 'feat.conv.mlp2.mean',
+        'feat.bn3.running_var': 'feat.conv.mlp2.var',
         
-        # MLP2 (second feature extraction)
-        'mlp2.conv1.weight': 'mlp2.0.weight',
-        'mlp2.conv1.bias': 'mlp2.0.bias',
-        'mlp2.conv2.weight': 'mlp2.1.weight',
-        'mlp2.conv2.bias': 'mlp2.1.bias',
+        # feat.fstn (STNkd): [64→64→128→1024] + FC[1024→512→256→4096]
+        'feat.fstn.conv1.weight': 'feat.fstn.mlp.mlp0.weight',
+        'feat.fstn.conv1.bias': 'feat.fstn.mlp.mlp0.bias',
+        'feat.fstn.conv2.weight': 'feat.fstn.mlp.mlp1.weight',
+        'feat.fstn.conv2.bias': 'feat.fstn.mlp.mlp1.bias',
+        'feat.fstn.conv3.weight': 'feat.fstn.mlp.mlp2.weight',
+        'feat.fstn.conv3.bias': 'feat.fstn.mlp.mlp2.bias',
         
-        # Segmentation head
-        'seg_head.conv1.weight': 'segHead.0.weight',
-        'seg_head.conv1.bias': 'segHead.0.bias',
-        'seg_head.conv2.weight': 'segHead.1.weight',
-        'seg_head.conv2.bias': 'segHead.1.bias',
-        'seg_head.conv3.weight': 'segHead.2.weight',
-        'seg_head.conv3.bias': 'segHead.2.bias',
+        'feat.fstn.fc1.weight': 'feat.fstn.fc.block0.weight',
+        'feat.fstn.fc1.bias': 'feat.fstn.fc.block0.bias',
+        'feat.fstn.fc2.weight': 'feat.fstn.fc.block1.weight',
+        'feat.fstn.fc2.bias': 'feat.fstn.fc.block1.bias',
+        'feat.fstn.fc3.weight': 'feat.fstn.fc.lastBlock.weight',
+        'feat.fstn.fc3.bias': 'feat.fstn.fc.lastBlock.bias',
+        
+        'feat.fstn.bn1.weight': 'feat.fstn.mlp.mlp0.gamma',
+        'feat.fstn.bn1.bias': 'feat.fstn.mlp.mlp0.beta',
+        'feat.fstn.bn1.running_mean': 'feat.fstn.mlp.mlp0.mean',
+        'feat.fstn.bn1.running_var': 'feat.fstn.mlp.mlp0.var',
+        'feat.fstn.bn2.weight': 'feat.fstn.mlp.mlp1.gamma',
+        'feat.fstn.bn2.bias': 'feat.fstn.mlp.mlp1.beta',
+        'feat.fstn.bn2.running_mean': 'feat.fstn.mlp.mlp1.mean',
+        'feat.fstn.bn2.running_var': 'feat.fstn.mlp.mlp1.var',
+        'feat.fstn.bn3.weight': 'feat.fstn.mlp.mlp2.gamma',
+        'feat.fstn.bn3.bias': 'feat.fstn.mlp.mlp2.beta',
+        'feat.fstn.bn3.running_mean': 'feat.fstn.mlp.mlp2.mean',
+        'feat.fstn.bn3.running_var': 'feat.fstn.mlp.mlp2.var',
+        'feat.fstn.bn4.weight': 'feat.fstn.fc.block0.gamma',
+        'feat.fstn.bn4.bias': 'feat.fstn.fc.block0.beta',
+        'feat.fstn.bn4.running_mean': 'feat.fstn.fc.block0.mean',
+        'feat.fstn.bn4.running_var': 'feat.fstn.fc.block0.var',
+        'feat.fstn.bn5.weight': 'feat.fstn.fc.block1.gamma',
+        'feat.fstn.bn5.bias': 'feat.fstn.fc.block1.beta',
+        'feat.fstn.bn5.running_mean': 'feat.fstn.fc.block1.mean',
+        'feat.fstn.bn5.running_var': 'feat.fstn.fc.block1.var',
+        
+        # Segmentation head: [1088→512→256→128→13]
+        'conv1.weight': 'conv1.weight',
+        'conv1.bias': 'conv1.bias',
+        'conv2.weight': 'conv2.weight',
+        'conv2.bias': 'conv2.bias',
+        'conv3.weight': 'conv3.weight',
+        'conv3.bias': 'conv3.bias',
+        'conv4.weight': 'conv4.weight',
+        'conv4.bias': 'conv4.bias',
+        
+        'bn1.weight': 'bn1.weight',
+        'bn1.bias': 'bn1.bias',
+        'bn1.running_mean': 'bn1.mean',
+        'bn1.running_var': 'bn1.var',
+        'bn2.weight': 'bn2.weight',
+        'bn2.bias': 'bn2.bias',
+        'bn2.running_mean': 'bn2.mean',
+        'bn2.running_var': 'bn2.var',
+        'bn3.weight': 'bn3.weight',
+        'bn3.bias': 'bn3.bias',
+        'bn3.running_mean': 'bn3.mean',
+        'bn3.running_var': 'bn3.var',
     }
     
     # Convert weights
