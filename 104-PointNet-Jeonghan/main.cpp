@@ -46,7 +46,7 @@ int main()
     InferenceConfig config;
     config.weights_file = "assets/weights/pointnet_yanx27.json";  // yanx27 pretrained weights
     config.num_classes = 13;  // S3DIS semantic segmentation
-    config.channel = 3;  // xyz coordinates only (yanx27 format)
+    config.channel = 9;
     config.verbose = true;
 
     // Load and segment from ModelNet40

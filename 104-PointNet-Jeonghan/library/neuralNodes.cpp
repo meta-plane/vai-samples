@@ -727,6 +727,7 @@ void loadShaders()
 ConvolutionNode::ConvolutionNode(uint32_t inChannels, uint32_t outChannels, uint32_t kernelWidth)
 :  C(inChannels), F(outChannels), K(kernelWidth)
 {
+    setName("ConvolutionNode");
     _ASSERT(K % 2 == 1);
     addSlot("in0", NodeSlot::input);
     addSlot("out0", NodeSlot::output);
@@ -747,7 +748,9 @@ ConvolutionNode::ConvolutionNode(uint32_t inChannels, uint32_t outChannels, uint
 void ConvolutionNode::prepare()
 {
     _ASSERT((*this)["in0"].isShapeOf(-1, -1, C));
+    _ASSERT((*this)["weight"].validShape());
     _ASSERT((*this)["weight"].isShapeOf(C*K*K, F));
+    _ASSERT((*this)["bias"].validShape());
     _ASSERT((*this)["bias"].isShapeOf(F));
 
     const auto& inShape = (*this)["in0"].shape();
@@ -811,6 +814,7 @@ PointWiseMLPNode::PointWiseMLPNode(uint32_t inDim, uint32_t outDim)
 : Cin(inDim)
 , Cout(outDim)
 {
+    setName("PointWiseMLPNode");
     // Slots for full MLP chain
     addSlot("in0", NodeSlot::input);      // [N, Cin]
     addSlot("out0", NodeSlot::output);    // [N, Cout]
@@ -845,6 +849,10 @@ void PointWiseMLPNode::prepare()
     const auto& inShape = (*this)["in0"].shape();
     _ASSERT(inShape.size() == 2);
     _ASSERT(inShape[1] == Cin);
+    _ASSERT((*this)["weight"].validShape());
+    _ASSERT((*this)["weight"].isShapeOf(Cin, Cout));
+    _ASSERT((*this)["bias"].validShape());
+    _ASSERT((*this)["bias"].isShapeOf(Cout));
 
     (*this)["out0"] = Tensor(inShape[0], Cout);
     (*this)["conv_out"] = Tensor(inShape[0], Cout);
@@ -950,6 +958,7 @@ PointWiseConvNode::PointWiseConvNode(uint32_t inDim, uint32_t outDim)
 : Cin(inDim)
 , Cout(outDim)
 {
+    setName("PointWiseConvNode");
     // Slots for Conv + BN (no ReLU)
     addSlot("in0", NodeSlot::input);      // [N, Cin]
     addSlot("out0", NodeSlot::output);    // [N, Cout]
@@ -980,6 +989,10 @@ void PointWiseConvNode::prepare()
     const auto& inShape = (*this)["in0"].shape();
     _ASSERT(inShape.size() == 2);
     _ASSERT(inShape[1] == Cin);
+    _ASSERT((*this)["weight"].validShape());
+    _ASSERT((*this)["weight"].isShapeOf(Cin, Cout));
+    _ASSERT((*this)["bias"].validShape());
+    _ASSERT((*this)["bias"].isShapeOf(Cout));
 
     (*this)["out0"] = Tensor(inShape[0], Cout);
     (*this)["conv_out"] = Tensor(inShape[0], Cout);
@@ -1063,6 +1076,7 @@ void PointWiseConvNode::run(CommandBuffer cmdBuff)
 /////////////////////////////////////////////////////////////////////////////////////////
 ReluNode::ReluNode()
 {
+    setName("ReluNode");
     addSlot("in0", NodeSlot::input);
     addSlot("out0", NodeSlot::output);
 
@@ -1108,6 +1122,7 @@ void ReluNode::run(CommandBuffer cmdBuff)
 BatchNorm1DNode::BatchNorm1DNode(uint32_t channels)
 : C(channels)
 {
+    setName("BatchNorm1DNode");
     addSlot("in0", NodeSlot::input);        // [N, C]
     addSlot("out0", NodeSlot::output);      // [N, C]
     addSlot("mean", NodeSlot::input);       // [C] running_mean
@@ -1124,6 +1139,14 @@ void BatchNorm1DNode::prepare()
     const auto& inShape = (*this)["in0"].shape();
     _ASSERT(inShape.size() == 2);
     _ASSERT(inShape[1] == C);
+    _ASSERT((*this)["mean"].validShape());
+    _ASSERT((*this)["mean"].isShapeOf(C));
+    _ASSERT((*this)["var"].validShape());
+    _ASSERT((*this)["var"].isShapeOf(C));
+    _ASSERT((*this)["gamma"].validShape());
+    _ASSERT((*this)["gamma"].isShapeOf(C));
+    _ASSERT((*this)["beta"].validShape());
+    _ASSERT((*this)["beta"].isShapeOf(C));
 
     (*this)["out0"] = Tensor(inShape);
 }
@@ -1163,6 +1186,7 @@ void BatchNorm1DNode::run(CommandBuffer cmdBuff)
 /////////////////////////////////////////////////////////////////////////////////////////
 MaxPooling1DNode::MaxPooling1DNode()
 {
+    setName("MaxPooling1DNode");
     addSlot("in0", NodeSlot::input);   // [N, C]
     addSlot("out0", NodeSlot::output); // [C]
 
@@ -1207,6 +1231,7 @@ void MaxPooling1DNode::run(CommandBuffer cmdBuff)
 MaxPoolingNode::MaxPoolingNode(uint32_t poolSize)
 : P(poolSize)
 {
+    setName("MaxPoolingNode");
     addSlot("in0", NodeSlot::input);
     addSlot("out0", NodeSlot::output);
 
@@ -1259,6 +1284,7 @@ void MaxPoolingNode::run(CommandBuffer cmdBuff)
 /////////////////////////////////////////////////////////////////////////////////////////
 FlattenNode::FlattenNode()
 {
+    setName("FlattenNode");
     addSlot("in0", NodeSlot::input);
     addSlot("out0", NodeSlot::output);
 }
@@ -1281,6 +1307,7 @@ void FlattenNode::run(CommandBuffer cmdBuff)
 FullyConnectedNode::FullyConnectedNode(uint32_t inDim, uint32_t outDim)
 : I(inDim), O(outDim) 
 {
+    setName("FullyConnectedNode");
     addSlot("in0", NodeSlot::input);
     addSlot("out0", NodeSlot::output);
     addSlot("weight", NodeSlot::input);
@@ -1301,7 +1328,9 @@ FullyConnectedNode::FullyConnectedNode(uint32_t inDim, uint32_t outDim)
 void FullyConnectedNode::prepare()
 {
     _ASSERT((*this)["in0"].isShapeOf(I));
+    _ASSERT((*this)["weight"].validShape());
     _ASSERT((*this)["weight"].isShapeOf(I, O));
+    _ASSERT((*this)["bias"].validShape());
     _ASSERT((*this)["bias"].isShapeOf(O));
     (*this)["out0"] = Tensor(O); 
 }
@@ -1341,6 +1370,7 @@ void FullyConnectedNode::run(CommandBuffer cmdBuff)
 
 BroadcastNode::BroadcastNode()
 {
+    setName("BroadcastNode");
     addSlot("in0", NodeSlot::input);   // [1, C]
     addSlot("in1", NodeSlot::input);   // [N, C] (for shape reference)
     addSlot("out0", NodeSlot::output); // [N, C]
@@ -1399,6 +1429,7 @@ void BroadcastNode::run(CommandBuffer cmdBuff)
 
 ConcatNode::ConcatNode()
 {
+    setName("ConcatNode");
     addSlot("in0", NodeSlot::input);   // [N, C1]
     addSlot("in1", NodeSlot::input);   // [N, C2]
     addSlot("out0", NodeSlot::output); // [N, C1+C2]
@@ -1457,6 +1488,7 @@ void ConcatNode::run(CommandBuffer cmdBuff)
 
 ReShapeNode::ReShapeNode()
 {
+    setName("ReShapeNode");
     addSlot("in0", NodeSlot::input);
     addSlot("out0", NodeSlot::output);
 }
@@ -1464,6 +1496,7 @@ ReShapeNode::ReShapeNode()
 ReShapeNode::ReShapeNode(std::vector<uint32_t> shape)
 : targetShape(shape)
 {
+    setName("ReShapeNode");
     addSlot("in0", NodeSlot::input);
     addSlot("out0", NodeSlot::output);
 }
@@ -1512,6 +1545,7 @@ void ReShapeNode::run(CommandBuffer cmdBuff)
 
 MatMulNode::MatMulNode()
 {
+    setName("MatMulNode");
     addSlot("in0", NodeSlot::input);   // [N, K]
     addSlot("in1", NodeSlot::input);   // [K, M]
     addSlot("out0", NodeSlot::output); // [N, M]
@@ -1600,6 +1634,7 @@ void main()
 
 AddIdentityNode::AddIdentityNode()
 {
+    setName("AddIdentityNode");
     addSlot("in0", NodeSlot::input);   // [K, K]
     addSlot("out0", NodeSlot::output); // [K, K]
     
@@ -1649,6 +1684,7 @@ void AddIdentityNode::run(CommandBuffer cmdBuff)
 // Allows one input to fan out to multiple outputs without computation
 IdentityNode::IdentityNode()
 {
+    setName("IdentityNode");
     addSlot("in0", NodeSlot::input);
     addSlot("out0", NodeSlot::output);  // First output
     addSlot("out1", NodeSlot::output);  // Second output for splitting

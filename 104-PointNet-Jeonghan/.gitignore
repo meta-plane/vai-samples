@@ -3,3 +3,5 @@ build/
 .venv/
 assets/
 temp*
+.github/
+.vscode/
