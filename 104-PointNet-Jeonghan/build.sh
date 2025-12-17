@@ -15,12 +15,26 @@ PROJECT_NAME="104-PointNet-Jeonghan"
 
 # Parse arguments
 BUILD_TESTS=OFF
-if [ "$1" == "--test" ] || [ "$1" == "-t" ]; then
-    BUILD_TESTS=ON
-fi
+BUILD_TYPE=Debug
+for arg in "$@"; do
+    case $arg in
+        --test|-t)
+            BUILD_TESTS=ON
+            ;;
+        --release|-r)
+            BUILD_TYPE=Release
+            ;;
+        *)
+            echo "Unknown option: $arg"
+            echo "Usage: $0 [--test|-t] [--release|-r]"
+            exit 1
+            ;;
+    esac
+done
 
 echo "=========================================="
 echo "Building ${PROJECT_NAME} (incremental)"
+echo "Build type: ${BUILD_TYPE}"
 if [ "$BUILD_TESTS" == "ON" ]; then
     echo "Mode: WITH TESTS"
 else
@@ -52,9 +66,9 @@ fi
 # Change to build directory
 cd "${BUILD_DIR}"
 
-# Reconfigure if BUILD_TESTING changed
-echo "Configuring with BUILD_TESTING=${BUILD_TESTS}..."
-cmake -DBUILD_TESTING=${BUILD_TESTS} "${PROJECT_ROOT}"
+# Reconfigure with build options
+echo "Configuring with BUILD_TESTING=${BUILD_TESTS}, CMAKE_BUILD_TYPE=${BUILD_TYPE}..."
+cmake -DBUILD_TESTING=${BUILD_TESTS} -DCMAKE_BUILD_TYPE=${BUILD_TYPE} "${PROJECT_ROOT}"
 
 if [ "$BUILD_TESTS" == "ON" ]; then
     echo "Building ${PROJECT_NAME} and all test targets..."
@@ -72,18 +86,29 @@ echo ""
 echo "=========================================="
 echo "${PROJECT_NAME} build complete!"
 echo "=========================================="
+
+# Determine binary path based on build type
+if [ "${BUILD_TYPE}" == "Release" ]; then
+    BIN_DIR="${PROJECT_ROOT}/bin/release"
+else
+    BIN_DIR="${PROJECT_ROOT}/bin/debug"
+fi
+
 echo "Main executable:"
-echo "  ${PROJECT_ROOT}/bin/debug/${PROJECT_NAME}"
+echo "  ${BIN_DIR}/${PROJECT_NAME}"
 if [ "$BUILD_TESTS" == "ON" ]; then
     echo ""
     echo "Test executables:"
-    echo "  ${PROJECT_ROOT}/bin/debug/test_*"
+    echo "  ${BIN_DIR}/test_*"
     echo ""
     echo "Run all tests:"
     echo "  cd ${BUILD_DIR} && ctest --output-on-failure"
     echo ""
     echo "Run individual test:"
-    echo "  ${PROJECT_ROOT}/bin/debug/test_mlp"
+    echo "  ${BIN_DIR}/test_mlp"
 fi
+echo ""
+echo "Run executable:"
+echo "  ${BIN_DIR}/${PROJECT_NAME}"
 echo ""
 
