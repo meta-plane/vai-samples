@@ -5,15 +5,13 @@ project(103-MobileNetV2-SangIn)
 add_executable(${PROJECT_NAME} 
     main.cpp
     test.cpp    
-    models/MobileNetV2.cpp
-    library/vulkanApp.cpp
-    library/neuralNodes.cpp
-    library/spirvHelpers.cpp
-    library/jsonParser.cpp
-    library/safeTensorsParser.cpp    
+    core/vulkanApp.cpp
+    core/spirvHelpers.cpp
+    core/jsonParser.cpp
+    core/safeTensorsParser.cpp
+    core/stb_image.cpp
     utils/utils.cpp
-    utils/test_layers.cpp    
-)
+    )
 
 add_definitions(
     -DPROJECT_CURRENT_DIR="${CMAKE_CURRENT_SOURCE_DIR}"

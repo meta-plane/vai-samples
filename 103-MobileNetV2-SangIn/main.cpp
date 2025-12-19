@@ -5,6 +5,6 @@ int main()
 {
     void test();
     test();
-
+   
     return 0;
 }
