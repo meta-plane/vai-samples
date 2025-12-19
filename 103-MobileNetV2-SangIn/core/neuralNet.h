@@ -9,6 +9,7 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <cstring>  // memcpy
+#include <stdexcept>  // runtime_error
 
 
 using namespace vk;
@@ -124,12 +125,22 @@ public:
 class Node
 {
     friend class NeuralNet;
+    std::string name = "noname";
+    std::map<std::string, NodeSlot> slots;
 
 protected:
-    std::map<std::string, NodeSlot> slots; 
+    void addSlot(const std::string& name, NodeSlot::Type type)
+    {
+        slots.try_emplace(name, type, this);
+    }
 
 public:
-    NodeSlot& at(const std::string& name)
+    void setName(const std::string& name)
+    {
+        this->name = name;
+    }
+
+    NodeSlot& slot(const std::string& name)
     {
         return slots.at(name);
     }
@@ -156,22 +167,21 @@ class InputNode : public Node
 {
     friend class NeuralNet;
 public:
-    InputNode() 
+    InputNode()
     {
-        slots.try_emplace("in0", NodeSlot::input, this);
-        slots.try_emplace("out0", NodeSlot::output, this);
+        addSlot("in0", NodeSlot::input);
+        addSlot("out0", NodeSlot::output);
     }
 
-public:
     void prepare() override
     {
         _ASSERT((*this)["in0"].validShape());
         (*this)["out0"] = (*this)["in0"];
     }
-    
+
     void run(CommandBuffer cmdBuff) override
     {
-    }   
+    }
 };
 
 
@@ -181,20 +191,19 @@ class OutputNode : public Node
 public:
     OutputNode()
     {
-        slots.try_emplace("in0", NodeSlot::input, this);
-        slots.try_emplace("out0", NodeSlot::output, this);
+        addSlot("in0", NodeSlot::input);
+        addSlot("out0", NodeSlot::output);
     }
 
-public:
     void prepare() override
     {
         _ASSERT((*this)["in0"].validShape());
         (*this)["out0"] = (*this)["in0"];
     }
-    
+
     void run(CommandBuffer cmdBuff) override
     {
-    }  
+    }
 };
 
 
@@ -202,16 +211,14 @@ class NeuralNet
 {
     Device device;
 
-    // std::set<Node*> nodes;
-    // std::unordered_set<Edge, Edge::Hash> edges2;
-    
+    // std::map<std::string, Node*> nodes;
     std::vector<Node*> sortedNodes;
     std::vector<std::vector<Node*>> linearChains;
 
     BufferPool& bufferPool = BufferPool::get();
-    Buffer uploadBuffer; 
+    Buffer uploadBuffer;
     uint8_t* uploadBufferMappedAddress = nullptr;
-    size_t uploadBufferOffset = 0; 
+    size_t uploadBufferOffset = 0;
     const size_t uploadBufferSize = 1024 * 1024 * 64; // 64 MB
 
     std::vector<InputNode> _inputs;
@@ -491,11 +498,11 @@ inline void NeuralNet::run()
 
 
 
-struct NodeFlow 
+struct NodeFlow
 {
-    std::string inSlot;
+    std::string inSlotName;
     Node& node;
-    std::string outSlot;
+    std::string outSlotName;
 };
 
 inline Node::operator NodeFlow()
@@ -515,7 +522,7 @@ inline NodeFlow operator/(Node& node, std::string name)
 
 inline NodeFlow&& operator/(NodeFlow&& other, std::string name)
 {
-    other.outSlot = name;
+    other.outSlotName = name;
     return std::move(other);
 }
 
@@ -526,7 +533,87 @@ inline void operator-(NodeSlot& from, NodeSlot& to)
 
 inline NodeFlow&& operator-(NodeFlow&& inflow, NodeFlow&& outflow)
 {
-    inflow.node.at(inflow.outSlot) - outflow.node.at(outflow.inSlot);
+    inflow.node.slot(inflow.outSlotName) - outflow.node.slot(outflow.inSlotName);
+    return std::move(outflow);
+}
+
+
+
+
+
+struct GroupFlow;
+class NodeGroup
+{
+    std::map<std::string, NodeSlot*> slots;
+
+protected:
+    void defineSlot(const std::string& name, NodeSlot& slot)
+    {
+        slots.try_emplace(name, &slot);
+    }
+
+public:
+    NodeSlot& slot(const std::string& name)
+    {
+        return *slots.at(name);
+    }
+
+    Tensor& operator[](const std::string& name)
+    {
+        return slots.at(name)->getValueRef();
+    }
+
+    const Tensor& operator[](const std::string& name) const
+    {
+        return slots.at(name)->getValueRef();
+    }
+
+    operator GroupFlow();
+};
+
+struct GroupFlow
+{
+    std::string inSlotName;
+    NodeGroup& group;
+    std::string outSlotName;
+};
+
+inline NodeGroup::operator GroupFlow()
+{
+    return { "in0", *this, "out0" };
+}
+
+inline GroupFlow operator/(std::string name, NodeGroup& gp)
+{
+    return { name, gp, "out0" };
+}
+
+inline GroupFlow operator/(NodeGroup& gp, std::string name)
+{
+    return { "in0", gp, name };
+}
+
+inline GroupFlow&& operator/(GroupFlow&& other, std::string name)
+{
+    other.outSlotName = name;
+    return std::move(other);
+}
+
+inline GroupFlow&& operator-(GroupFlow&& inflow, GroupFlow&& outflow)
+{
+    inflow.group.slot(inflow.outSlotName) - outflow.group.slot(outflow.inSlotName);
+    return std::move(outflow);
+}
+
+inline GroupFlow&& operator-(NodeFlow&& inflow, GroupFlow&& outflow)
+{
+    inflow.node.slot(inflow.outSlotName) - outflow.group.slot(outflow.inSlotName);
+    return std::move(outflow);
+}
+
+inline NodeFlow&& operator-(GroupFlow&& inflow, NodeFlow&& outflow)
+{
+    inflow.group.slot(inflow.outSlotName) - outflow.node.slot(outflow.inSlotName);
     return std::move(outflow);
 }
 

@@ -2,10 +2,17 @@ cmake_minimum_required(VERSION 3.16)
 
 project(103-MobileNetV2-SangIn)
 
-add_executable(${PROJECT_NAME} 
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+find_package(Vulkan REQUIRED)
+
+add_executable(${PROJECT_NAME}
     main.cpp
-    test.cpp    
+    test.cpp
+    models/mobilenetv2.cpp
     core/vulkanApp.cpp
+    core/neuralNodes.cpp
     core/spirvHelpers.cpp
     core/jsonParser.cpp
     core/safeTensorsParser.cpp

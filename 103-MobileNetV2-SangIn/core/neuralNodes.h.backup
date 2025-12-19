@@ -5,10 +5,6 @@
 #include "neuralNet.h"
 
 
-extern Device gDevice;              // Global device for neural network operations
-extern DescriptorPool gDestSetPool; // Global descriptor pool
-
-
 inline const char* im2col_srcCode = R"(
 #version 450
 layout(local_size_x = 64, local_size_y = 16) in;
@@ -361,6 +357,11 @@ void main()
     out0[n * O + o] = sum;
 })";
 
+inline static Device gDevice = VulkanApp::get().createDevice({.supportPresent = false});
+inline static DescriptorPool gDestSetPool = gDevice.createDescriptorPool({
+    .maxTypes = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER <= 10000}, 
+    .maxSets = 5000
+});
 
 class ConvolutionNode : public Node
 {
@@ -947,23 +948,39 @@ public:
 // Node Groups
 // ============================================================================
 
-// Standard Convolution Node (with stride, for first layer)
-class ConvStrideNode : public Node
+// Conv + BatchNorm + ReLU6 combined node (for first layer)
+class ConvBnRelu6Node : public Node
 {
     uint32_t C_in, C_out, K, stride, pad;
+    float eps;
     ComputePipeline convPipeline;
+    ComputePipeline bnPipeline;
+    ComputePipeline relu6Pipeline;
     DescriptorSet convDescSet;
+    DescriptorSet bnDescSet;
+    DescriptorSet relu6DescSet;
 public:
-    ConvStrideNode(uint32_t inChannels, uint32_t outChannels,
-        uint32_t kernelSize = 3, uint32_t stride = 1, uint32_t padding = 1)
-        : C_in(inChannels), C_out(outChannels), K(kernelSize), stride(stride), pad(padding)
+    ConvBnRelu6Node(uint32_t inChannels, uint32_t outChannels,
+        uint32_t kernelSize = 3, uint32_t stride = 1, uint32_t padding = 1,
+        float epsilon = 1e-5f)
+        : C_in(inChannels), C_out(outChannels), K(kernelSize), stride(stride), pad(padding), eps(epsilon)
     {
         addSlot("in0", NodeSlot::input);
         addSlot("out0", NodeSlot::output);
-        addSlot("weight", NodeSlot::input);
-        addSlot("bias", NodeSlot::input);
+        addSlot("conv_out", NodeSlot::internal);
+        addSlot("bn_out", NodeSlot::internal);
+        addSlot("conv_weight", NodeSlot::input);
+        addSlot("conv_bias", NodeSlot::input);
+        addSlot("bn_gamma", NodeSlot::input);
+        addSlot("bn_beta", NodeSlot::input);
+        addSlot("bn_mean", NodeSlot::input);
+        addSlot("bn_var", NodeSlot::input);
         convPipeline = gDevice.createComputePipeline({ conv_stride_srcCode });
+        bnPipeline = gDevice.createComputePipeline({ batchnorm_srcCode });
+        relu6Pipeline = gDevice.createComputePipeline({ relu6_srcCode });
         convDescSet = convPipeline.descSetLayout(0).newDescSet(gDestSetPool);
+        bnDescSet = bnPipeline.descSetLayout(0).newDescSet(gDestSetPool);
+        relu6DescSet = relu6Pipeline.descSetLayout(0).newDescSet(gDestSetPool);
     }
     void prepare() override
     {
@@ -973,6 +990,8 @@ public:
         uint32_t H_in = inShape[0], W_in = inShape[1];
         uint32_t H_out = (H_in + 2 * pad - K) / stride + 1;
         uint32_t W_out = (W_in + 2 * pad - K) / stride + 1;
+        (*this)["conv_out"] = Tensor(H_out, W_out, C_out);
+        (*this)["bn_out"] = Tensor(H_out, W_out, C_out);
         (*this)["out0"] = Tensor(H_out, W_out, C_out);
     }
     void run(CommandBuffer cmdBuff) override
@@ -981,11 +1000,12 @@ public:
         const auto& outShape = (*this)["out0"].shape();
         uint32_t H_in = inShape[0], W_in = inShape[1];
         uint32_t H_out = outShape[0], W_out = outShape[1];
+        // Conv
         convDescSet.write({
-            (*this)["out0"].buffer(),
+            (*this)["conv_out"].buffer(),
             (*this)["in0"].buffer(),
-            (*this)["weight"].buffer(),
-            (*this)["bias"].buffer(),
+            (*this)["conv_weight"].buffer(),
+            (*this)["conv_bias"].buffer(),
             });
         struct {
             int H_in, W_in, C_in;
@@ -1003,205 +1023,626 @@ public:
             .dispatch(H_out, W_out, C_out)
             .barrier(
                 (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+                / (*this)["conv_out"].buffer()
+                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+            );
+        // BatchNorm
+        bnDescSet.write({
+            (*this)["bn_out"].buffer(),
+            (*this)["conv_out"].buffer(),
+            (*this)["bn_gamma"].buffer(),
+            (*this)["bn_beta"].buffer(),
+            (*this)["bn_mean"].buffer(),
+            (*this)["bn_var"].buffer(),
+            });
+        struct { int HW, C; float eps; } bnConstants = { (int)(H_out * W_out), (int)C_out, eps };
+        cmdBuff
+            .bindPipeline(bnPipeline)
+            .bindDescSets({ bnDescSet })
+            .setPushConstants(0, sizeof(bnConstants), &bnConstants)
+            .dispatch(H_out * W_out * C_out)
+            .barrier(
+                (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+                / (*this)["bn_out"].buffer()
+                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+            );
+        // ReLU6
+        int N = H_out * W_out * C_out;
+        relu6DescSet.write({
+            (*this)["out0"].buffer(),
+            (*this)["bn_out"].buffer(),
+            });
+        cmdBuff
+            .bindPipeline(relu6Pipeline)
+            .bindDescSets({ relu6DescSet })
+            .setPushConstants(0, sizeof(N), &N)
+            .dispatch(N)
+            .barrier(
+                (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
                 / (*this)["out0"].buffer()
                 / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
             );
     }
 };
 
-// Conv + BatchNorm + ReLU6 NodeGroup (for first layer)
-class ConvBnRelu6Group : public NodeGroup
+// Depthwise Conv + BatchNorm + ReLU6 combined node
+class DwConvBnRelu6Node : public Node
 {
-    ConvStrideNode conv;
-    BatchNormNode bn;
-    Relu6Node relu6;
+    uint32_t C, K, stride, pad;
+    float eps;
+    ComputePipeline dwconvPipeline;
+    ComputePipeline bnPipeline;
+    ComputePipeline relu6Pipeline;
+    DescriptorSet dwconvDescSet;
+    DescriptorSet bnDescSet;
+    DescriptorSet relu6DescSet;
 public:
-    ConvBnRelu6Group(uint32_t inChannels, uint32_t outChannels,
-        uint32_t kernelSize = 3, uint32_t stride = 1, uint32_t padding = 1,
-        float epsilon = 1e-5f)
-        : conv(inChannels, outChannels, kernelSize, stride, padding),
-          bn(outChannels, epsilon),
-          relu6()
-    {
-        // Define external-facing slots
-        defineSlot("in0", conv.slot("in0"));
-        defineSlot("out0", relu6.slot("out0"));
-        // Weight slots
-        defineSlot("conv_weight", conv.slot("weight"));
-        defineSlot("conv_bias", conv.slot("bias"));
-        defineSlot("bn_gamma", bn.slot("gamma"));
-        defineSlot("bn_beta", bn.slot("beta"));
-        defineSlot("bn_mean", bn.slot("running_mean"));
-        defineSlot("bn_var", bn.slot("running_var"));
-        // Connect internal nodes: conv -> bn -> relu6
-        conv.slot("out0") - bn.slot("in0");
-        bn.slot("out0") - relu6.slot("in0");
-    }
-};
-
-// Depthwise Conv + BatchNorm + ReLU6 NodeGroup
-class DwConvBnRelu6Group : public NodeGroup
-{
-    DepthwiseConvNode dwconv;
-    BatchNormNode bn;
-    Relu6Node relu6;
-public:
-    DwConvBnRelu6Group(uint32_t channels, uint32_t kernelSize = 3,
+    DwConvBnRelu6Node(uint32_t channels, uint32_t kernelSize = 3,
         uint32_t stride = 1, uint32_t padding = 1, float epsilon = 1e-5f)
-        : dwconv(channels, kernelSize, stride, padding),
-          bn(channels, epsilon),
-          relu6()
+        : C(channels), K(kernelSize), stride(stride), pad(padding), eps(epsilon)
     {
-        // Define external-facing slots
-        defineSlot("in0", dwconv.slot("in0"));
-        defineSlot("out0", relu6.slot("out0"));
-        // Weight slots
-        defineSlot("dw_weight", dwconv.slot("weight"));
-        defineSlot("bn_gamma", bn.slot("gamma"));
-        defineSlot("bn_beta", bn.slot("beta"));
-        defineSlot("bn_mean", bn.slot("running_mean"));
-        defineSlot("bn_var", bn.slot("running_var"));
-        // Connect internal nodes: dwconv -> bn -> relu6
-        dwconv.slot("out0") - bn.slot("in0");
-        bn.slot("out0") - relu6.slot("in0");
+        addSlot("in0", NodeSlot::input);
+        addSlot("out0", NodeSlot::output);
+        addSlot("dw_out", NodeSlot::internal);
+        addSlot("bn_out", NodeSlot::internal);
+        addSlot("dw_weight", NodeSlot::input);
+        addSlot("bn_gamma", NodeSlot::input);
+        addSlot("bn_beta", NodeSlot::input);
+        addSlot("bn_mean", NodeSlot::input);
+        addSlot("bn_var", NodeSlot::input);
+        dwconvPipeline = gDevice.createComputePipeline({ dwconv_srcCode });
+        bnPipeline = gDevice.createComputePipeline({ batchnorm_srcCode });
+        relu6Pipeline = gDevice.createComputePipeline({ relu6_srcCode });
+        dwconvDescSet = dwconvPipeline.descSetLayout(0).newDescSet(gDestSetPool);
+        bnDescSet = bnPipeline.descSetLayout(0).newDescSet(gDestSetPool);
+        relu6DescSet = relu6Pipeline.descSetLayout(0).newDescSet(gDestSetPool);
+    }
+    void prepare() override
+    {
+        const auto& inShape = (*this)["in0"].shape();
+        _ASSERT(inShape.size() == 3);
+        _ASSERT(inShape[2] == C);
+        uint32_t H_in = inShape[0], W_in = inShape[1];
+        uint32_t H_out = (H_in + 2 * pad - K) / stride + 1;
+        uint32_t W_out = (W_in + 2 * pad - K) / stride + 1;
+        (*this)["dw_out"] = Tensor(H_out, W_out, C);
+        (*this)["bn_out"] = Tensor(H_out, W_out, C);
+        (*this)["out0"] = Tensor(H_out, W_out, C);
+    }
+    void run(CommandBuffer cmdBuff) override
+    {
+        const auto& inShape = (*this)["in0"].shape();
+        const auto& outShape = (*this)["out0"].shape();
+        uint32_t H_in = inShape[0], W_in = inShape[1];
+        uint32_t H_out = outShape[0], W_out = outShape[1];
+        // Depthwise Conv
+        dwconvDescSet.write({
+            (*this)["dw_out"].buffer(),
+            (*this)["in0"].buffer(),
+            (*this)["dw_weight"].buffer(),
+            });
+        struct {
+            int H_in, W_in, C;
+            int H_out, W_out;
+            int K, stride, pad;
+        } dwConstants = {
+            (int)H_in, (int)W_in, (int)C,
+            (int)H_out, (int)W_out,
+            (int)K, (int)stride, (int)pad
+        };
+        cmdBuff
+            .bindPipeline(dwconvPipeline)
+            .bindDescSets({ dwconvDescSet })
+            .setPushConstants(0, sizeof(dwConstants), &dwConstants)
+            .dispatch(H_out, W_out, C)
+            .barrier(
+                (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+                / (*this)["dw_out"].buffer()
+                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+            );
+        // BatchNorm
+        bnDescSet.write({
+            (*this)["bn_out"].buffer(),
+            (*this)["dw_out"].buffer(),
+            (*this)["bn_gamma"].buffer(),
+            (*this)["bn_beta"].buffer(),
+            (*this)["bn_mean"].buffer(),
+            (*this)["bn_var"].buffer(),
+            });
+        struct { int HW, C; float eps; } bnConstants = { (int)(H_out * W_out), (int)C, eps };
+        cmdBuff
+            .bindPipeline(bnPipeline)
+            .bindDescSets({ bnDescSet })
+            .setPushConstants(0, sizeof(bnConstants), &bnConstants)
+            .dispatch(H_out * W_out * C)
+            .barrier(
+                (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+                / (*this)["bn_out"].buffer()
+                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+            );
+        // ReLU6
+        int N = H_out * W_out * C;
+        relu6DescSet.write({
+            (*this)["out0"].buffer(),
+            (*this)["bn_out"].buffer(),
+            });
+        cmdBuff
+            .bindPipeline(relu6Pipeline)
+            .bindDescSets({ relu6DescSet })
+            .setPushConstants(0, sizeof(N), &N)
+            .dispatch(N)
+            .barrier(
+                (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+                / (*this)["out0"].buffer()
+                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+            );
     }
 };
 
 // Pointwise Conv + BatchNorm (no activation) - for projection layer
-class PwConvBnGroup : public NodeGroup
+class PwConvBnNode : public Node
 {
-    PointwiseConvNode pwconv;
-    BatchNormNode bn;
+    uint32_t C_in, C_out;
+    float eps;
+    ComputePipeline pwconvPipeline;
+    ComputePipeline bnPipeline;
+    DescriptorSet pwconvDescSet;
+    DescriptorSet bnDescSet;
 public:
-    PwConvBnGroup(uint32_t inChannels, uint32_t outChannels, float epsilon = 1e-5f)
-        : pwconv(inChannels, outChannels),
-          bn(outChannels, epsilon)
+    PwConvBnNode(uint32_t inChannels, uint32_t outChannels, float epsilon = 1e-5f)
+        : C_in(inChannels), C_out(outChannels), eps(epsilon)
     {
-        // Define external-facing slots
-        defineSlot("in0", pwconv.slot("in0"));
-        defineSlot("out0", bn.slot("out0"));
-        // Weight slots
-        defineSlot("pw_weight", pwconv.slot("weight"));
-        defineSlot("bn_gamma", bn.slot("gamma"));
-        defineSlot("bn_beta", bn.slot("beta"));
-        defineSlot("bn_mean", bn.slot("running_mean"));
-        defineSlot("bn_var", bn.slot("running_var"));
-        // Connect internal nodes: pwconv -> bn
-        pwconv.slot("out0") - bn.slot("in0");
+        addSlot("in0", NodeSlot::input);
+        addSlot("out0", NodeSlot::output);
+        addSlot("pw_out", NodeSlot::internal);
+        addSlot("pw_weight", NodeSlot::input);
+        addSlot("bn_gamma", NodeSlot::input);
+        addSlot("bn_beta", NodeSlot::input);
+        addSlot("bn_mean", NodeSlot::input);
+        addSlot("bn_var", NodeSlot::input);
+        pwconvPipeline = gDevice.createComputePipeline({ pwconv_srcCode });
+        bnPipeline = gDevice.createComputePipeline({ batchnorm_srcCode });
+        pwconvDescSet = pwconvPipeline.descSetLayout(0).newDescSet(gDestSetPool);
+        bnDescSet = bnPipeline.descSetLayout(0).newDescSet(gDestSetPool);
+    }
+    void prepare() override
+    {
+        const auto& inShape = (*this)["in0"].shape();
+        _ASSERT(inShape.size() == 3);
+        _ASSERT(inShape[2] == C_in);
+        (*this)["pw_out"] = Tensor(inShape[0], inShape[1], C_out);
+        (*this)["out0"] = Tensor(inShape[0], inShape[1], C_out);
+    }
+    void run(CommandBuffer cmdBuff) override
+    {
+        const auto& inShape = (*this)["in0"].shape();
+        uint32_t H = inShape[0], W = inShape[1];
+        // Pointwise Conv
+        pwconvDescSet.write({
+            (*this)["pw_out"].buffer(),
+            (*this)["in0"].buffer(),
+            (*this)["pw_weight"].buffer(),
+            });
+        uint32_t pwConstants[] = { H, W, C_in, C_out };
+        cmdBuff
+            .bindPipeline(pwconvPipeline)
+            .bindDescSets({ pwconvDescSet })
+            .setPushConstants(0, sizeof(pwConstants), pwConstants)
+            .dispatch(H, W, C_out)
+            .barrier(
+                (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+                / (*this)["pw_out"].buffer()
+                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+            );
+        // BatchNorm
+        bnDescSet.write({
+            (*this)["out0"].buffer(),
+            (*this)["pw_out"].buffer(),
+            (*this)["bn_gamma"].buffer(),
+            (*this)["bn_beta"].buffer(),
+            (*this)["bn_mean"].buffer(),
+            (*this)["bn_var"].buffer(),
+            });
+        struct { int HW, C; float eps; } bnConstants = { (int)(H * W), (int)C_out, eps };
+        cmdBuff
+            .bindPipeline(bnPipeline)
+            .bindDescSets({ bnDescSet })
+            .setPushConstants(0, sizeof(bnConstants), &bnConstants)
+            .dispatch(H * W * C_out)
+            .barrier(
+                (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+                / (*this)["out0"].buffer()
+                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+            );
     }
 };
 
 // Pointwise Conv + BatchNorm + ReLU6 - for expansion layer
-class PwConvBnRelu6Group : public NodeGroup
+class PwConvBnRelu6Node : public Node
 {
-    PointwiseConvNode pwconv;
-    BatchNormNode bn;
-    Relu6Node relu6;
+    uint32_t C_in, C_out;
+    float eps;
+    ComputePipeline pwconvPipeline;
+    ComputePipeline bnPipeline;
+    ComputePipeline relu6Pipeline;
+    DescriptorSet pwconvDescSet;
+    DescriptorSet bnDescSet;
+    DescriptorSet relu6DescSet;
 public:
-    PwConvBnRelu6Group(uint32_t inChannels, uint32_t outChannels, float epsilon = 1e-5f)
-        : pwconv(inChannels, outChannels),
-          bn(outChannels, epsilon),
-          relu6()
+    PwConvBnRelu6Node(uint32_t inChannels, uint32_t outChannels, float epsilon = 1e-5f)
+        : C_in(inChannels), C_out(outChannels), eps(epsilon)
     {
-        // Define external-facing slots
-        defineSlot("in0", pwconv.slot("in0"));
-        defineSlot("out0", relu6.slot("out0"));
-        // Weight slots
-        defineSlot("pw_weight", pwconv.slot("weight"));
-        defineSlot("bn_gamma", bn.slot("gamma"));
-        defineSlot("bn_beta", bn.slot("beta"));
-        defineSlot("bn_mean", bn.slot("running_mean"));
-        defineSlot("bn_var", bn.slot("running_var"));
-        // Connect internal nodes: pwconv -> bn -> relu6
-        pwconv.slot("out0") - bn.slot("in0");
-        bn.slot("out0") - relu6.slot("in0");
+        addSlot("in0", NodeSlot::input);
+        addSlot("out0", NodeSlot::output);
+        addSlot("pw_out", NodeSlot::internal);
+        addSlot("bn_out", NodeSlot::internal);
+        addSlot("pw_weight", NodeSlot::input);
+        addSlot("bn_gamma", NodeSlot::input);
+        addSlot("bn_beta", NodeSlot::input);
+        addSlot("bn_mean", NodeSlot::input);
+        addSlot("bn_var", NodeSlot::input);
+        pwconvPipeline = gDevice.createComputePipeline({ pwconv_srcCode });
+        bnPipeline = gDevice.createComputePipeline({ batchnorm_srcCode });
+        relu6Pipeline = gDevice.createComputePipeline({ relu6_srcCode });
+        pwconvDescSet = pwconvPipeline.descSetLayout(0).newDescSet(gDestSetPool);
+        bnDescSet = bnPipeline.descSetLayout(0).newDescSet(gDestSetPool);
+        relu6DescSet = relu6Pipeline.descSetLayout(0).newDescSet(gDestSetPool);
+    }
+    void prepare() override
+    {
+        const auto& inShape = (*this)["in0"].shape();
+        _ASSERT(inShape.size() == 3);
+        _ASSERT(inShape[2] == C_in);
+        (*this)["pw_out"] = Tensor(inShape[0], inShape[1], C_out);
+        (*this)["bn_out"] = Tensor(inShape[0], inShape[1], C_out);
+        (*this)["out0"] = Tensor(inShape[0], inShape[1], C_out);
+    }
+    void run(CommandBuffer cmdBuff) override
+    {
+        const auto& inShape = (*this)["in0"].shape();
+        uint32_t H = inShape[0], W = inShape[1];
+        // Pointwise Conv
+        pwconvDescSet.write({
+            (*this)["pw_out"].buffer(),
+            (*this)["in0"].buffer(),
+            (*this)["pw_weight"].buffer(),
+            });
+        uint32_t pwConstants[] = { H, W, C_in, C_out };
+        cmdBuff
+            .bindPipeline(pwconvPipeline)
+            .bindDescSets({ pwconvDescSet })
+            .setPushConstants(0, sizeof(pwConstants), pwConstants)
+            .dispatch(H, W, C_out)
+            .barrier(
+                (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+                / (*this)["pw_out"].buffer()
+                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+            );
+        // BatchNorm
+        bnDescSet.write({
+            (*this)["bn_out"].buffer(),
+            (*this)["pw_out"].buffer(),
+            (*this)["bn_gamma"].buffer(),
+            (*this)["bn_beta"].buffer(),
+            (*this)["bn_mean"].buffer(),
+            (*this)["bn_var"].buffer(),
+            });
+        struct { int HW, C; float eps; } bnConstants = { (int)(H * W), (int)C_out, eps };
+        cmdBuff
+            .bindPipeline(bnPipeline)
+            .bindDescSets({ bnDescSet })
+            .setPushConstants(0, sizeof(bnConstants), &bnConstants)
+            .dispatch(H * W * C_out)
+            .barrier(
+                (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+                / (*this)["bn_out"].buffer()
+                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+            );
+        // ReLU6
+        int N = H * W * C_out;
+        relu6DescSet.write({
+            (*this)["out0"].buffer(),
+            (*this)["bn_out"].buffer(),
+            });
+        cmdBuff
+            .bindPipeline(relu6Pipeline)
+            .bindDescSets({ relu6DescSet })
+            .setPushConstants(0, sizeof(N), &N)
+            .dispatch(N)
+            .barrier(
+                (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+                / (*this)["out0"].buffer()
+                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+            );
     }
 };
 
-// Inverted Residual Block as NodeGroup
-class InvertedResidualBlock : public NodeGroup
+// Inverted Residual Block
+class InvertedResidualBlock : public Node
 {
     uint32_t C_in, C_out, expandRatio, stride;
     uint32_t hiddenDim;
     bool useResidual;
-
-    // For managing the input node when residual is needed
-    InputNode inputBranch;
-
-    // Conditional expansion layer
-    std::unique_ptr<PwConvBnRelu6Group> expandLayer;
-
-    // Always present layers
-    DwConvBnRelu6Group dwLayer;
-    PwConvBnGroup projLayer;
-
-    // Conditional residual add
-    std::unique_ptr<AddNode> addNode;
-
+    float eps;
+    // Pipelines
+    ComputePipeline pwconvPipeline;
+    ComputePipeline dwconvPipeline;
+    ComputePipeline bnPipeline;
+    ComputePipeline relu6Pipeline;
+    ComputePipeline addPipeline;
+    // Descriptor sets for each stage
+    DescriptorSet expandPwDescSet;
+    DescriptorSet expandBnDescSet;
+    DescriptorSet expandRelu6DescSet;
+    DescriptorSet dwDescSet;
+    DescriptorSet dwBnDescSet;
+    DescriptorSet dwRelu6DescSet;
+    DescriptorSet projPwDescSet;
+    DescriptorSet projBnDescSet;
+    DescriptorSet addDescSet;
 public:
     InvertedResidualBlock(uint32_t inChannels, uint32_t outChannels,
         uint32_t expandRatio = 6, uint32_t stride = 1,
         float epsilon = 1e-5f)
         : C_in(inChannels), C_out(outChannels), expandRatio(expandRatio),
-          stride(stride),
-          dwLayer(inChannels * expandRatio, 3, stride, 1, epsilon),
-          projLayer(inChannels * expandRatio, outChannels, epsilon)
+        stride(stride), eps(epsilon)
     {
         hiddenDim = C_in * expandRatio;
         useResidual = (stride == 1 && C_in == C_out);
-
-        // Define input slot
-        defineSlot("in0", inputBranch.slot("in0"));
-
-        // Create expansion layer if needed
+        // Input/Output slots
+        addSlot("in0", NodeSlot::input);
+        addSlot("out0", NodeSlot::output);
+        // Internal tensors
         if (expandRatio != 1) {
-            expandLayer = std::make_unique<PwConvBnRelu6Group>(inChannels, hiddenDim, epsilon);
-
-            // Define expansion weight slots
-            defineSlot("expand_pw_weight", expandLayer->slot("pw_weight"));
-            defineSlot("expand_bn_gamma", expandLayer->slot("bn_gamma"));
-            defineSlot("expand_bn_beta", expandLayer->slot("bn_beta"));
-            defineSlot("expand_bn_mean", expandLayer->slot("bn_mean"));
-            defineSlot("expand_bn_var", expandLayer->slot("bn_var"));
-
-            // Connect: inputBranch -> expansion
-            inputBranch.slot("out0") - expandLayer->slot("in0");
-            // Connect: expansion -> depthwise
-            expandLayer->slot("out0") - dwLayer.slot("in0");
+            addSlot("expand_pw_out", NodeSlot::internal);
+            addSlot("expand_bn_out", NodeSlot::internal);
+            addSlot("expand_relu6_out", NodeSlot::internal);
         }
-        else {
-            // No expansion: connect inputBranch directly to depthwise
-            inputBranch.slot("out0") - dwLayer.slot("in0");
+        addSlot("dw_out", NodeSlot::internal);
+        addSlot("dw_bn_out", NodeSlot::internal);
+        addSlot("dw_relu6_out", NodeSlot::internal);
+        addSlot("proj_pw_out", NodeSlot::internal);
+        addSlot("proj_bn_out", NodeSlot::internal);
+        // Weight slots - Expansion layer (only if expand ratio > 1)
+        if (expandRatio != 1) {
+            addSlot("expand_pw_weight", NodeSlot::input);
+            addSlot("expand_bn_gamma", NodeSlot::input);
+            addSlot("expand_bn_beta", NodeSlot::input);
+            addSlot("expand_bn_mean", NodeSlot::input);
+            addSlot("expand_bn_var", NodeSlot::input);
         }
-
-        // Define depthwise weight slots
-        defineSlot("dw_weight", dwLayer.slot("dw_weight"));
-        defineSlot("dw_bn_gamma", dwLayer.slot("bn_gamma"));
-        defineSlot("dw_bn_beta", dwLayer.slot("bn_beta"));
-        defineSlot("dw_bn_mean", dwLayer.slot("bn_mean"));
-        defineSlot("dw_bn_var", dwLayer.slot("bn_var"));
-
-        // Connect: depthwise -> projection
-        dwLayer.slot("out0") - projLayer.slot("in0");
-
-        // Define projection weight slots
-        defineSlot("proj_pw_weight", projLayer.slot("pw_weight"));
-        defineSlot("proj_bn_gamma", projLayer.slot("bn_gamma"));
-        defineSlot("proj_bn_beta", projLayer.slot("bn_beta"));
-        defineSlot("proj_bn_mean", projLayer.slot("bn_mean"));
-        defineSlot("proj_bn_var", projLayer.slot("bn_var"));
-
-        // Handle residual connection
+        // Weight slots - Depthwise layer
+        addSlot("dw_weight", NodeSlot::input);
+        addSlot("dw_bn_gamma", NodeSlot::input);
+        addSlot("dw_bn_beta", NodeSlot::input);
+        addSlot("dw_bn_mean", NodeSlot::input);
+        addSlot("dw_bn_var", NodeSlot::input);
+        // Weight slots - Projection layer
+        addSlot("proj_pw_weight", NodeSlot::input);
+        addSlot("proj_bn_gamma", NodeSlot::input);
+        addSlot("proj_bn_beta", NodeSlot::input);
+        addSlot("proj_bn_mean", NodeSlot::input);
+        addSlot("proj_bn_var", NodeSlot::input);
+        // Create pipelines
+        pwconvPipeline = gDevice.createComputePipeline({ pwconv_srcCode });
+        dwconvPipeline = gDevice.createComputePipeline({ dwconv_srcCode });
+        bnPipeline = gDevice.createComputePipeline({ batchnorm_srcCode });
+        relu6Pipeline = gDevice.createComputePipeline({ relu6_srcCode });
+        addPipeline = gDevice.createComputePipeline({ add_srcCode });
+        // Create descriptor sets
+        if (expandRatio != 1) {
+            expandPwDescSet = pwconvPipeline.descSetLayout(0).newDescSet(gDestSetPool);
+            expandBnDescSet = bnPipeline.descSetLayout(0).newDescSet(gDestSetPool);
+            expandRelu6DescSet = relu6Pipeline.descSetLayout(0).newDescSet(gDestSetPool);
+        }
+        dwDescSet = dwconvPipeline.descSetLayout(0).newDescSet(gDestSetPool);
+        dwBnDescSet = bnPipeline.descSetLayout(0).newDescSet(gDestSetPool);
+        dwRelu6DescSet = relu6Pipeline.descSetLayout(0).newDescSet(gDestSetPool);
+        projPwDescSet = pwconvPipeline.descSetLayout(0).newDescSet(gDestSetPool);
+        projBnDescSet = bnPipeline.descSetLayout(0).newDescSet(gDestSetPool);
         if (useResidual) {
-            addNode = std::make_unique<AddNode>();
-            // Connect: inputBranch -> add.in0, projection -> add.in1
-            inputBranch.slot("out0") - addNode->slot("in0");
-            projLayer.slot("out0") - addNode->slot("in1");
-            defineSlot("out0", addNode->slot("out0"));
+            addDescSet = addPipeline.descSetLayout(0).newDescSet(gDestSetPool);
+        }
+    }
+    void prepare() override
+    {
+        const auto& inShape = (*this)["in0"].shape();
+        _ASSERT(inShape.size() == 3);
+        _ASSERT(inShape[2] == C_in);
+        uint32_t H_in = inShape[0], W_in = inShape[1];
+        uint32_t H_out = (H_in + 2 * 1 - 3) / stride + 1;  // K=3, pad=1
+        uint32_t W_out = (W_in + 2 * 1 - 3) / stride + 1;
+        if (expandRatio != 1) {
+            (*this)["expand_pw_out"] = Tensor(H_in, W_in, hiddenDim);
+            (*this)["expand_bn_out"] = Tensor(H_in, W_in, hiddenDim);
+            (*this)["expand_relu6_out"] = Tensor(H_in, W_in, hiddenDim);
+        }
+        (*this)["dw_out"] = Tensor(H_out, W_out, hiddenDim);
+        (*this)["dw_bn_out"] = Tensor(H_out, W_out, hiddenDim);
+        (*this)["dw_relu6_out"] = Tensor(H_out, W_out, hiddenDim);
+        (*this)["proj_pw_out"] = Tensor(H_out, W_out, C_out);
+        (*this)["proj_bn_out"] = Tensor(H_out, W_out, C_out);
+        (*this)["out0"] = Tensor(H_out, W_out, C_out);
+    }
+    void run(CommandBuffer cmdBuff) override
+    {
+        const auto& inShape = (*this)["in0"].shape();
+        uint32_t H_in = inShape[0], W_in = inShape[1];
+        uint32_t H_out = (*this)["dw_out"].shape()[0];
+        uint32_t W_out = (*this)["dw_out"].shape()[1];
+        Buffer currentInput = (*this)["in0"].buffer();
+        uint32_t currentH = H_in, currentW = W_in, currentC = C_in;
+        // ========== Expansion Layer (if t > 1) ==========
+        if (expandRatio != 1) {
+            // Pointwise Conv: C_in -> hiddenDim
+            expandPwDescSet.write({
+                (*this)["expand_pw_out"].buffer(),
+                currentInput,
+                (*this)["expand_pw_weight"].buffer(),
+                });
+            uint32_t pwConstants[] = { H_in, W_in, C_in, hiddenDim };
+            cmdBuff
+                .bindPipeline(pwconvPipeline)
+                .bindDescSets({ expandPwDescSet })
+                .setPushConstants(0, sizeof(pwConstants), pwConstants)
+                .dispatch(H_in, W_in, hiddenDim)
+                .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+                    / (*this)["expand_pw_out"].buffer()
+                    / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+            // BatchNorm
+            expandBnDescSet.write({
+                (*this)["expand_bn_out"].buffer(),
+                (*this)["expand_pw_out"].buffer(),
+                (*this)["expand_bn_gamma"].buffer(),
+                (*this)["expand_bn_beta"].buffer(),
+                (*this)["expand_bn_mean"].buffer(),
+                (*this)["expand_bn_var"].buffer(),
+                });
+            struct { int HW, C; float eps; } bnConstants = { (int)(H_in * W_in), (int)hiddenDim, eps };
+            cmdBuff
+                .bindPipeline(bnPipeline)
+                .bindDescSets({ expandBnDescSet })
+                .setPushConstants(0, sizeof(bnConstants), &bnConstants)
+                .dispatch(H_in * W_in * hiddenDim)
+                .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+                    / (*this)["expand_bn_out"].buffer()
+                    / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+            // ReLU6
+            int N = H_in * W_in * hiddenDim;
+            expandRelu6DescSet.write({
+                (*this)["expand_relu6_out"].buffer(),
+                (*this)["expand_bn_out"].buffer(),
+                });
+            cmdBuff
+                .bindPipeline(relu6Pipeline)
+                .bindDescSets({ expandRelu6DescSet })
+                .setPushConstants(0, sizeof(N), &N)
+                .dispatch(N)
+                .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+                    / (*this)["expand_relu6_out"].buffer()
+                    / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+            currentInput = (*this)["expand_relu6_out"].buffer();
+            currentC = hiddenDim;
+        }
+        // ========== Depthwise Layer ==========
+        // Depthwise Conv
+        dwDescSet.write({
+            (*this)["dw_out"].buffer(),
+            currentInput,
+            (*this)["dw_weight"].buffer(),
+            });
+        struct {
+            int H_in, W_in, C;
+            int H_out, W_out;
+            int K, stride, pad;
+        } dwConstants = {
+            (int)currentH, (int)currentW, (int)hiddenDim,
+            (int)H_out, (int)W_out,
+            3, (int)stride, 1
+        };
+        // If expansion was done, input dims changed
+        if (expandRatio != 1) {
+            dwConstants.H_in = H_in;
+            dwConstants.W_in = W_in;
+        }
+        cmdBuff
+            .bindPipeline(dwconvPipeline)
+            .bindDescSets({ dwDescSet })
+            .setPushConstants(0, sizeof(dwConstants), &dwConstants)
+            .dispatch(H_out, W_out, hiddenDim)
+            .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+                / (*this)["dw_out"].buffer()
+                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+        // BatchNorm
+        dwBnDescSet.write({
+            (*this)["dw_bn_out"].buffer(),
+            (*this)["dw_out"].buffer(),
+            (*this)["dw_bn_gamma"].buffer(),
+            (*this)["dw_bn_beta"].buffer(),
+            (*this)["dw_bn_mean"].buffer(),
+            (*this)["dw_bn_var"].buffer(),
+            });
+        struct { int HW, C; float eps; } dwBnConstants = { (int)(H_out * W_out), (int)hiddenDim, eps };
+        cmdBuff
+            .bindPipeline(bnPipeline)
+            .bindDescSets({ dwBnDescSet })
+            .setPushConstants(0, sizeof(dwBnConstants), &dwBnConstants)
+            .dispatch(H_out * W_out * hiddenDim)
+            .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+                / (*this)["dw_bn_out"].buffer()
+                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+        // ReLU6
+        int dwN = H_out * W_out * hiddenDim;
+        dwRelu6DescSet.write({
+            (*this)["dw_relu6_out"].buffer(),
+            (*this)["dw_bn_out"].buffer(),
+            });
+        cmdBuff
+            .bindPipeline(relu6Pipeline)
+            .bindDescSets({ dwRelu6DescSet })
+            .setPushConstants(0, sizeof(dwN), &dwN)
+            .dispatch(dwN)
+            .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+                / (*this)["dw_relu6_out"].buffer()
+                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+        // ========== Projection Layer ==========
+        // Pointwise Conv: hiddenDim -> C_out
+        projPwDescSet.write({
+            (*this)["proj_pw_out"].buffer(),
+            (*this)["dw_relu6_out"].buffer(),
+            (*this)["proj_pw_weight"].buffer(),
+            });
+        uint32_t projPwConstants[] = { H_out, W_out, hiddenDim, C_out };
+        cmdBuff
+            .bindPipeline(pwconvPipeline)
+            .bindDescSets({ projPwDescSet })
+            .setPushConstants(0, sizeof(projPwConstants), projPwConstants)
+            .dispatch(H_out, W_out, C_out)
+            .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+                / (*this)["proj_pw_out"].buffer()
+                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+        // BatchNorm (no activation after projection!)
+        projBnDescSet.write({
+            (*this)["proj_bn_out"].buffer(),
+            (*this)["proj_pw_out"].buffer(),
+            (*this)["proj_bn_gamma"].buffer(),
+            (*this)["proj_bn_beta"].buffer(),
+            (*this)["proj_bn_mean"].buffer(),
+            (*this)["proj_bn_var"].buffer(),
+            });
+        struct { int HW, C; float eps; } projBnConstants = { (int)(H_out * W_out), (int)C_out, eps };
+        cmdBuff
+            .bindPipeline(bnPipeline)
+            .bindDescSets({ projBnDescSet })
+            .setPushConstants(0, sizeof(projBnConstants), &projBnConstants)
+            .dispatch(H_out * W_out * C_out)
+            .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+                / (*this)["proj_bn_out"].buffer()
+                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
+        // ========== Residual Add (if applicable) ==========
+        if (useResidual) {
+            int addN = H_out * W_out * C_out;
+            addDescSet.write({
+                (*this)["out0"].buffer(),
+                (*this)["in0"].buffer(),
+                (*this)["proj_bn_out"].buffer(),
+                });
+            cmdBuff
+                .bindPipeline(addPipeline)
+                .bindDescSets({ addDescSet })
+                .setPushConstants(0, sizeof(addN), &addN)
+                .dispatch(addN)
+                .barrier((PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+                    / (*this)["out0"].buffer()
+                    / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
         }
         else {
-            // No residual: output directly from projection
-            defineSlot("out0", projLayer.slot("out0"));
+            // No residual path: copy projection output forward
+            cmdBuff
+                .copyBuffer((*this)["out0"].buffer(), (*this)["proj_bn_out"].buffer())
+                .barrier((PIPELINE_STAGE::TRANSFER, ACCESS::TRANSFER_WRITE)
+                    / (*this)["out0"].buffer()
+                    / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ));
         }
     }
 };
