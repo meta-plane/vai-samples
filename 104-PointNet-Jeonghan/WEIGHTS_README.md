@@ -4,7 +4,27 @@ This document explains how to obtain and convert PointNet weights for Vulkan inf
 
 ## 📋 Quick Start
 
-### Option 1: Use Random Weights (For Testing)
+### Option 1: Download Pretrained Weights (Recommended)
+
+Use the automated download script to get pretrained PointNet2 weights:
+
+```bash
+# Download and convert pretrained weights automatically
+cd utils
+./download_weight.sh
+```
+
+This script will:
+- ✅ Download `best_model.pth` from [yanx27/Pointnet_Pointnet2_pytorch](https://github.com/yanx27/Pointnet_Pointnet2_pytorch) (~21MB)
+- ✅ Automatically convert to SafeTensors format
+- ✅ Save to `assets/weights/pointnet2_part_seg.safetensors`
+
+**Model Details:**
+- Source: yanx27/Pointnet_Pointnet2_pytorch
+- Task: Part Segmentation (Multi-Scale Grouping)
+- Pretrained: ShapeNet Part Dataset
+
+### Option 2: Use Random Weights (For Testing)
 
 ```bash
 # Generate random weights for quick testing
@@ -13,7 +33,7 @@ python utils/convert_pytorch_weights.py --random --num_classes 10
 # This creates: assets/weights/pointnet_weights.json
 ```
 
-### Option 2: Convert from PyTorch Checkpoint
+### Option 3: Convert Your Own PyTorch Checkpoint
 
 ```bash
 # If you have a trained PyTorch model
@@ -21,38 +41,6 @@ python utils/convert_pytorch_weights.py \
     --checkpoint path/to/model.pth \
     --output assets/weights/pointnet_weights.json \
     --num_classes 10
-```
-
-### Option 3: Train Your Own Model
-
-Follow the PyTorch reference implementation to train a model:
-
-**Reference:** https://github.com/yanx27/Pointnet_Pointnet2_pytorch
-
-```bash
-# Clone the reference repo
-git clone https://github.com/yanx27/Pointnet_Pointnet2_pytorch.git
-cd Pointnet_Pointnet2_pytorch
-
-# Install dependencies
-conda create -n pointnet python=3.7
-conda activate pointnet
-conda install pytorch==1.6.0 cudatoolkit=10.1 -c pytorch
-
-# Download ModelNet40 dataset
-# (See their README for detailed instructions)
-
-# Train PointNet for classification
-python train_classification.py --model pointnet_cls --log_dir pointnet_cls
-
-# Or train for part segmentation
-python train_partseg.py --model pointnet_part_seg --log_dir pointnet_part_seg
-
-# Convert the trained model
-cd ../104-PointNet-Jeonghan
-python utils/convert_pytorch_weights.py \
-    --checkpoint ../Pointnet_Pointnet2_pytorch/log/pointnet_part_seg/checkpoints/best_model.pth \
-    --output assets/weights/pointnet_weights.json
 ```
 
 ## 🏗️ Weight Format
@@ -98,7 +86,23 @@ Our JSON weight format follows this structure:
 6. **Segmentation Head**: [2048, 512, 256, num_classes]
    - Input: Concatenation of point features [N, 1024] + global feature [N, 1024]
 
-## 🔧 Conversion Script Usage
+## 🔧 Download & Conversion Scripts
+
+### Automated Weight Download
+
+```bash
+# Download pretrained weights and convert automatically
+cd utils
+./download_weight.sh
+```
+
+Features:
+- Downloads PointNet2 Part Seg pretrained weights from GitHub
+- Interactive conversion to SafeTensors format
+- Verifies file integrity
+- Shows file size and location
+
+### Manual Conversion
 
 ```bash
 # Basic usage with random weights
@@ -117,7 +121,7 @@ python utils/convert_pytorch_weights.py \
 ### Supported PyTorch Model Structures
 
 The converter supports models from:
-- [yanx27/Pointnet_Pointnet2_pytorch](https://github.com/yanx27/Pointnet_Pointnet2_pytorch)
+- [yanx27/Pointnet_Pointnet2_pytorch](https://github.com/yanx27/Pointnet_Pointnet2_pytorch) ✅
 - [fxia22/pointnet.pytorch](https://github.com/fxia22/pointnet.pytorch)
 
 The script automatically handles:
@@ -156,10 +160,22 @@ cd build/bin/debug
 ./104-PointNet-Jeonghan
 ```
 
+## 📥 Dataset Download
+
+Download ModelNet40 dataset for testing:
+
+```bash
+cd utils
+./download.sh
+```
+
+This downloads and extracts ModelNet40 to `assets/datasets/ModelNet40/`.
+
 ## 📚 Additional Resources
 
 - **Original Paper**: [PointNet: Deep Learning on Point Sets](https://arxiv.org/abs/1612.00593)
 - **PyTorch Implementation**: https://github.com/yanx27/Pointnet_Pointnet2_pytorch
+- **Pretrained Models**: Available via `./utils/download_weight.sh`
 - **ModelNet40 Dataset**: https://modelnet.cs.princeton.edu/
 - **ShapeNet Dataset**: https://shapenet.org/
 
@@ -179,10 +195,28 @@ cd build/bin/debug
 - Check number of classes matches: `--num_classes` in converter
 - Ensure all required keys are present
 
+## 🚀 Complete Workflow
+
+```bash
+# 1. Download pretrained weights
+cd utils
+./download_weight.sh
+
+# 2. Download ModelNet40 dataset (optional)
+./download.sh
+
+# 3. Build and run inference
+cd ..
+./build.sh
+../bin/debug/104-PointNet-Jeonghan
+```
+
 ## 🔄 Updates
 
-Last updated: 2025-01-23
+Last updated: 2025-12-20
 
-For the latest version of this guide, see:
-https://github.com/yanx27/Pointnet_Pointnet2_pytorch
+Automated scripts:
+- `utils/download_weight.sh` - Download pretrained PointNet2 weights
+- `utils/download.sh` - Download ModelNet40 dataset
+- `utils/convert_pytorch_weights.py` - Convert PyTorch checkpoints
 

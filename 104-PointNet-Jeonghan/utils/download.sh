@@ -5,7 +5,8 @@
 set -e  # Exit on error
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DATASET_DIR="${SCRIPT_DIR}/assets/datasets"
+PROJECT_ROOT="${SCRIPT_DIR}/.."
+DATASET_DIR="${PROJECT_ROOT}/assets/datasets"
 OUTPUT_FILE="${DATASET_DIR}/modelnet40.zip"
 
 # Colors for output
