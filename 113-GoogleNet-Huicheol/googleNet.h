@@ -76,12 +76,10 @@ class GoogleNet : public NeuralNet
     ConvolutionNode conv1;
     ReluNode relu1;
     MaxPoolingNode pool1;
-    std::unique_ptr<LRNNode> lrn1;
     ConvolutionNode conv2_reduce;
     ReluNode relu2_reduce;
     ConvolutionNode conv2;
     ReluNode relu2;
-    std::unique_ptr<LRNNode> lrn2;
     MaxPoolingNode pool2;
 
     // Inception blocks

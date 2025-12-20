@@ -323,12 +323,10 @@ GoogleNet::GoogleNet(Device& device, uint32_t numClasses)
     , conv1(3, 64, 7, 2, 3) // stride 2, pad 3
     , relu1()
     , pool1(3, 2, 1)
-    , lrn1(std::make_unique<LRNNode>())
     , conv2_reduce(64, 64, 1)
     , relu2_reduce()
     , conv2(64, 192, 3, 1, 1) // pad 1
     , relu2()
-    , lrn2(std::make_unique<LRNNode>())
     , pool2(3, 2, 1)
     , pool3(3, 2, 1)
     , pool4(3, 2, 1)
@@ -351,7 +349,7 @@ GoogleNet::GoogleNet(Device& device, uint32_t numClasses)
 
     // Connect layers
     // Stem
-    input(0) - conv1 - relu1 - pool1 - *lrn1 - conv2_reduce - relu2_reduce - conv2 - relu2 - *lrn2 - pool2;
+    input(0) - conv1 - relu1 - pool1 - conv2_reduce - relu2_reduce - conv2 - relu2 - pool2;
 
     // Inception 3a
     // Note: We need to connect pool2 output to ALL branches of inception3a.
@@ -428,10 +426,8 @@ Tensor& GoogleNet::debugTensor(const std::string& name)
 {
     if (name == "conv1.out") return conv1["out0"];
     if (name == "pool1.out") return pool1["out0"];
-    if (name == "lrn1.out")  return (*lrn1)["out0"];
     if (name == "conv2.out") return conv2["out0"];
     if (name == "pool2.out") return pool2["out0"];
-    if (name == "lrn2.out")  return (*lrn2)["out0"];
     if (name == "inception3a.out") return (*inception3a)["out0"];
     if (name == "inception3b.out") return (*inception3b)["out0"];
     if (name == "pool3.out") return pool3["out0"];

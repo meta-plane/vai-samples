@@ -82,27 +82,87 @@ void test()
     std::vector<uint8_t> srcImage;
     try
     {
-        auto loaded = readImage<channels>(PROJECT_ROOT_DIR"/113-GoogleNet-Huicheol/data/dog.jpg");
+        auto loaded = readImage<channels>(PROJECT_ROOT_DIR"/113-GoogleNet-Huicheol/data/cat_720p.jpg");
         srcImage = std::get<0>(loaded);
         W = std::get<1>(loaded);
         H = std::get<2>(loaded);
-        std::cout << "Loaded dog.jpg (" << W << "x" << H << ")" << std::endl;
+        std::cout << "Loaded cat_720p.jpg (" << W << "x" << H << ")" << std::endl;
     }
     catch (const std::exception& e)
     {
-        std::cout << "dog.jpg not found, using zero image: " << e.what() << std::endl;
+        std::cout << "cat_720p.jpg not found, using zero image: " << e.what() << std::endl;
         srcImage.assign(H * W * channels, 0);
     }
 
+    // Resize -> center crop to match torchvision eval: resize so min side=256, then 224x224 center crop
+    auto resizeBilinear = [](const std::vector<uint8_t>& src, uint32_t w, uint32_t h, uint32_t c, uint32_t newW, uint32_t newH)
+    {
+        std::vector<uint8_t> dst(newW * newH * c);
+        for (uint32_t y = 0; y < newH; ++y) {
+            float sy = (float(y) + 0.5f) * float(h) / float(newH) - 0.5f;
+            uint32_t y0 = (uint32_t)std::max(0, std::min<int>(h - 1, int(floor(sy))));
+            uint32_t y1 = std::min(h - 1, y0 + 1);
+            float wy = sy - float(y0);
+            for (uint32_t x = 0; x < newW; ++x) {
+                float sx = (float(x) + 0.5f) * float(w) / float(newW) - 0.5f;
+                uint32_t x0 = (uint32_t)std::max(0, std::min<int>(w - 1, int(floor(sx))));
+                uint32_t x1 = std::min(w - 1, x0 + 1);
+                float wx = sx - float(x0);
+                for (uint32_t ch = 0; ch < c; ++ch) {
+                    auto idx = [&](uint32_t X, uint32_t Y) { return (Y * w + X) * c + ch; };
+                    float v00 = src[idx(x0, y0)];
+                    float v01 = src[idx(x1, y0)];
+                    float v10 = src[idx(x0, y1)];
+                    float v11 = src[idx(x1, y1)];
+                    float v0 = v00 + (v01 - v00) * wx;
+                    float v1 = v10 + (v11 - v10) * wx;
+                    float v = v0 + (v1 - v0) * wy;
+                    dst[(y * newW + x) * c + ch] = (uint8_t)std::clamp(int(v + 0.5f), 0, 255);
+                }
+            }
+        }
+        return dst;
+    };
+
+    auto centerCrop = [](const std::vector<uint8_t>& src, uint32_t w, uint32_t h, uint32_t c, uint32_t cw, uint32_t ch)
+    {
+        std::vector<uint8_t> dst(cw * ch * c);
+        uint32_t x0 = (w > cw) ? (w - cw) / 2 : 0;
+        uint32_t y0 = (h > ch) ? (h - ch) / 2 : 0;
+        for (uint32_t y = 0; y < ch; ++y) {
+            for (uint32_t x = 0; x < cw; ++x) {
+                for (uint32_t chn = 0; chn < c; ++chn) {
+                    dst[(y * cw + x) * c + chn] = src[((y + y0) * w + (x + x0)) * c + chn];
+                }
+            }
+        }
+        return dst;
+    };
+
+    if (!srcImage.empty()) {
+        // If already 224x224, keep as-is (avoids double scaling on pre-resized images).
+        if (!(W == 224 && H == 224)) {
+            uint32_t minSide = std::min(W, H);
+            float scale = 256.0f / float(minSide);
+            uint32_t newW = uint32_t(std::round(W * scale));
+            uint32_t newH = uint32_t(std::round(H * scale));
+            auto resized = resizeBilinear(srcImage, W, H, channels, newW, newH);
+            srcImage = centerCrop(resized, newW, newH, channels, 224, 224);
+            W = H = 224;
+        }
+    } else {
+        srcImage.assign(224 * 224 * channels, 0);
+        W = H = 224;
+    }
+
     // Preprocess to match torchvision GoogLeNet: scale to [0,1] then normalize with ImageNet mean/std
-    // (mean/std taken from torchvision models)
     const float mean[3] = {0.485f, 0.456f, 0.406f};
     const float stdv[3] = {0.229f, 0.224f, 0.225f};
 
     Tensor inputTensor(H, W, 3);
     std::vector<float> inputData(H * W * 3);
     for (size_t i = 0; i < inputData.size(); ++i) {
-        float v = static_cast<float>(srcImage[i % srcImage.size()]) / 255.0f;
+        float v = static_cast<float>(srcImage[i]) / 255.0f;
         int c = static_cast<int>(i % 3);
         inputData[i] = (v - mean[c]) / stdv[c];
     }
@@ -215,9 +275,7 @@ void test()
 
         debugCapture("conv1.out", googleNet.debugTensor("conv1.out"));
         debugCapture("pool1.out", googleNet.debugTensor("pool1.out"));
-        debugCapture("lrn1.out",  googleNet.debugTensor("lrn1.out"));
         debugCapture("conv2.out", googleNet.debugTensor("conv2.out"));
-        debugCapture("lrn2.out",  googleNet.debugTensor("lrn2.out"));
         debugCapture("pool2.out", googleNet.debugTensor("pool2.out"));
         debugCapture("inception3a.out", googleNet.debugTensor("inception3a.out"));
         debugCapture("inception3b.out", googleNet.debugTensor("inception3b.out"));
