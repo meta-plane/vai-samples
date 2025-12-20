@@ -1,7 +1,7 @@
 #!/bin/bash
-# Download PointNet2 Part Segmentation Weights
+# Download PointNet Semantic Segmentation Weights
 # Source: yanx27/Pointnet_Pointnet2_pytorch
-# Model: PointNet2 MSG Part Segmentation (best_model.pth)
+# Model: PointNet Semantic Segmentation (best_model.pth)
 
 set -e  # Exit on error
 
@@ -10,8 +10,8 @@ PROJECT_ROOT="${SCRIPT_DIR}/.."
 WEIGHTS_DIR="${PROJECT_ROOT}/assets/weights"
 OUTPUT_FILE="${WEIGHTS_DIR}/best_model.pth"
 
-# GitHub raw URL for the pretrained model
-GITHUB_URL="https://github.com/yanx27/Pointnet_Pointnet2_pytorch/raw/master/log/part_seg/pointnet2_part_seg_msg/checkpoints/best_model.pth"
+# GitHub raw URL for the pretrained model (use /raw/ for direct download)
+GITHUB_URL="https://github.com/yanx27/Pointnet_Pointnet2_pytorch/raw/master/log/sem_seg/pointnet_sem_seg/checkpoints/best_model.pth"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -21,12 +21,12 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 echo "╔════════════════════════════════════════════════════════╗"
-echo "║     PointNet2 Part Segmentation Weights Download      ║"
+echo "║     PointNet Semantic Segmentation Weights Download   ║"
 echo "╚════════════════════════════════════════════════════════╝"
 echo ""
 echo -e "${BLUE}Model: yanx27/Pointnet_Pointnet2_pytorch${NC}"
-echo -e "${BLUE}Type: Part Segmentation (Multi-Scale Grouping)${NC}"
-echo -e "${BLUE}Size: ~80MB${NC}"
+echo -e "${BLUE}Type: Semantic Segmentation (S3DIS Dataset)${NC}"
+echo -e "${BLUE}Size: ~40MB${NC}"
 echo ""
 
 # Create weights directory
@@ -46,7 +46,7 @@ if [ -f "${OUTPUT_FILE}" ]; then
 fi
 
 # Download using curl
-echo "Downloading PointNet2 weights from GitHub..."
+echo "Downloading PointNet semantic segmentation weights from GitHub..."
 echo "URL: ${GITHUB_URL}"
 echo ""
 
@@ -97,7 +97,7 @@ echo
 echo ""
 
 if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-    SAFETENSORS_OUTPUT="${WEIGHTS_DIR}/pointnet2_part_seg.safetensors"
+    SAFETENSORS_OUTPUT="${WEIGHTS_DIR}/pointnet_sem_seg.safetensors"
     
     echo "Converting to SafeTensors format..."
     echo "Output: ${SAFETENSORS_OUTPUT}"
@@ -114,7 +114,7 @@ if [[ ! $REPLY =~ ^[Nn]$ ]]; then
     cd "${PROJECT_ROOT}"
     python3 utils/convert_pytorch_weights.py \
         --checkpoint assets/weights/best_model.pth \
-        --output assets/weights/pointnet2_part_seg.safetensors
+        --output assets/weights/pointnet_sem_seg.safetensors
     
     if [ $? -eq 0 ]; then
         echo ""
@@ -128,14 +128,14 @@ if [[ ! $REPLY =~ ^[Nn]$ ]]; then
         echo "You can convert manually later using:"
         echo "  python utils/convert_pytorch_weights.py \\"
         echo "    --checkpoint assets/weights/best_model.pth \\"
-        echo "    --output assets/weights/pointnet2_part_seg.safetensors"
+        echo "    --output assets/weights/pointnet_sem_seg.safetensors"
     fi
 else
     echo "Skipping conversion."
     echo "You can convert manually later using:"
     echo "  python utils/convert_pytorch_weights.py \\"
     echo "    --checkpoint assets/weights/best_model.pth \\"
-    echo "    --output assets/weights/pointnet2_part_seg.safetensors"
+    echo "    --output assets/weights/pointnet_sem_seg.safetensors"
 fi
 
 echo ""

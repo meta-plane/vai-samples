@@ -17,12 +17,12 @@ using namespace pointcloud;
  */
 
 void printUsage() {
-    std::cout << "\nPointNet Segmentation (yanx27)\n";
+    std::cout << "\nPointNet Segmentation\n";
     std::cout << "==============================\\n";
     std::cout << "Model: S3DIS Semantic Segmentation (13 classes)\\n";
     std::cout << "Input: 3D xyz coordinates\\n\\n";
     std::cout << "Usage:\\n";
-    std::cout << "  1. Place weights at: assets/weights/pointnet_yanx27.json\\n";
+    std::cout << "  1. Place weights at: assets/weights/pointnet_sem_seg.safetensors\\n";
     std::cout << "  2. Place point cloud at: assets/data/sample.txt\\n";
     std::cout << "  3. Run this executable\\n\\n";
     std::cout << "Point cloud format:\\n";
@@ -43,11 +43,10 @@ int main()
     // Initialize random seed
     srand(static_cast<unsigned int>(time(nullptr)));
 
-    // Configuration (yanx27: 9-dim xyz input, 13 semantic classes)
     InferenceConfig config;
-    config.weights_file = "assets/weights/pointnet_yanx27.json";  // yanx27 pretrained weights
+    config.weights_file = "assets/weights/pointnet_sem_seg.safetensors";
     config.num_classes = 13;  // S3DIS semantic segmentation
-    config.channel = 3;
+    config.channel = 9;       // yanx27 S3DIS model uses 9 channels (xyz + rgb + normalized_xyz)
     config.verbose = true;
 
     // Load and segment from ModelNet40
@@ -100,10 +99,13 @@ int main()
         
         if (result.success) {
             std::cout << "\n" << std::string(56, '=') << "\n";
-            std::cout << "Segmentation Result\n";
+            std::cout << "Benchmark Results\n";
             std::cout << std::string(56, '=') << "\n";
-            std::cout << "ModelNet40 Sample: " << class_name << " (" << class_idx << ")\n";
-            std::cout << "Points: " << result.num_points << "\n";
+            std::cout << "Average time: " << std::fixed << std::setprecision(2) << avg_time/1000.0 << " ms\n";
+            std::cout << "Min time:     " << std::fixed << std::setprecision(2) << min_time/1000.0 << " ms\n";
+            std::cout << "Max time:     " << std::fixed << std::setprecision(2) << max_time/1000.0 << " ms\n";
+            std::cout << "Throughput:   " << std::fixed << std::setprecision(0) 
+                        << (result.num_points / (avg_time / 1000000.0)) << " points/sec\n";
             
             // Count predicted semantic classes
             std::vector<int> class_counts(config.num_classes, 0);
@@ -125,20 +127,6 @@ int main()
                             << std::fixed << std::setprecision(1) << percentage 
                             << "% (" << counts[k].first << " points)\n";
             }
-            
-            std::cout << "\n" << std::string(56, '-') << "\n";
-            std::cout << "Performance Benchmark (" << num_iterations << " iterations)\n";
-            std::cout << std::string(56, '-') << "\n";
-            std::cout << "Average time: " << std::fixed << std::setprecision(5) << avg_time << " ms";
-            std::cout << " (" << std::fixed << std::setprecision(0) << (avg_time) << " μs)\n";
-            std::cout << "Min time:     " << std::fixed << std::setprecision(5) << min_time << " ms";
-            std::cout << " (" << std::fixed << std::setprecision(0) << (min_time) << " μs)\n";
-            std::cout << "Max time:     " << std::fixed << std::setprecision(5) << max_time << " ms";
-            std::cout << " (" << std::fixed << std::setprecision(0) << (max_time) << " μs)\n";
-            std::cout << "Throughput:   " << std::fixed << std::setprecision(0) 
-                        << (result.num_points / (avg_time / 1000.0)) << " points/sec\n";
-            std::cout << "FPS (1024pt): " << std::fixed << std::setprecision(1) 
-                        << (1000.0 / avg_time) << " fps\n";
             std::cout << std::string(56, '=') << "\n";
         }
         else {

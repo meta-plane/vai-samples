@@ -17,7 +17,7 @@ cd utils
 This script will:
 - ✅ Download `best_model.pth` from [yanx27/Pointnet_Pointnet2_pytorch](https://github.com/yanx27/Pointnet_Pointnet2_pytorch) (~21MB)
 - ✅ Automatically convert to SafeTensors format
-- ✅ Save to `assets/weights/pointnet2_part_seg.safetensors`
+- ✅ Save to `assets/weights/pointnet_sem_seg.safetensors`
 
 **Model Details:**
 - Source: yanx27/Pointnet_Pointnet2_pytorch

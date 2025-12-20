@@ -32,81 +32,139 @@ void loadPointNetWeightsFromSafeTensors(PointNetSegment& model, const std::strin
     // Load SafeTensors
     SafeTensorsParser st(weights_file.c_str());
     
-    // TNet1 (input transformation network - 3x3)
-    model["encoder.tnet1.mlp.mlp0.weight"] = Tensor(st["tnet1.mlp.0.weight"]);
-    model["encoder.tnet1.mlp.mlp0.bias"] = Tensor(st["tnet1.mlp.0.bias"]);
-    model["encoder.tnet1.mlp.mlp1.weight"] = Tensor(st["tnet1.mlp.1.weight"]);
-    model["encoder.tnet1.mlp.mlp1.bias"] = Tensor(st["tnet1.mlp.1.bias"]);
-    model["encoder.tnet1.mlp.mlp2.weight"] = Tensor(st["tnet1.mlp.2.weight"]);
-    model["encoder.tnet1.mlp.mlp2.bias"] = Tensor(st["tnet1.mlp.2.bias"]);
+    // TNet1 (input transformation network) MLP layers
+    // SafeTensors: tnet1.* -> Model: feat.stn.*
+    model["feat.stn.mlp.mlp0.weight"] = Tensor(st["tnet1.mlp.0.weight"]);
+    model["feat.stn.mlp.mlp0.bias"] = Tensor(st["tnet1.mlp.0.bias"]);
+    model["feat.stn.mlp.mlp0.bn_mean"] = Tensor(st["tnet1.mlp.0.bn_mean"]);
+    model["feat.stn.mlp.mlp0.bn_var"] = Tensor(st["tnet1.mlp.0.bn_var"]);
+    model["feat.stn.mlp.mlp0.bn_gamma"] = Tensor(st["tnet1.mlp.0.bn_gamma"]);
+    model["feat.stn.mlp.mlp0.bn_beta"] = Tensor(st["tnet1.mlp.0.bn_beta"]);
     
-    // FCBNSequence uses block0, block1, lastBlock
-    model["encoder.tnet1.fc.block0.weight"] = Tensor(st["tnet1.fc.0.weight"]);
-    model["encoder.tnet1.fc.block0.bias"] = Tensor(st["tnet1.fc.0.bias"]);
-    uint32_t st_fc0_out = model["encoder.tnet1.fc.block0.weight"].shape()[1];
-    model["encoder.tnet1.fc.block0.bn_mean"] = Tensor(st_fc0_out).set(std::vector<float>(st_fc0_out, 0.0f));
-    model["encoder.tnet1.fc.block0.bn_var"] = Tensor(st_fc0_out).set(std::vector<float>(st_fc0_out, 1.0f));
-    model["encoder.tnet1.fc.block0.bn_gamma"] = Tensor(st_fc0_out).set(std::vector<float>(st_fc0_out, 1.0f));
-    model["encoder.tnet1.fc.block0.bn_beta"] = Tensor(st_fc0_out).set(std::vector<float>(st_fc0_out, 0.0f));
+    model["feat.stn.mlp.mlp1.weight"] = Tensor(st["tnet1.mlp.1.weight"]);
+    model["feat.stn.mlp.mlp1.bias"] = Tensor(st["tnet1.mlp.1.bias"]);
+    model["feat.stn.mlp.mlp1.bn_mean"] = Tensor(st["tnet1.mlp.1.bn_mean"]);
+    model["feat.stn.mlp.mlp1.bn_var"] = Tensor(st["tnet1.mlp.1.bn_var"]);
+    model["feat.stn.mlp.mlp1.bn_gamma"] = Tensor(st["tnet1.mlp.1.bn_gamma"]);
+    model["feat.stn.mlp.mlp1.bn_beta"] = Tensor(st["tnet1.mlp.1.bn_beta"]);
     
-    model["encoder.tnet1.fc.block1.weight"] = Tensor(st["tnet1.fc.1.weight"]);
-    model["encoder.tnet1.fc.block1.bias"] = Tensor(st["tnet1.fc.1.bias"]);
-    uint32_t st_fc1_out = model["encoder.tnet1.fc.block1.weight"].shape()[1];
-    model["encoder.tnet1.fc.block1.bn_mean"] = Tensor(st_fc1_out).set(std::vector<float>(st_fc1_out, 0.0f));
-    model["encoder.tnet1.fc.block1.bn_var"] = Tensor(st_fc1_out).set(std::vector<float>(st_fc1_out, 1.0f));
-    model["encoder.tnet1.fc.block1.bn_gamma"] = Tensor(st_fc1_out).set(std::vector<float>(st_fc1_out, 1.0f));
-    model["encoder.tnet1.fc.block1.bn_beta"] = Tensor(st_fc1_out).set(std::vector<float>(st_fc1_out, 0.0f));
+    model["feat.stn.mlp.mlp2.weight"] = Tensor(st["tnet1.mlp.2.weight"]);
+    model["feat.stn.mlp.mlp2.bias"] = Tensor(st["tnet1.mlp.2.bias"]);
+    model["feat.stn.mlp.mlp2.bn_mean"] = Tensor(st["tnet1.mlp.2.bn_mean"]);
+    model["feat.stn.mlp.mlp2.bn_var"] = Tensor(st["tnet1.mlp.2.bn_var"]);
+    model["feat.stn.mlp.mlp2.bn_gamma"] = Tensor(st["tnet1.mlp.2.bn_gamma"]);
+    model["feat.stn.mlp.mlp2.bn_beta"] = Tensor(st["tnet1.mlp.2.bn_beta"]);
     
-    model["encoder.tnet1.fc.lastBlock.weight"] = Tensor(st["tnet1.fc.2.weight"]);
-    model["encoder.tnet1.fc.lastBlock.bias"] = Tensor(st["tnet1.fc.2.bias"]);
+    // TNet1 FC layers with BatchNorm
+    model["feat.stn.fc.block0.weight"] = Tensor(st["tnet1.fc.0.weight"]);
+    model["feat.stn.fc.block0.bias"] = Tensor(st["tnet1.fc.0.bias"]);
+    model["feat.stn.fc.block0.mean"] = Tensor(st["tnet1.fc.0.mean"]);
+    model["feat.stn.fc.block0.var"] = Tensor(st["tnet1.fc.0.var"]);
+    model["feat.stn.fc.block0.gamma"] = Tensor(st["tnet1.fc.0.gamma"]);
+    model["feat.stn.fc.block0.beta"] = Tensor(st["tnet1.fc.0.beta"]);
+    
+    model["feat.stn.fc.block1.weight"] = Tensor(st["tnet1.fc.1.weight"]);
+    model["feat.stn.fc.block1.bias"] = Tensor(st["tnet1.fc.1.bias"]);
+    model["feat.stn.fc.block1.mean"] = Tensor(st["tnet1.fc.1.mean"]);
+    model["feat.stn.fc.block1.var"] = Tensor(st["tnet1.fc.1.var"]);
+    model["feat.stn.fc.block1.gamma"] = Tensor(st["tnet1.fc.1.gamma"]);
+    model["feat.stn.fc.block1.beta"] = Tensor(st["tnet1.fc.1.beta"]);
+    
+    model["feat.stn.fc.lastBlock.weight"] = Tensor(st["tnet1.fc.2.weight"]);
+    model["feat.stn.fc.lastBlock.bias"] = Tensor(st["tnet1.fc.2.bias"]);
     
     // MLP1 (first feature extraction)
-    model["encoder.mlp1.mlp0.weight"] = Tensor(st["mlp1.0.weight"]);
-    model["encoder.mlp1.mlp0.bias"] = Tensor(st["mlp1.0.bias"]);
-    model["encoder.mlp1.mlp1.weight"] = Tensor(st["mlp1.1.weight"]);
-    model["encoder.mlp1.mlp1.bias"] = Tensor(st["mlp1.1.bias"]);
+    // SafeTensors: mlp1.0.* -> Model: feat.conv.mlp0.*
+    model["feat.conv.mlp0.weight"] = Tensor(st["mlp1.0.weight"]);
+    model["feat.conv.mlp0.bias"] = Tensor(st["mlp1.0.bias"]);
+    model["feat.conv.mlp0.bn_mean"] = Tensor(st["mlp1.0.bn_mean"]);
+    model["feat.conv.mlp0.bn_var"] = Tensor(st["mlp1.0.bn_var"]);
+    model["feat.conv.mlp0.bn_gamma"] = Tensor(st["mlp1.0.bn_gamma"]);
+    model["feat.conv.mlp0.bn_beta"] = Tensor(st["mlp1.0.bn_beta"]);
     
-    // TNet2 (feature transformation network - 64x64)
-    model["encoder.tnet2.mlp.mlp0.weight"] = Tensor(st["tnet2.mlp.0.weight"]);
-    model["encoder.tnet2.mlp.mlp0.bias"] = Tensor(st["tnet2.mlp.0.bias"]);
-    model["encoder.tnet2.mlp.mlp1.weight"] = Tensor(st["tnet2.mlp.1.weight"]);
-    model["encoder.tnet2.mlp.mlp1.bias"] = Tensor(st["tnet2.mlp.1.bias"]);
-    model["encoder.tnet2.mlp.mlp2.weight"] = Tensor(st["tnet2.mlp.2.weight"]);
-    model["encoder.tnet2.mlp.mlp2.bias"] = Tensor(st["tnet2.mlp.2.bias"]);
+    // TNet2 (feature transformation network - 64x64) MLP layers
+    // SafeTensors: tnet2.* -> Model: feat.fstn.*
+    model["feat.fstn.mlp.mlp0.weight"] = Tensor(st["tnet2.mlp.0.weight"]);
+    model["feat.fstn.mlp.mlp0.bias"] = Tensor(st["tnet2.mlp.0.bias"]);
+    model["feat.fstn.mlp.mlp0.bn_mean"] = Tensor(st["tnet2.mlp.0.bn_mean"]);
+    model["feat.fstn.mlp.mlp0.bn_var"] = Tensor(st["tnet2.mlp.0.bn_var"]);
+    model["feat.fstn.mlp.mlp0.bn_gamma"] = Tensor(st["tnet2.mlp.0.bn_gamma"]);
+    model["feat.fstn.mlp.mlp0.bn_beta"] = Tensor(st["tnet2.mlp.0.bn_beta"]);
     
-    // FCBNSequence uses block0, block1, lastBlock
-    model["encoder.tnet2.fc.block0.weight"] = Tensor(st["tnet2.fc.0.weight"]);
-    model["encoder.tnet2.fc.block0.bias"] = Tensor(st["tnet2.fc.0.bias"]);
-    uint32_t st_tnet2_fc0_out = model["encoder.tnet2.fc.block0.weight"].shape()[1];
-    model["encoder.tnet2.fc.block0.bn_mean"] = Tensor(st_tnet2_fc0_out).set(std::vector<float>(st_tnet2_fc0_out, 0.0f));
-    model["encoder.tnet2.fc.block0.bn_var"] = Tensor(st_tnet2_fc0_out).set(std::vector<float>(st_tnet2_fc0_out, 1.0f));
-    model["encoder.tnet2.fc.block0.bn_gamma"] = Tensor(st_tnet2_fc0_out).set(std::vector<float>(st_tnet2_fc0_out, 1.0f));
-    model["encoder.tnet2.fc.block0.bn_beta"] = Tensor(st_tnet2_fc0_out).set(std::vector<float>(st_tnet2_fc0_out, 0.0f));
+    model["feat.fstn.mlp.mlp1.weight"] = Tensor(st["tnet2.mlp.1.weight"]);
+    model["feat.fstn.mlp.mlp1.bias"] = Tensor(st["tnet2.mlp.1.bias"]);
+    model["feat.fstn.mlp.mlp1.bn_mean"] = Tensor(st["tnet2.mlp.1.bn_mean"]);
+    model["feat.fstn.mlp.mlp1.bn_var"] = Tensor(st["tnet2.mlp.1.bn_var"]);
+    model["feat.fstn.mlp.mlp1.bn_gamma"] = Tensor(st["tnet2.mlp.1.bn_gamma"]);
+    model["feat.fstn.mlp.mlp1.bn_beta"] = Tensor(st["tnet2.mlp.1.bn_beta"]);
     
-    model["encoder.tnet2.fc.block1.weight"] = Tensor(st["tnet2.fc.1.weight"]);
-    model["encoder.tnet2.fc.block1.bias"] = Tensor(st["tnet2.fc.1.bias"]);
-    uint32_t st_tnet2_fc1_out = model["encoder.tnet2.fc.block1.weight"].shape()[1];
-    model["encoder.tnet2.fc.block1.bn_mean"] = Tensor(st_tnet2_fc1_out).set(std::vector<float>(st_tnet2_fc1_out, 0.0f));
-    model["encoder.tnet2.fc.block1.bn_var"] = Tensor(st_tnet2_fc1_out).set(std::vector<float>(st_tnet2_fc1_out, 1.0f));
-    model["encoder.tnet2.fc.block1.bn_gamma"] = Tensor(st_tnet2_fc1_out).set(std::vector<float>(st_tnet2_fc1_out, 1.0f));
-    model["encoder.tnet2.fc.block1.bn_beta"] = Tensor(st_tnet2_fc1_out).set(std::vector<float>(st_tnet2_fc1_out, 0.0f));
+    model["feat.fstn.mlp.mlp2.weight"] = Tensor(st["tnet2.mlp.2.weight"]);
+    model["feat.fstn.mlp.mlp2.bias"] = Tensor(st["tnet2.mlp.2.bias"]);
+    model["feat.fstn.mlp.mlp2.bn_mean"] = Tensor(st["tnet2.mlp.2.bn_mean"]);
+    model["feat.fstn.mlp.mlp2.bn_var"] = Tensor(st["tnet2.mlp.2.bn_var"]);
+    model["feat.fstn.mlp.mlp2.bn_gamma"] = Tensor(st["tnet2.mlp.2.bn_gamma"]);
+    model["feat.fstn.mlp.mlp2.bn_beta"] = Tensor(st["tnet2.mlp.2.bn_beta"]);
     
-    model["encoder.tnet2.fc.lastBlock.weight"] = Tensor(st["tnet2.fc.2.weight"]);
-    model["encoder.tnet2.fc.lastBlock.bias"] = Tensor(st["tnet2.fc.2.bias"]);
+    // TNet2 FC layers with BatchNorm
+    model["feat.fstn.fc.block0.weight"] = Tensor(st["tnet2.fc.0.weight"]);
+    model["feat.fstn.fc.block0.bias"] = Tensor(st["tnet2.fc.0.bias"]);
+    model["feat.fstn.fc.block0.mean"] = Tensor(st["tnet2.fc.0.mean"]);
+    model["feat.fstn.fc.block0.var"] = Tensor(st["tnet2.fc.0.var"]);
+    model["feat.fstn.fc.block0.gamma"] = Tensor(st["tnet2.fc.0.gamma"]);
+    model["feat.fstn.fc.block0.beta"] = Tensor(st["tnet2.fc.0.beta"]);
+    
+    model["feat.fstn.fc.block1.weight"] = Tensor(st["tnet2.fc.1.weight"]);
+    model["feat.fstn.fc.block1.bias"] = Tensor(st["tnet2.fc.1.bias"]);
+    model["feat.fstn.fc.block1.mean"] = Tensor(st["tnet2.fc.1.mean"]);
+    model["feat.fstn.fc.block1.var"] = Tensor(st["tnet2.fc.1.var"]);
+    model["feat.fstn.fc.block1.gamma"] = Tensor(st["tnet2.fc.1.gamma"]);
+    model["feat.fstn.fc.block1.beta"] = Tensor(st["tnet2.fc.1.beta"]);
+    
+    model["feat.fstn.fc.lastBlock.weight"] = Tensor(st["tnet2.fc.2.weight"]);
+    model["feat.fstn.fc.lastBlock.bias"] = Tensor(st["tnet2.fc.2.bias"]);
     
     // MLP2 (second feature extraction)
-    model["encoder.mlp2.mlp0.weight"] = Tensor(st["mlp2.0.weight"]);
-    model["encoder.mlp2.mlp0.bias"] = Tensor(st["mlp2.0.bias"]);
-    model["encoder.mlp2.mlp1.weight"] = Tensor(st["mlp2.1.weight"]);
-    model["encoder.mlp2.mlp1.bias"] = Tensor(st["mlp2.1.bias"]);
+    // SafeTensors: mlp2.0.* -> Model: feat.conv.mlp1.*
+    model["feat.conv.mlp1.weight"] = Tensor(st["mlp2.0.weight"]);
+    model["feat.conv.mlp1.bias"] = Tensor(st["mlp2.0.bias"]);
+    model["feat.conv.mlp1.bn_mean"] = Tensor(st["mlp2.0.bn_mean"]);
+    model["feat.conv.mlp1.bn_var"] = Tensor(st["mlp2.0.bn_var"]);
+    model["feat.conv.mlp1.bn_gamma"] = Tensor(st["mlp2.0.bn_gamma"]);
+    model["feat.conv.mlp1.bn_beta"] = Tensor(st["mlp2.0.bn_beta"]);
     
-    // Segmentation head
-    model["segHead.mlp0.weight"] = Tensor(st["segHead.0.weight"]);
-    model["segHead.mlp0.bias"] = Tensor(st["segHead.0.bias"]);
-    model["segHead.mlp1.weight"] = Tensor(st["segHead.1.weight"]);
-    model["segHead.mlp1.bias"] = Tensor(st["segHead.1.bias"]);
-    model["segHead.mlp2.weight"] = Tensor(st["segHead.2.weight"]);
-    model["segHead.mlp2.bias"] = Tensor(st["segHead.2.bias"]);
+    // SafeTensors: mlp2.1.* -> Model: feat.conv.mlp2.* (PointWiseConvNode - no ReLU)
+    model["feat.conv.mlp2.weight"] = Tensor(st["mlp2.1.weight"]);
+    model["feat.conv.mlp2.bias"] = Tensor(st["mlp2.1.bias"]);
+    model["feat.conv.mlp2.bn_mean"] = Tensor(st["mlp2.1.bn_mean"]);
+    model["feat.conv.mlp2.bn_var"] = Tensor(st["mlp2.1.bn_var"]);
+    model["feat.conv.mlp2.bn_gamma"] = Tensor(st["mlp2.1.bn_gamma"]);
+    model["feat.conv.mlp2.bn_beta"] = Tensor(st["mlp2.1.bn_beta"]);
+    
+    // Segmentation head (MLPSequence with BatchNorm + ReLU on all but last layer)
+    // SafeTensors: segHead.0-3.* -> Model: conv1-4.*
+    model["conv1.weight"] = Tensor(st["segHead.0.weight"]);
+    model["conv1.bias"] = Tensor(st["segHead.0.bias"]);
+    model["conv1.bn_mean"] = Tensor(st["segHead.0.bn_mean"]);
+    model["conv1.bn_var"] = Tensor(st["segHead.0.bn_var"]);
+    model["conv1.bn_gamma"] = Tensor(st["segHead.0.bn_gamma"]);
+    model["conv1.bn_beta"] = Tensor(st["segHead.0.bn_beta"]);
+    
+    model["conv2.weight"] = Tensor(st["segHead.1.weight"]);
+    model["conv2.bias"] = Tensor(st["segHead.1.bias"]);
+    model["conv2.bn_mean"] = Tensor(st["segHead.1.bn_mean"]);
+    model["conv2.bn_var"] = Tensor(st["segHead.1.bn_var"]);
+    model["conv2.bn_gamma"] = Tensor(st["segHead.1.bn_gamma"]);
+    model["conv2.bn_beta"] = Tensor(st["segHead.1.bn_beta"]);
+    
+    model["conv3.weight"] = Tensor(st["segHead.2.weight"]);
+    model["conv3.bias"] = Tensor(st["segHead.2.bias"]);
+    model["conv3.bn_mean"] = Tensor(st["segHead.2.bn_mean"]);
+    model["conv3.bn_var"] = Tensor(st["segHead.2.bn_var"]);
+    model["conv3.bn_gamma"] = Tensor(st["segHead.2.bn_gamma"]);
+    model["conv3.bn_beta"] = Tensor(st["segHead.2.bn_beta"]);
+    
+    model["conv4.weight"] = Tensor(st["segHead.3.weight"]);
+    model["conv4.bias"] = Tensor(st["segHead.3.bias"]);
     
     std::cout << "✓ All weights loaded from SafeTensors" << std::endl;
 }

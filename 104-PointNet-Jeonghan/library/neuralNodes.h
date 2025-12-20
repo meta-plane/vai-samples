@@ -174,6 +174,24 @@ public:
     void run(CommandBuffer cmdBuff) override;
 };
 
+// SliceNode: [N, C] → [N, slice_size]
+// Extracts a slice of channels from input tensor
+// Example: SliceNode(3, 6) extracts channels [3:9] from input
+class SliceNode : public Node
+{
+    uint32_t start_channel;  // Starting channel index (inclusive)
+    uint32_t end_channel;    // Ending channel index (exclusive)
+    
+    ComputePipeline slice;
+    DescriptorSet sliceDescSet;
+
+public:
+    // Extract channels [start, end)
+    SliceNode(uint32_t start, uint32_t end);
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
 class ReShapeNode : public Node
 {
     ComputePipeline copy;

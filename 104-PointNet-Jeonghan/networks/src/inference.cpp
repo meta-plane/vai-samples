@@ -63,38 +63,52 @@ SegmentationResult segment(
     SegmentationResult result;
     
     try {
-        // Use config.channel if specified, otherwise auto-detect
-        uint32_t channels = config.channel;
-        if (channels == 0) {
-            // Auto-detect input dimension (3 for xyz-only, 9 for xyz+rgb+normalized)
-            channels = 3;  // Default: xyz only
-            if (point_cloud.size() % 9 == 0 && point_cloud.size() % 3 == 0) {
-                // Could be either 3 or 9 - check if size is divisible by 9
-                // If divisible by 9, assume 9-dim (yanx27 format)
-                channels = 9;
-            } else if (point_cloud.size() % 3 != 0) {
-                result.error_message = "Invalid point cloud: size must be multiple of 3 or 9";
-                return result;
-            }
-        }
-        
-        // Validate that point cloud size matches expected channels
-        if (point_cloud.size() % channels != 0) {
-            result.error_message = "Invalid point cloud: size must be multiple of " + std::to_string(channels);
-            return result;
-        }
-        
-        uint32_t num_points = point_cloud.size() / channels;
+        // Detect actual data format (3 for xyz, 9 for xyz+rgb+normalized)
+        uint32_t data_channels = (point_cloud.size() % 9 == 0) ? 9 : 3;
+        uint32_t num_points = point_cloud.size() / data_channels;
         result.num_points = num_points;
         result.num_classes = config.num_classes;
         
-        if (config.verbose) {
-            std::cout << "Input: [" << num_points << ", " << channels << "] ";
-            std::cout << (channels == 9 ? "(xyz+rgb+normalized)" : "(xyz only)") << std::endl;
+        // Expand 3-channel data to 9-channel if model expects 9
+        std::vector<float> model_input;
+        if (data_channels == 3 && config.channel == 9) {
+            // Expand xyz to [xyz, rgb=1.0, normalized_xyz]
+            model_input.reserve(num_points * 9);
+            for (uint32_t i = 0; i < num_points; ++i) {
+                float x = point_cloud[i * 3 + 0];
+                float y = point_cloud[i * 3 + 1];
+                float z = point_cloud[i * 3 + 2];
+                
+                // xyz
+                model_input.push_back(x);
+                model_input.push_back(y);
+                model_input.push_back(z);
+                
+                // rgb (default to white for geometric-only data)
+                model_input.push_back(1.0f);
+                model_input.push_back(1.0f);
+                model_input.push_back(1.0f);
+                
+                // normalized xyz (same as xyz since already normalized)
+                model_input.push_back(x);
+                model_input.push_back(y);
+                model_input.push_back(z);
+            }
+            
+            if (config.verbose) {
+                std::cout << "Input: [" << num_points << ", 3] expanded to [" 
+                          << num_points << ", 9] (xyz+rgb+normalized)" << std::endl;
+            }
+        } else {
+            model_input = point_cloud;
+            if (config.verbose) {
+                std::cout << "Input: [" << num_points << ", " << data_channels << "] "
+                          << (data_channels == 9 ? "(xyz+rgb+normalized)" : "(xyz only)") << std::endl;
+            }
         }
         
-        // Create input tensor [N, channels]
-        Tensor input_tensor = Tensor(num_points, channels).set(point_cloud);
+        // Create input tensor
+        Tensor input_tensor = Tensor(num_points, config.channel).set(model_input);
         
         // Run inference with timing
         auto start = std::chrono::high_resolution_clock::now();

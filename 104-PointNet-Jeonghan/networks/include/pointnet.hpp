@@ -189,39 +189,39 @@ MLPSequence(const uint32_t (&)[N]) -> MLPSequence<N - 1>;
 
 
 // TNetBlock class - Transformation Matrix Generator
-// Simplified: Only generates transformation matrix (MatMul separated)
-// Input: [N, K] point cloud
-// Output: [K, K] transformation matrix
+// Input: [N, inputDim] point cloud
+// Output: [outDim, outDim] transformation matrix
 class TNetBlock : public NodeGroup
 {
-    uint32_t K;
+    uint32_t outDim;
     
     // Transformation matrix generation pipeline
-    MLPSequence<3> mlp;              // [N, K] → [N, 64] → [N, 128] → [N, 1024]
+    MLPSequence<3> mlp;              // [N, inputDim] → [N, 64] → [N, 128] → [N, 1024]
     MaxPooling1DNode maxpool;        // [N, 1024] → [1024]
-    FCBNSequence<3> fc;              // [1024] → [512] → [256] → [K²]
-    ReShapeNode reshape_matrix;      // [K²] → [K, K]
-    AddIdentityNode add_identity;    // [K, K] + I → [K, K]
+    FCBNSequence<3> fc;              // [1024] → [512] → [256] → [outDim²]
+    ReShapeNode reshape_matrix;      // [outDim²] → [outDim, outDim]
+    AddIdentityNode add_identity;    // [outDim, outDim] + I → [outDim, outDim]
 
 public:
-    TNetBlock(uint32_t inputDim)
+    // inputDim: input feature channels
+    // outDim: output matrix size (default = inputDim)
+    TNetBlock(uint32_t inputDim, uint32_t outDim = 0)
     : NodeGroup()
-    , K(inputDim)
+    , outDim(outDim == 0 ? inputDim : outDim)
     , mlp({inputDim, 64, 128, 1024})
     , maxpool()
-    , fc({1024, 512, 256, K * K})
-    , reshape_matrix({K, K})
+    , fc({1024, 512, 256, this->outDim * this->outDim})
+    , reshape_matrix({this->outDim, this->outDim})
     , add_identity()
     {
-        // Simple linear pipeline: Generate transformation matrix only
-        // Input [N, K] → MLP → MaxPool → FC → Reshape → AddIdentity → Output [K, K]
-        
+        // Generate transformation matrix
+        // Input [N, inputDim] → MLP → MaxPool → FC → Reshape → AddIdentity → Output [outDim, outDim]
         
         // Connect pipeline
         mlp - maxpool - fc - reshape_matrix - add_identity;
         
-        defineSlot("in0", mlp.slot("in0"));  // Input: point cloud [N, K]
-        defineSlot("out0", add_identity.slot("out0"));  // Output: transform matrix [K, K]
+        defineSlot("in0", mlp.slot("in0"));  // Input: point cloud [N, inputDim]
+        defineSlot("out0", add_identity.slot("out0"));  // Output: transform matrix [outDim, outDim]
     }
 
     Tensor& operator[](const std::string& name)
@@ -242,13 +242,18 @@ public:
 // Output: [N, 1024] point-wise features
 class PointNetEncoder : public NodeGroup
 {
-    uint32_t channel;          // Input channel dimension (3 or 6)
-    IdentityNode split1;       // Split input for STN dual-path
-    IdentityNode split2;       // Split conv1 output for FSTN dual-path
+    uint32_t channel;          // Input channel dimension (3, 6, or 9)
+    
+    IdentityNode split_for_stn;    // Split input: one for STN, one for transform
+    IdentityNode split_for_slice;  // Split input: one for xyz, one for rest
+    SliceNode slice_xyz;           // Extract xyz [0:3]
+    SliceNode slice_rest;          // Extract rest [3:channel] if channel > 3
+    ConcatNode concat_after_transform; // Concat transformed xyz + rest
+    IdentityNode split2;           // Split conv1 output for FSTN dual-path
     
 public:  // Make public for direct access
-    TNetBlock stn;             // input transform: generates channel x channel matrix (STN3d)
-    MatMulNode matmul1;        // apply transform: [N, channel] @ [channel, channel] → [N, channel]
+    TNetBlock stn;             // input transform: channel → 3x3 matrix (STN3d)
+    MatMulNode matmul1;        // apply transform: [N, 3] @ [3, 3] → [N, 3]
     MLPSequence<1> conv1;      // (channel → 64) - first convolution with ReLU
     TNetBlock fstn;            // feature transform: generates 64x64 matrix (STNkd)
     MatMulNode matmul2;        // apply transform: [N,64] @ [64,64] → [N,64]
@@ -259,43 +264,57 @@ public:
     PointNetEncoder(uint32_t channel = 3)
     : NodeGroup()
     , channel(channel)
-    , split1()
+    , split_for_stn()
+    , split_for_slice()
+    , slice_xyz(0, 3)                      // Extract xyz [0:3]
+    , slice_rest(3, channel > 3 ? channel : 4)  // Extract rest [3:channel]
+    , concat_after_transform()
     , split2()
-    , stn(channel)             // STN3d with channel-dim input
+    , stn(channel, 3)                      // STN3d: full channel input → 3x3 matrix
     , matmul1()
-    , conv1({channel, 64})     // First conv layer with ReLU
-    , fstn(64)                 // STNkd with 64-dim feature
+    , conv1({channel, 64})                 // First conv layer with ReLU
+    , fstn(64, 64)                         // STNkd: 64-dim input → 64x64 matrix
     , matmul2()
-    , conv2({64, 128})         // Second conv layer with ReLU
-    , conv3(128, 1024)         // Third conv layer (Conv+BN, NO ReLU)
+    , conv2({64, 128})                     // Second conv layer with ReLU
+    , conv3(128, 1024)                     // Third conv layer (Conv+BN, NO ReLU)
     {
-        // yanx27 PointNet Encoder Architecture:
+        // yanx27 PointNet Encoder Architecture (exact implementation):
         //
-        // Input [N, channel] (channel = 3: x,y,z  OR  6: x,y,z + normals)
+        // Input [N, channel]
         //   ↓
-        // Split1 (IdentityNode)
-        //   ├→ out0 → STN → [channel, channel] matrix → MatMul1.in1
-        //   └→ out1 ───────────────────────────────→ MatMul1.in0
-        //                                              ↓
-        //   MatMul1 output [N, channel] → Conv1 → [N, 64] (pointfeat)
-        //                                  ↓
-        //                              Split2 (IdentityNode)
-        //   ├→ out0 → FSTN → [64,64] matrix → MatMul2.in1
-        //   └→ out1 ───────────────────────→ MatMul2.in0
-        //                                     ↓
-        //   MatMul2 output [N, 64] → Conv2-3 → [N, 1024]
-        //   ↓
-        // Output: [N, 1024] features
+        // split_for_stn
+        //   ├─ out0 → STN (전체 channel 입력) → [3, 3] matrix ──────┐
+        //   │                                                        │
+        //   └─ out1 → split_for_slice                                │
+        //             ├─ out0 → slice_xyz [N, 3] ─────────────────┤─ MatMul → [N, 3]
+        //             │                                             │
+        //             └─ out1 → slice_rest [N, channel-3] ─────────────────┐
+        //                                                                   │
+        //                                      MatMul output [N, 3] ───────┤─ Concat
+        //                                                                   │
+        //                                              [N, channel-3] ──────┘
+        //                                                     ↓
+        //                                              [N, channel] → Conv1
         
         // Single external input
-        defineSlot("in0", split1.slot("in0"));
+        defineSlot("in0", split_for_stn.slot("in0"));
         
-        // Path 1: STN (channel x channel transformation)
-        split1 / "out0" - "in0" / matmul1;        // Input → MatMul1.in0 [N, channel]
-        split1 / "out1" - stn - "in1" / matmul1;  // Input → STN → MatMul1.in1 [channel, channel]
-        
-        // Apply first convolution
-        matmul1 - conv1;  // [N, channel] → [N, 64]
+        if (channel > 3) {
+            // For channel > 3: STN uses full channel, but transform only xyz
+            split_for_stn / "out0" - stn - "in1" / matmul1;  // Full channel → STN → [3,3]
+            split_for_stn / "out1" - split_for_slice;        // Full channel → split
+            
+            split_for_slice / "out0" - slice_xyz - "in0" / matmul1;  // xyz → MatMul
+            split_for_slice / "out1" - slice_rest - "in1" / concat_after_transform;  // rest → Concat
+            
+            matmul1 - "in0" / concat_after_transform;  // transformed xyz → Concat
+            concat_after_transform - conv1;            // [N, channel] → Conv1
+        } else {
+            // For channel = 3: direct transformation
+            split_for_stn / "out0" - "in0" / matmul1;        // Input → MatMul.in0
+            split_for_stn / "out1" - stn - "in1" / matmul1;  // Input → STN → MatMul.in1
+            matmul1 - conv1;
+        }
         
         // Path 2: FSTN (64x64 transformation) on conv1 output
         conv1 - split2;

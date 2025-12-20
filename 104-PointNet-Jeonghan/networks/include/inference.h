@@ -18,8 +18,7 @@ namespace networks {
  * Inference Configuration
  */
 struct InferenceConfig {
-    // Paths (relative to 104-PointNet-Jeonghan directory)
-    std::string weights_file = "assets/weights/pointnet_weights.json";
+    std::string weights_file = "assets/weights/pointnet_sem_seg.safetensors";
     
     // Model parameters
     uint32_t num_classes = 10;

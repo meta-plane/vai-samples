@@ -646,6 +646,34 @@ void main() {
 }
 )";
 
+// Slice shader: extract channels [start, end) from [N, C_in] → [N, slice_size]
+static const char* src_slice = R"(
+#version 450
+layout(local_size_x = 256) in;
+
+layout(binding = 0) readonly buffer In { float input_data[]; };   // [N, C_in]
+layout(binding = 1) writeonly buffer Out { float output_data[]; }; // [N, slice_size]
+
+layout(push_constant) uniform PushConstants {
+    uint N;            // number of points
+    uint C_in;         // input channels
+    uint start_ch;     // start channel index
+    uint slice_size;   // number of channels to slice (end - start)
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = N * slice_size;
+    if (idx >= total) return;
+    
+    uint n = idx / slice_size;     // point index
+    uint c = idx % slice_size;     // channel index in output
+    
+    uint in_idx = n * C_in + start_ch + c;
+    output_data[idx] = input_data[in_idx];
+}
+)";
+
 // Matrix multiplication shader: C[N, M] = A[N, K] @ B[K, M]
 // No bias addition (pure matrix multiplication)
 static const char* src_matmul = R"(
@@ -1484,7 +1512,68 @@ void ConcatNode::run(CommandBuffer cmdBuff)
             / out0.buffer()
             / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
         );
-}  
+}
+
+// ============================================================================
+// SliceNode - Extract channel slice from tensor
+// ============================================================================
+
+SliceNode::SliceNode(uint32_t start, uint32_t end)
+: start_channel(start), end_channel(end)
+{
+    setName("SliceNode");
+    addSlot("in0", NodeSlot::input);   // [N, C_in]
+    addSlot("out0", NodeSlot::output); // [N, slice_size]
+    
+    slice = requestPipeline(src_slice);
+    sliceDescSet = slice.descSetLayout(0).newDescSet(gDestSetPool);
+}
+
+void SliceNode::prepare()
+{
+    Tensor& in0 = (*this)["in0"];
+    
+    _ASSERT(in0.validShape());
+    _ASSERT(in0.shape().size() == 2);
+    
+    uint32_t N = in0.shape()[0];
+    uint32_t C_in = in0.shape()[1];
+    
+    _ASSERT(start_channel < end_channel);
+    _ASSERT(end_channel <= C_in);
+    
+    uint32_t slice_size = end_channel - start_channel;
+    // Output shape: [N, slice_size]
+    (*this)["out0"] = Tensor(N, slice_size);
+}
+
+void SliceNode::run(CommandBuffer cmdBuff)
+{
+    Tensor& in0 = (*this)["in0"];   // [N, C_in]
+    Tensor& out0 = (*this)["out0"]; // [N, slice_size]
+    
+    uint32_t N = in0.shape()[0];
+    uint32_t C_in = in0.shape()[1];
+    uint32_t slice_size = end_channel - start_channel;
+    
+    sliceDescSet.write({
+        in0.buffer(),
+        out0.buffer()
+    });
+    
+    uint32_t pc[] = {N, C_in, start_channel, slice_size};
+    
+    cmdBuff
+        .bindPipeline(slice)
+        .bindDescSets({sliceDescSet})
+        .setPushConstants(0, sizeof(pc), pc)
+        .dispatch0((N * slice_size + 255) / 256, 1, 1)
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / out0.buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
 
 ReShapeNode::ReShapeNode()
 {
