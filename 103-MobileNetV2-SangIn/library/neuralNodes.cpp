@@ -9,12 +9,12 @@ layout(local_size_x = 64) in;
 layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };
 layout(set = 0, binding = 1) buffer InBuffer { float in0[]; };
 layout(push_constant) uniform PushConstants {
-    int O;
+    uint O;
 };
 
-void main() 
+void main()
 {
-    int o = int(gl_GlobalInvocationID.x);
+    uint o = gl_GlobalInvocationID.x;
     if (o >= O) return;
     out0[o] = max(in0[o], 0.0f);
 })";
@@ -25,12 +25,12 @@ layout(local_size_x = 64) in;
 layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };
 layout(set = 0, binding = 1) buffer InBuffer { float in0[]; };
 layout(push_constant) uniform PushConstants {
-    int O;
+    uint O;
 };
 
-void main() 
+void main()
 {
-    int o = int(gl_GlobalInvocationID.x);
+    uint o = gl_GlobalInvocationID.x;
     if (o >= O) return;
     out0[o] = in0[o];
 })";
@@ -40,12 +40,12 @@ static const char* src_setZero = R"(
 layout(local_size_x = 64) in;
 layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };
 layout(push_constant) uniform PushConstants {
-    int O;
+    uint O;
 };
 
-void main() 
+void main()
 {
-    int o = int(gl_GlobalInvocationID.x);
+    uint o = gl_GlobalInvocationID.x;
     if (o >= O) return;
     out0[o] = 0.0;
 })";
@@ -58,39 +58,39 @@ layout(local_size_x = 64, local_size_y = 4, local_size_z = 4) in;
 layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };
 layout(set = 0, binding = 1) buffer InBuffer { float in0[]; };
 layout(push_constant) uniform PushConstants {
-    int H;      // input height
-    int W;      // input width
-    int C;
-    int P;      // pooling size
+    uint H;      // input height
+    uint W;      // input width
+    uint C;
+    uint P;      // pooling size
 };
 
 void main()
 {
-    int h_ = int(gl_GlobalInvocationID.x);  // output row
-    int w_ = int(gl_GlobalInvocationID.y);  // output col
-    int c = int(gl_GlobalInvocationID.z);   // channel
+    uint h_ = gl_GlobalInvocationID.x;  // output row
+    uint w_ = gl_GlobalInvocationID.y;  // output col
+    uint c = gl_GlobalInvocationID.z;   // channel
 #ifdef DISCARD_TAIL
-    int H_ = H / P;  
-    int W_ = W / P;  
+    uint H_ = H / P;
+    uint W_ = W / P;
 #else
-    int H_ = (H + P - 1) / P;
-    int W_ = (W + P - 1) / P;
+    uint H_ = (H + P - 1) / P;
+    uint W_ = (W + P - 1) / P;
 #endif
     if (h_ >= H_ || w_ >= W_ || c >= C)
         return;
 
-    int h0 = h_ * P;  
-    int w0 = w_ * P;     
+    uint h0 = h_ * P;
+    uint w0 = w_ * P;
     float maxVal = FLT_MIN;
-    for (int dh=0; dh < P; ++dh) 
+    for (uint dh=0; dh < P; ++dh)
     {
-        int h = h0 + dh;  
-        for (int dw=0; dw < P; ++dw) 
+        uint h = h0 + dh;
+        for (uint dw=0; dw < P; ++dw)
         {
-            int w = w0 + dw;
+            uint w = w0 + dw;
 
         #ifndef DISCARD_TAIL
-            if (h < H && w < W) 
+            if (h < H && w < W)
         #endif
             {
                 maxVal = max(maxVal, in0[(h * W + w) * C + c]);
@@ -108,46 +108,46 @@ layout(set = 0, binding = 0) writeonly buffer OutBuffer { float im2colOut[]; };
 layout(set = 0, binding = 1) readonly buffer InBuffer  { float in0[]; };
 
 layout(push_constant) uniform PushConstants {
-    int H;      // input height
-    int W;      // input width
-    int C;      // input channels
-    int K;      // kernel size
-    int S;      // stride
-    int P;      // padding
-    int H_out;  // output height
-    int W_out;  // output width
+    uint H;      // input height
+    uint W;      // input width
+    uint C;      // input channels
+    uint K;      // kernel size
+    uint S;      // stride
+    uint P;      // padding
+    uint H_out;  // output height
+    uint W_out;  // output width
 };
 
-void main() 
+void main()
 {
-    int i = int(gl_GlobalInvocationID.x);  // 0 .. H_out*W_out - 1
-    int j = int(gl_GlobalInvocationID.y);  // 0 .. C*K*K      - 1
+    uint i = gl_GlobalInvocationID.x;  // 0 .. H_out*W_out - 1
+    uint j = gl_GlobalInvocationID.y;  // 0 .. C*K*K      - 1
 
-    int KK  = K * K;
-    int CKK = C * KK;
+    uint KK  = K * K;
+    uint CKK = C * KK;
 
     if (i >= H_out * W_out || j >= CKK)
         return;
 
     // output 좌표
-    int h_out = i / W_out;
-    int w_out = i % W_out;
+    uint h_out = i / W_out;
+    uint w_out = i % W_out;
 
     // 채널 / kernel index
-    int c  = j / KK;
-    int k  = j % KK;
-    int kh = k / K;
-    int kw = k % K;
+    uint c  = j / KK;
+    uint k  = j % KK;
+    uint kh = k / K;
+    uint kw = k % K;
 
     // input 좌표 (stride / padding 적용)
-    int h_in = h_out * S + kh - P;
-    int w_in = w_out * S + kw - P;
+    int h_in = int(h_out * S + kh) - int(P);
+    int w_in = int(w_out * S + kw) - int(P);
 
     float value = 0.0;
-    if (0 <= h_in && h_in < H && 0 <= w_in && w_in < W)
-        value = in0[( (h_in * W) + w_in ) * C + c];
+    if (0 <= h_in && h_in < int(H) && 0 <= w_in && w_in < int(W))
+        value = in0[( (h_in * int(W)) + w_in ) * C + c];
 
-    int out_idx = i * CKK + j;
+    uint out_idx = i * CKK + j;
     im2colOut[out_idx] = value;
 }
 )";
@@ -162,21 +162,21 @@ layout(set = 0, binding = 3) buffer Bias { float b[]; };
 
 // C(MxN) = A(MxK)*B(KxN) + b(1xN)
 layout(push_constant) uniform PushConstants {
-    int M;  // # of batchs
-    int K;  // # of inputs
-    int N;  // # of outputs
+    uint M;  // # of batchs
+    uint K;  // # of inputs
+    uint N;  // # of outputs
 };
 
-void main() 
+void main()
 {
-    int n = int(gl_GlobalInvocationID.x); 
-    int m = int(gl_GlobalInvocationID.y); 
+    uint n = gl_GlobalInvocationID.x;
+    uint m = gl_GlobalInvocationID.y;
 
-    if (m >= M || n >= N) 
+    if (m >= M || n >= N)
         return;
 
     float sum = b[n];
-    for (int k = 0; k < K; ++k)
+    for (uint k = 0; k < K; ++k)
         sum += A[m * K + k] * B[k * N + n];
 
     C[m * N + n] = sum;
@@ -194,25 +194,25 @@ layout(set = 0, binding = 2) buffer Weight   { float B[]; };
 layout(set = 0, binding = 3) buffer Bias     { float b[]; };
 
 layout(push_constant) uniform PushConstants {
-    int M;  // batch
-    int K;  // input size
-    int N;  // output size
+    uint M;  // batch
+    uint K;  // input size
+    uint N;  // output size
 };
 
 void main()
 {
-    int n = int(gl_GlobalInvocationID.x); // output column
-    int m = int(gl_GlobalInvocationID.y); // output row
-    int Pid = int(gl_GlobalInvocationID.z); // split index along K
+    uint n = gl_GlobalInvocationID.x; // output column
+    uint m = gl_GlobalInvocationID.y; // output row
+    uint Pid = gl_GlobalInvocationID.z; // split index along K
 
-    if (n >= N) return; 
+    if (n >= N) return;
 
-    int k0 = Pid * P;
+    uint k0 = Pid * P;
     float sum = (Pid==0) ? b[n] : 0.0;
-    for (int p = 0; p < P; ++p) 
+    for (uint p = 0; p < P; ++p)
     {
-        int k = k0 + p;
-        if (k >= K) 
+        uint k = k0 + p;
+        if (k >= K)
             break;
         sum += A[m * K + k] * B[k * N + n];
     }
@@ -232,30 +232,30 @@ layout(set = 0, binding = 2) buffer Weight   { float B[]; };
 layout(set = 0, binding = 3) buffer Bias     { float b[]; };
 
 layout(push_constant) uniform PushConstants {
-    int M;  // batch
-    int K;  // input size
-    int N;  // output size
+    uint M;  // batch
+    uint K;  // input size
+    uint N;  // output size
 };
 
 shared float sA;
 
 void main()
 {
-    int n = int(gl_GlobalInvocationID.x); // output column
-    int m = int(gl_GlobalInvocationID.y); // output row
-    int Pid = int(gl_GlobalInvocationID.z); // split index along K
+    uint n = gl_GlobalInvocationID.x; // output column
+    uint m = gl_GlobalInvocationID.y; // output row
+    uint Pid = gl_GlobalInvocationID.z; // split index along K
 
-    if (n >= N) return; 
+    if (n >= N) return;
 
-    int k0 = Pid * P;
+    uint k0 = Pid * P;
     float sum = (Pid==0) ? b[n] : 0.0;
-    for (int p = 0; p < P; ++p) 
+    for (uint p = 0; p < P; ++p)
     {
-        int k = k0 + p;
-        if (k >= K) 
+        uint k = k0 + p;
+        if (k >= K)
             break;
 
-        if (gl_LocalInvocationIndex.x == 0) 
+        if (gl_LocalInvocationIndex.x == 0)
             sA = A[m * K + k];
         barrier();
 
@@ -275,35 +275,35 @@ layout(set = 0, binding = 1) buffer InBuffer { float A[]; };
 layout(set = 0, binding = 2) buffer Weight { float B[]; };
 layout(set = 0, binding = 3) buffer Bias { float b[]; };
 
-// C(MxN) = A(MxK)*B(KxN) + b(1xN)  
+// C(MxN) = A(MxK)*B(KxN) + b(1xN)
 layout(push_constant) uniform PushConstants {
-    int M;  // # of batchs
-    int K;  // # of inputs
-    int N;  // # of outputs
+    uint M;  // # of batchs
+    uint K;  // # of inputs
+    uint N;  // # of outputs
 };
 
 shared float As[32 * 32];
 shared float Bs[32 * 32];
 
-void main() 
+void main()
 {
-    int n = int(gl_GlobalInvocationID.x); 
-    int m = int(gl_GlobalInvocationID.y); 
-    int _n = int(gl_LocalInvocationID.x); 
-    int _m = int(gl_LocalInvocationID.y); 
+    uint n = gl_GlobalInvocationID.x;
+    uint m = gl_GlobalInvocationID.y;
+    uint _n = gl_LocalInvocationID.x;
+    uint _m = gl_LocalInvocationID.y;
     bool validThread = (m < M && n < N);
 
     float acc = 0.0;
-    int sharedIdx = _m * 32 + _n;
-    for (int k0 = 0; k0 < K; k0 += 32) 
+    uint sharedIdx = _m * 32 + _n;
+    for (uint k0 = 0; k0 < K; k0 += 32)
     {
-        int n_ = k0 + _n;
-        int m_ = k0 + _m;
+        uint n_ = k0 + _n;
+        uint m_ = k0 + _m;
         As[sharedIdx] = (m < M && n_ < K) ? A[m * K + n_] : 0.0; // A[m, n_]
         Bs[sharedIdx] = (m_ < K && n < N) ? B[m_ * N + n] : 0.0; // B[m_, n]
         barrier();
 
-        for (int k = 0; k < 32; ++k) 
+        for (uint k = 0; k < 32; ++k)
             acc += As[_m * 32 + k] * Bs[k * 32 + _n];
         barrier();
     }
@@ -328,62 +328,62 @@ layout(set = 0, binding = 1) buffer InBuffer { float A[]; };
 layout(set = 0, binding = 2) buffer Weight { float B[]; };
 layout(set = 0, binding = 3) buffer Bias { float b[]; };
 
-// C(MxN) = A(MxK)*B(KxN) + b(1xN)  
+// C(MxN) = A(MxK)*B(KxN) + b(1xN)
 layout(push_constant) uniform PushConstants {
-    int M;  // # of batchs
-    int K;  // # of inputs
-    int N;  // # of outputs
+    uint M;  // # of batchs
+    uint K;  // # of inputs
+    uint N;  // # of outputs
 };
 
 shared float As[BM * BK]; // BMxBK
 shared float Bs[BK * BN]; // BKxBN
 
-void main() 
+void main()
 {
-    int tileCol = int(gl_WorkGroupID.x); 
-    int tileRow = int(gl_WorkGroupID.y); 
-    int t = int(gl_LocalInvocationID.x);
+    uint tileCol = gl_WorkGroupID.x;
+    uint tileRow = gl_WorkGroupID.y;
+    uint t = gl_LocalInvocationID.x;
 
-    int bk = t % BK, d_bk = t / BK;
-    int bn = t % BN, d_bn = t / BN; 
+    uint bk = t % BK, d_bk = t / BK;
+    uint bn = t % BN, d_bn = t / BN;
     /*
     * The matrix row index m is computed in two different contexts:
     *   m = tileRow * BM + d_bk;            // Used when loading A to ensure coalesced global memory access.
     *   m = tileRow * BM + d_bn * TM + tm;  // Used when accessing C multiple times within a single thread.
     */
-    int m = tileRow * BM + d_bk;            // d_bk : 0 ~ (BM*BN)/(TM*BK)-1 = BN-1 => assert BN == BM (Since 0 <= m - tileRow * BM < BM)
-    int n = tileCol * BN + bn;
+    uint m = tileRow * BM + d_bk;            // d_bk : 0 ~ (BM*BN)/(TM*BK)-1 = BN-1 => assert BN == BM (Since 0 <= m - tileRow * BM < BM)
+    uint n = tileCol * BN + bn;
 
-    float result[TM];   for (int tm = 0; tm < TM; ++tm) result[tm] = 0.0;
+    float result[TM];   for (uint tm = 0; tm < TM; ++tm) result[tm] = 0.0;
 #if TRANSPOSE_A
     float regM[TM];
-    int t_t = bk * BM + d_bk; // transposed index of t
+    uint t_t = bk * BM + d_bk; // transposed index of t
 #endif
 
-    for (int k_ = 0; k_ < K; k_ += BK)
+    for (uint k_ = 0; k_ < K; k_ += BK)
     {
-        int k = k_ + bk;
+        uint k = k_ + bk;
     #if TRANSPOSE_A
         As[t_t] = (m < M) && (k < K) ? A[m * K + k] : 0.0;
     #else
-        As[t] = (m < M) && (k < K) ? A[m * K + k] : 0.0;   
+        As[t] = (m < M) && (k < K) ? A[m * K + k] : 0.0;
     #endif
-        
+
         k = k_ + d_bn;                      // d_bn : 0 ~ (BM*BN)/(TM*BN)-1 = BM/TM-1 => assert BM/TM == BK (Since 0 <= m_ - k_ < BK)
-        Bs[t] = (k < K) && (n < N) ? B[k * N + n] : 0.0;  
+        Bs[t] = (k < K) && (n < N) ? B[k * N + n] : 0.0;
         barrier();
 
-        for (int dotIdx = 0; dotIdx < BK; ++dotIdx)
+        for (uint dotIdx = 0; dotIdx < BK; ++dotIdx)
         {
             float regN = Bs[dotIdx * BN + bn];
 
         #if TRANSPOSE_A
-            for (int tm = 0; tm < TM; ++tm)
+            for (uint tm = 0; tm < TM; ++tm)
                 regM[tm] = As[dotIdx * BM + (d_bn * TM + tm)];
-            for (int tm = 0; tm < TM; ++tm)
+            for (uint tm = 0; tm < TM; ++tm)
                 result[tm] += regM[tm] * regN;
         #else
-            for (int tm = 0; tm < TM; ++tm)
+            for (uint tm = 0; tm < TM; ++tm)
                 result[tm] += As[(d_bn * TM + tm) * BK + dotIdx] * regN;
         #endif
         }
@@ -394,9 +394,9 @@ void main()
         return;
 
     float bias = b[n];
-    int m0 = tileRow * BM + d_bn * TM;
+    uint m0 = tileRow * BM + d_bn * TM;
 
-    for (int tm = 0; tm < TM; ++tm)
+    for (uint tm = 0; tm < TM; ++tm)
     {
         m = m0 + tm;
         if (m >= M)
@@ -418,87 +418,87 @@ static const char* src_gemm_multiOut2d = R"(
 * assert: BK/(T/BN) = (BK*TM*TN)/BM is natural number
 */
 
-layout(local_size_x = (BM*BN)/(TM*TN)) in; 
+layout(local_size_x = (BM*BN)/(TM*TN)) in;
 layout(set = 0, binding = 0) buffer OutBuffer { float C[]; };
 layout(set = 0, binding = 1) buffer InBuffer { float A[]; };
 layout(set = 0, binding = 2) buffer Weight   { float B[]; };
 layout(set = 0, binding = 3) buffer Bias     { float b[]; };
 
-// C(MxN) = A(MxK)*B(KxN) + b(1xN)  
+// C(MxN) = A(MxK)*B(KxN) + b(1xN)
 layout(push_constant) uniform PushConstants {
-    int M;  // # of rows (batches)
-    int K;  // # of inputs
-    int N;  // # of outputs
+    uint M;  // # of rows (batches)
+    uint K;  // # of inputs
+    uint N;  // # of outputs
 };
 
 shared float As[BM * BK]; // BMxBK
 shared float Bs[BK * BN]; // BKxBN
 
-void main() 
+void main()
 {
-    int tileCol = int(gl_WorkGroupID.x);
-    int tileRow = int(gl_WorkGroupID.y);
-    int t = int(gl_LocalInvocationID.x);
-    int T = int(gl_WorkGroupSize.x);        // 64 or 256 (== (BM*BN)/(TM*TN))
+    uint tileCol = gl_WorkGroupID.x;
+    uint tileRow = gl_WorkGroupID.y;
+    uint t = gl_LocalInvocationID.x;
+    uint T = gl_WorkGroupSize.x;        // 64 or 256 (== (BM*BN)/(TM*TN))
 
     // A/B 로드용 로컬 인덱스
-    int innerRowA = t / BK;
-    int innerColA = t % BK;
-    int rowStrideA = T / BK;    // 8 or 32
+    uint innerRowA = t / BK;
+    uint innerColA = t % BK;
+    uint rowStrideA = T / BK;    // 8 or 32
 
-    int innerRowB = t / BN;
-    int innerColB = t % BN;
-    int rowStrideB = T / BN;    // 1(64/64) or 2(256/128)
+    uint innerRowB = t / BN;
+    uint innerColB = t % BN;
+    uint rowStrideB = T / BN;    // 1(64/64) or 2(256/128)
 
     // 이 스레드가 계산할 결과 블록 (TMxTN)
-    int t_n = t % (BN / TN);
-    int t_m = t / (BN / TN);
+    uint t_n = t % (BN / TN);
+    uint t_m = t / (BN / TN);
 
     // 결과와 레지스터 캐시
     float threadResults[TM * TN];
-    for (int i = 0; i < TM*TN; ++i) threadResults[i] = 0.0;
+    for (uint i = 0; i < TM*TN; ++i) threadResults[i] = 0.0;
     float regM[TM];
     float regN[TN];
 
-    int m0 = tileRow * BM + innerRowA;
-    int n0 = tileCol * BN + innerColB;
-    int t_t = innerColA * BM + innerRowA; // transposed index of t
+    uint m0 = tileRow * BM + innerRowA;
+    uint n0 = tileCol * BN + innerColB;
+    uint t_t = innerColA * BM + innerRowA; // transposed index of t
 
-    for (int k0 = 0; k0 < K; k0 += BK) 
+    for (uint k0 = 0; k0 < K; k0 += BK)
     {
-        int k = k0 + innerColA;
-        for (int bm = 0; bm < BM; bm += rowStrideA)  // 8(64/8) or 4(128/32)
+        uint k = k0 + innerColA;
+        for (uint bm = 0; bm < BM; bm += rowStrideA)  // 8(64/8) or 4(128/32)
         {
-            int m = m0 + bm;
+            uint m = m0 + bm;
             /*
-            * bm * BK + t 
+            * bm * BK + t
             * == bm * BK + (innerRowA * BK + innerColA)
             * == (bm + innerRowA) * BK + innerColA
-            * transpose => 
+            * transpose =>
             * innerColA * BM + (bm + innerRowA)
             */
             As[bm + t_t] = (m < M && k < K) ? A[m * K + k] : 0.0;
 
         }
-        
-        int n = n0;
-        for (int bk = 0; bk < BK; bk += rowStrideB) // 8(8/1) or 4(8/2)
+
+        uint n = n0;
+        for (uint bk = 0; bk < BK; bk += rowStrideB) // 8(8/1) or 4(8/2)
         {
-            k = k0 + innerRowB + bk; 
+            k = k0 + innerRowB + bk;
             Bs[bk * BN + t] = (k < K && n < N) ? B[k * N + n] : 0.0;
         }
         barrier();
 
-        for (int dotIdx = 0; dotIdx < BK; ++dotIdx) 
+        for (uint dotIdx = 0; dotIdx < BK; ++dotIdx)
         {
-            for (int tm = 0; tm < TM; ++tm)
+            for (uint tm = 0; tm < TM; ++tm)
                 regM[tm] = As[dotIdx * BM + (t_m * TM + tm)];
 
-            for (int tn = 0; tn < TN; ++tn)
+            for (uint tn = 0; tn < TN; ++tn)
                 regN[tn] = Bs[dotIdx * BN + (t_n * TN + tn)];
 
-            for (int tm = 0; tm < TM; ++tm)
-                for (int tn = 0; tn < TN; ++tn)
+            for (uint tm = 0; tm < TM; ++tm)
+                for (uint tn = 0; tn < TN; ++tn)
                     threadResults[tm*TN + tn] += regM[tm] * regN[tn];
         }
         barrier();
@@ -507,18 +507,18 @@ void main()
     m0 = tileRow * BM + t_m * TM;
     n0 = tileCol * BN + t_n * TN;
 
-    for (int tn = 0; tn < TN; ++tn) 
+    for (uint tn = 0; tn < TN; ++tn)
     {
-        int n = n0 + tn;
+        uint n = n0 + tn;
         if (n >= N)
             break;
 
         float bias = b[n];
-        for (int tm = 0; tm < TM; ++tm) 
+        for (uint tm = 0; tm < TM; ++tm)
         {
-            int m = m0 + tm;
+            uint m = m0 + tm;
             if (m >= M)
-                break; 
+                break;
             C[m * N + n] = threadResults[tm*TN + tn] + bias;
         }
     }
@@ -537,45 +537,44 @@ layout(set = 0, binding = 2) readonly buffer WeightBuffer { float weight[]; };
 layout(set = 0, binding = 3) readonly buffer BiasBuffer { float bias[]; };
 
 layout(push_constant) uniform PushConstants {
-    int H;      // Input Height
-    int W;      // Input Width
-    int C;      // Channels
-    int K;      // Kernel Size
-    int Stride; // Stride
-    int Padding; // Padding
-    int H_out;  // Output Height
-    int W_out;  // Output Width
+    uint H;      // Input Height
+    uint W;      // Input Width
+    uint C;      // Channels
+    uint K;      // Kernel Size
+    uint Stride; // Stride
+    uint Padding; // Padding
+    uint H_out;  // Output Height
+    uint W_out;  // Output Width
 };
 
-void main() 
+void main()
 {
-    int w_out = int(gl_GlobalInvocationID.x);
-    int h_out = int(gl_GlobalInvocationID.y);
-    int c = int(gl_GlobalInvocationID.z);
+    uint w_out = gl_GlobalInvocationID.x;
+    uint h_out = gl_GlobalInvocationID.y;
+    uint c = gl_GlobalInvocationID.z;
 
     if (w_out >= W_out || h_out >= H_out || c >= C)
         return;
 
     float sum = bias[c];
-    int K_2 = K / 2;
 
-    for (int kh = 0; kh < K; ++kh)
+    for (uint kh = 0; kh < K; ++kh)
     {
-        for (int kw = 0; kw < K; ++kw)
+        for (uint kw = 0; kw < K; ++kw)
         {
-            int h_in = h_out * Stride + kh - Padding;
-            int w_in = w_out * Stride + kw - Padding;
+            int h_in = int(h_out * Stride + kh) - int(Padding);
+            int w_in = int(w_out * Stride + kw) - int(Padding);
 
-            if (h_in >= 0 && h_in < H && w_in >= 0 && w_in < W)
+            if (h_in >= 0 && h_in < int(H) && w_in >= 0 && w_in < int(W))
             {
-                int input_idx = (h_in * W + w_in) * C + c;
-                int k = kh * K + kw;
+                uint input_idx = (h_in * int(W) + w_in) * C + c;
+                uint k = kh * K + kw;
                 sum += in0[input_idx] * weight[k * C + c]; // [K*K, C] row-major 가정
             }
         }
     }
 
-    int out_idx = (h_out * W_out + w_out) * C + c;
+    uint out_idx = (h_out * W_out + w_out) * C + c;
     out0[out_idx] = sum;
 }
 )";
@@ -588,12 +587,12 @@ layout(set = 0, binding = 1) readonly buffer InBuffer0 { float in0[]; };
 layout(set = 0, binding = 2) readonly buffer InBuffer1 { float in1[]; };
 
 layout(push_constant) uniform PushConstants {
-    int N; // Total elements
+    uint N; // Total elements
 };
 
-void main() 
+void main()
 {
-    int i = int(gl_GlobalInvocationID.x);
+    uint i = gl_GlobalInvocationID.x;
     if (i >= N) return;
     out0[i] = in0[i] + in1[i];
 }
@@ -606,22 +605,22 @@ layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };
 layout(set = 0, binding = 1) readonly buffer InBuffer { float in0[]; };
 
 layout(push_constant) uniform PushConstants {
-    int H;
-    int W;
-    int C;
+    uint H;
+    uint W;
+    uint C;
 };
 
-void main() 
+void main()
 {
-    int c = int(gl_GlobalInvocationID.x);
+    uint c = gl_GlobalInvocationID.x;
     if (c >= C) return;
 
     float sum = 0.0;
-    for (int h = 0; h < H; ++h)
+    for (uint h = 0; h < H; ++h)
     {
-        for (int w = 0; w < W; ++w)
+        for (uint w = 0; w < W; ++w)
         {
-            int idx = (h * W + w) * C + c;
+            uint idx = (h * W + w) * C + c;
             sum += in0[idx];
         }
     }
@@ -641,18 +640,18 @@ layout(set = 0, binding = 4) readonly buffer Gamma { float gamma[]; };
 layout(set = 0, binding = 5) readonly buffer Beta { float beta[]; };
 
 layout(push_constant) uniform PushConstants {
-    int N; // Total spatial elements (H*W)
-    int C; // Channels
+    uint N; // Total spatial elements (H*W)
+    uint C; // Channels
     float Eps;
 };
 
-void main() 
+void main()
 {
-    int i = int(gl_GlobalInvocationID.x);
-    int total_elements = N * C;
+    uint i = gl_GlobalInvocationID.x;
+    uint total_elements = N * C;
     if (i >= total_elements) return;
 
-    int c = i % C;
+    uint c = i % C;
 
     float x = in0[i];
     float m = mean[c];
@@ -672,12 +671,12 @@ layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };
 layout(set = 0, binding = 1) buffer InBuffer { float in0[]; };
 
 layout(push_constant) uniform PushConstants {
-    int O;   // total number of elements
+    uint O;   // total number of elements
 };
 
 void main()
 {
-    int o = int(gl_GlobalInvocationID.x);
+    uint o = gl_GlobalInvocationID.x;
     if (o >= O) return;
 
     float x = in0[o];
@@ -694,30 +693,30 @@ layout(set = 0, binding = 0) buffer Output { float y[]; };
 layout(set = 0, binding = 1) buffer Input { float x[]; };
 
 layout(push_constant) uniform PushConstants {
-    int num_rows;
-    int row_size;
+    uint num_rows;
+    uint row_size;
 };
 
 void main() {
-    int row = int(gl_GlobalInvocationID.x);
+    uint row = gl_GlobalInvocationID.x;
     if (row >= num_rows) return;
 
-    int offset = row * row_size;
+    uint offset = row * row_size;
 
     // Find max value
     float max_val = x[offset];
-    for (int i = 1; i < row_size; ++i) {
+    for (uint i = 1; i < row_size; ++i) {
         max_val = max(max_val, x[offset + i]);
     }
 
     // Compute exp and sum
     float sum_exp = 0.0;
-    for (int i = 0; i < row_size; ++i) {
+    for (uint i = 0; i < row_size; ++i) {
         sum_exp += exp(x[offset + i] - max_val);
     }
 
     // Normalize
-    for (int i = 0; i < row_size; ++i) {
+    for (uint i = 0; i < row_size; ++i) {
         y[offset + i] = exp(x[offset + i] - max_val) / sum_exp;
     }
 }
@@ -977,8 +976,8 @@ void DepthwiseConvNode::run(CommandBuffer cmdBuff)
         .bindPipeline(depthwiseConv)
         .bindDescSets({depthwiseConvDescSet})
         .setPushConstants(0, sizeof(constants), constants)
-        .dispatch(CEIL_DIV(W_out, 16), CEIL_DIV(H_out, 16), C)
-        .barrier( 
+        .dispatch(W_out, H_out, C)
+        .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["out0"].buffer()
             / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
@@ -1082,7 +1081,7 @@ void AddNode::prepare()
 
 void AddNode::run(CommandBuffer cmdBuff)
 {
-    const auto& N = (*this)["out0"].numElements(); 
+    const uint32_t N = static_cast<uint32_t>((*this)["out0"].numElements());
     
     addDescSet.write({
         (*this)["out0"].buffer(),
@@ -1156,17 +1155,19 @@ void BatchNormNode::run(CommandBuffer cmdBuff)
         (*this)["gamma"].buffer(),
         (*this)["beta"].buffer(),
     });
-
-    uint32_t batchnormConstants[] = {H, W, C};
-    float epsilon = eps;
+    
+    struct {
+        uint32_t N;
+        uint32_t C;
+        float    Eps;
+    } batchnormConstants = {H * W, C, eps};
 
     cmdBuff
         .bindPipeline(batchNorm)
         .bindDescSets({batchNormDescSet})
-        .setPushConstants(0, sizeof(batchnormConstants), batchnormConstants)
-        .setPushConstants(sizeof(batchnormConstants), sizeof(epsilon), &epsilon)
-        .dispatch(H * W, C)
-        .barrier( 
+        .setPushConstants(0, sizeof(batchnormConstants), &batchnormConstants)
+        .dispatch(H * W * C)
+        .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["out0"].buffer()
             / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
@@ -1197,22 +1198,22 @@ void ReluNode::prepare()
 void ReluNode::run(CommandBuffer cmdBuff)
 {
     const auto& inShape = (*this)["in0"].shape();
-    int I = 1;
-    for (int dim : inShape) I *= dim;
-    
+    uint32_t I = 1;
+    for (uint32_t dim : inShape) I *= dim;
+
     reluDescSet.write({
         (*this)["out0"].buffer(),
         (*this)["in0"].buffer(),
     });
 
-    int reluConstants[] = {I};
+    uint32_t reluConstants[] = {I};
 
     cmdBuff
         .bindPipeline(relu)
         .setPushConstants(0, sizeof(reluConstants), reluConstants)
         .bindDescSets({reluDescSet})
         .dispatch(I)
-        .barrier( 
+        .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["out0"].buffer()
             / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
@@ -1242,15 +1243,15 @@ void Relu6Node::prepare()
 
 void Relu6Node::run(CommandBuffer cmdBuff) {
     const auto& inShape = (*this)["in0"].shape();
-    int I = 1;
-    for (int dim : inShape) I *= dim;
+    uint32_t I = 1;
+    for (uint32_t dim : inShape) I *= dim;
 
     relu6DescSet.write({
         (*this)["out0"].buffer(),
         (*this)["in0"].buffer(),
     });
 
-    int constants[] = {I};
+    uint32_t constants[] = {I};
     cmdBuff
         .bindPipeline(relu6)
         .setPushConstants(0, sizeof(constants), constants)
@@ -1420,18 +1421,18 @@ void SoftmaxNode::run(CommandBuffer cmdBuff)
     Tensor& output = (*this)["out0"];
 
     auto shape = input.shape();
-    int num_rows = 1;
+    uint32_t num_rows = 1;
     for (size_t i = 0; i < shape.size() - 1; ++i) {
         num_rows *= shape[i];
     }
-    int row_size = shape.back();
+    uint32_t row_size = shape.back();
 
     softmaxDescSet.write({
         output.buffer(),
         input.buffer()
     });
 
-    int constants[] = {num_rows, row_size};
+    uint32_t constants[] = {num_rows, row_size};
 
     cmdBuff
         .bindPipeline(softmax)

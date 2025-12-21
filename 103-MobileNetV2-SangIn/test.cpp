@@ -84,11 +84,13 @@ void loadWeights(MobileNetV2& net, const SafeTensorsParser& weights)
             auto shape = tensor.shape();
             
             // find는 문자열 내에서 특정 부분 문자열의 위치를 반환, 없으면 npos 반환
-            if (cppName.find("depthwise.weight") != std::string::npos) {
+            if (cppName.find("depthwiseConv.weight") != std::string::npos) {
                 if (shape.size() == 4 && shape[1] == 1) {
                     tensor.reshape(shape[0], shape[2], shape[3]); // [C_out, 1, K, K] -> [C_out, K, K]
                     tensor.permute(1, 2, 0); // make it [K, K, C_out]
-                    tensor.reshape(shape[1] * shape[2], shape[0]); // flatten to [K*K, C_out]
+
+                    auto new_shape = tensor.shape();
+                    tensor.reshape(new_shape[0] * new_shape[1], new_shape[2]); // flatten to [K*K, C_out]
                 }
             }
             else if (cppName.find(".weight") != std::string::npos) {
