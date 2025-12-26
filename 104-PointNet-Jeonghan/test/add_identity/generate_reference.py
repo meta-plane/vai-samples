@@ -42,7 +42,9 @@ def main():
         'output': output.numpy().flatten().tolist(),
     }
     
-    output_file = 'test/add_identity/reference.json'
+    from pathlib import Path
+    output_dir = Path(__file__).parent
+    output_file = output_dir / 'reference.json'
     with open(output_file, 'w') as f:
         json.dump(data, f, indent=2)
     

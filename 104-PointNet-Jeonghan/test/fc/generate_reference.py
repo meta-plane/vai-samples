@@ -33,9 +33,9 @@ input_np = input_data.numpy()      # [128]
 output_np = output_data.numpy()    # [256]
 
 # Extract weights and biases
-# Linear weight: [O, I] -> transpose to [I, O] for GEMM
-weight = fc.weight.detach().transpose(0, 1).numpy()  # [128, 256]
-bias = fc.bias.detach().numpy()                       # [256]
+# Linear weight: [O, I] - keep PyTorch format
+weight = fc.weight.detach().numpy()  # [256, 128] - no transpose!
+bias = fc.bias.detach().numpy()       # [256]
 
 # Create JSON structure (all floats for parseNDArray compatibility)
 data = {

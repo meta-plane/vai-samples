@@ -28,20 +28,20 @@ input_data = torch.randn(1, C, N)
 with torch.no_grad():
     output_data = bn(input_data)
 
-# Transpose to [N, C] for C++
-input_nc = input_data.squeeze(0).transpose(0, 1).numpy()   # [5, 3]
-output_nc = output_data.squeeze(0).transpose(0, 1).numpy()  # [5, 3]
+# Keep PyTorch format [C, N] - no transpose needed!
+input_cn = input_data.squeeze(0).numpy()   # [3, 5] - PyTorch native
+output_cn = output_data.squeeze(0).numpy()  # [3, 5] - PyTorch native
 
 # Create JSON structure (shape as float array for parseNDArray compatibility)
 data = {
-    "input": input_nc.flatten().tolist(),      # [15 values]
-    "expected": output_nc.flatten().tolist(),  # [15 values]
+    "input": input_cn.flatten().tolist(),      # [15 values] - [C, N] layout
+    "expected": output_cn.flatten().tolist(),  # [15 values] - [C, N] layout
     "mean": bn.running_mean.numpy().tolist(),  # [3 values]
     "var": bn.running_var.numpy().tolist(),    # [3 values]
     "gamma": bn.weight.data.numpy().tolist(),  # [3 values]
     "beta": bn.bias.data.numpy().tolist(),     # [3 values]
     "eps": float(bn.eps),
-    "shape": [float(N), float(C)]  # Convert to floats for parseNDArray
+    "shape": [float(C), float(N)]  # [C, N] layout - PyTorch convention
 }
 
 # Save JSON
@@ -53,8 +53,8 @@ with open(json_path, 'w') as f:
     json.dump(data, f, indent=2)
 
 print("BatchNorm1D Reference Generated (JSON)")
-print(f"  Input:  {input_nc.shape} -> {input_nc.size} values")
-print(f"  Output: {output_nc.shape} -> {output_nc.size} values")
+print(f"  Input:  {input_cn.shape} -> {input_cn.size} values [C, N]")
+print(f"  Output: {output_cn.shape} -> {output_cn.size} values [C, N]")
 print(f"  Mean:   {bn.running_mean.shape}")
 print(f"  Var:    {bn.running_var.shape}")
 print(f"  Gamma:  {bn.weight.shape}")

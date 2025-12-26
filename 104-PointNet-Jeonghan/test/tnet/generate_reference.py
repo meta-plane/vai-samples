@@ -110,19 +110,21 @@ def main():
     model = TNetBlock(K)
     model.eval()
     
-    # Generate random input
-    x = torch.randn(N, K)
+    # Generate random input [K, N] - PyTorch layout
+    x_cn = torch.randn(K, N)  # [3, 8] for Vulkan
+    x_nk = x_cn.t()  # [8, 3] for PyTorch model
     
-    # Forward pass
+    # Forward pass (PyTorch uses [N, K])
     with torch.no_grad():
-        transform = model(x)  # TNet now returns only transform matrix
-        output = torch.matmul(x, transform)  # Apply MatMul separately
+        transform = model(x_nk)  # TNet returns transform matrix [K, K]
+        output_nk = torch.matmul(x_nk, transform)  # [N, K] @ [K, K] = [N, K]
+        output_cn = output_nk.t()  # [K, N] for Vulkan
     
     # Collect weights
     weights = {
-        # MLP weights (Conv1d weights are [Cout, Cin, 1] → squeeze → transpose → [Cin, Cout])
+        # MLP weights (Conv1d weights are [Cout, Cin, 1] → squeeze → keep [Cout, Cin])
         # MLP 0: Conv + BN + ReLU
-        'mlp.mlp0.weight': model.mlp1.weight.squeeze().t().detach().numpy().tolist(),
+        'mlp.mlp0.weight': model.mlp1.weight.squeeze().detach().numpy().tolist(),
         'mlp.mlp0.bias': model.mlp1.bias.detach().numpy().tolist(),
         'mlp.mlp0.mean': model.bn1.running_mean.detach().numpy().tolist(),
         'mlp.mlp0.var': model.bn1.running_var.detach().numpy().tolist(),
@@ -130,7 +132,7 @@ def main():
         'mlp.mlp0.beta': model.bn1.bias.detach().numpy().tolist(),
         
         # MLP 1: Conv + BN + ReLU
-        'mlp.mlp1.weight': model.mlp2.weight.squeeze().t().detach().numpy().tolist(),
+        'mlp.mlp1.weight': model.mlp2.weight.squeeze().detach().numpy().tolist(),
         'mlp.mlp1.bias': model.mlp2.bias.detach().numpy().tolist(),
         'mlp.mlp1.mean': model.bn2.running_mean.detach().numpy().tolist(),
         'mlp.mlp1.var': model.bn2.running_var.detach().numpy().tolist(),
@@ -138,7 +140,7 @@ def main():
         'mlp.mlp1.beta': model.bn2.bias.detach().numpy().tolist(),
         
         # MLP 2: Conv + BN + ReLU
-        'mlp.mlp2.weight': model.mlp3.weight.squeeze().t().detach().numpy().tolist(),
+        'mlp.mlp2.weight': model.mlp3.weight.squeeze().detach().numpy().tolist(),
         'mlp.mlp2.bias': model.mlp3.bias.detach().numpy().tolist(),
         'mlp.mlp2.mean': model.bn3.running_mean.detach().numpy().tolist(),
         'mlp.mlp2.var': model.bn3.running_var.detach().numpy().tolist(),
@@ -147,7 +149,7 @@ def main():
         
         # FC weights with BatchNorm (FCBNSequence format: block0, block1, lastBlock)
         # Block 0: FC1 + BN4 + ReLU
-        'fc.block0.weight': model.fc1.weight.t().detach().numpy().tolist(),
+        'fc.block0.weight': model.fc1.weight.detach().numpy().tolist(),
         'fc.block0.bias': model.fc1.bias.detach().numpy().tolist(),
         'fc.block0.mean': model.bn4.running_mean.detach().numpy().tolist(),
         'fc.block0.var': model.bn4.running_var.detach().numpy().tolist(),
@@ -155,7 +157,7 @@ def main():
         'fc.block0.beta': model.bn4.bias.detach().numpy().tolist(),
         
         # Block 1: FC2 + BN5 + ReLU
-        'fc.block1.weight': model.fc2.weight.t().detach().numpy().tolist(),
+        'fc.block1.weight': model.fc2.weight.detach().numpy().tolist(),
         'fc.block1.bias': model.fc2.bias.detach().numpy().tolist(),
         'fc.block1.mean': model.bn5.running_mean.detach().numpy().tolist(),
         'fc.block1.var': model.bn5.running_var.detach().numpy().tolist(),
@@ -169,10 +171,10 @@ def main():
     
     # Prepare data for JSON - flatten weights to top level
     data = {
-        'shape': [float(N), float(K)],
-        'input': x.numpy().flatten().tolist(),
-        'output': output.numpy().flatten().tolist(),
-        'transform': transform.numpy().flatten().tolist(),
+        'shape': [float(K), float(N)],  # [C, N] layout
+        'input': x_cn.numpy().flatten().tolist(),  # [K, N]
+        'output': output_cn.numpy().flatten().tolist(),  # [K, N]
+        'transform': transform.numpy().flatten().tolist(),  # [K, K]
         # Debug: intermediate values
         'debug_pooled': model._intermediates['pooled'].numpy().tolist(),
         'debug_fc_out0': model._intermediates['fc_out0'].numpy().tolist(),
@@ -185,7 +187,9 @@ def main():
     data.update(weights)
     
     # Save to file
-    output_file = 'test/tnet/reference.json'
+    from pathlib import Path
+    output_dir = Path(__file__).parent
+    output_file = output_dir / 'reference.json'
     with open(output_file, 'w') as f:
         json.dump(data, f, indent=2)
     

@@ -38,13 +38,15 @@ json_data = {
 }
 
 # Save to JSON
-output_file = "test/matmul/reference.json"
+from pathlib import Path
+output_dir = Path(__file__).parent
+output_file = output_dir / "reference.json"
 with open(output_file, 'w') as f:
     json.dump(json_data, f, indent=2)
 
 print(f"MatMul Reference Generated (JSON)")
-print(f"  A: [{N}, {K}] = {N * K} values")
-print(f"  B: [{K}, {M}] = {K * M} values")
-print(f"  C: [{N}, {M}] = {N * M} values")
+print(f"  A: [{K}, {N}] = {K * N} values [K, N]")
+print(f"  B: [{M}, {K}] = {M * K} values [M, K]")
+print(f"  C: [{M}, {N}] = {M * N} values [M, N]")
 print()
 print(f"✓ Saved to {output_file}")

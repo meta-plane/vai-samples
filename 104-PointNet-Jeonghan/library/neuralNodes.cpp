@@ -31,20 +31,22 @@ layout(set = 0, binding = 4) buffer GammaBuffer { float gamma[]; };
 layout(set = 0, binding = 5) buffer BetaBuffer { float beta[]; };
 
 layout(push_constant) uniform PushConstants {
-    uint N;       // num_points
-    uint C;       // channels
+    uint C;       // channels (outer dimension)
+    uint N;       // num_points (inner dimension)
     float eps;    // epsilon (1e-5)
 };
 
 void main() 
 {
     uint idx = gl_GlobalInvocationID.x;
-    uint total = N * C;
+    uint total = C * N;
     if (idx >= total) return;
     
-    uint c = idx % C;  // channel index
+    uint c = idx / N;  // channel index (outer)
+    uint n = idx % N;  // point index (inner)
     
     // BatchNorm: out = gamma * (in - mean) / sqrt(var + eps) + beta
+    // Layout: [C, N] - data[c * N + n]
     float x = in_data[idx];
     float normalized = (x - mean[c]) / sqrt(var[c] + eps);
     out_data[idx] = gamma[c] * normalized + beta[c];
@@ -137,8 +139,8 @@ layout(local_size_x = 64) in;
 layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };
 layout(set = 0, binding = 1) buffer InBuffer { float in0[]; };
 layout(push_constant) uniform PushConstants {
-    int N; // number of points
-    int C; // number of channels
+    int C; // number of channels (outer dimension)
+    int N; // number of points (inner dimension)
 };
 
 void main() {
@@ -147,7 +149,7 @@ void main() {
 
     float m = -3.4e38;
     for (int n = 0; n < N; ++n) {
-        float v = in0[n * C + c];
+        float v = in0[c * N + n];  // [C, N] layout
         m = max(m, v);
     }
     out0[c] = m;
@@ -197,26 +199,27 @@ layout(set = 0, binding = 1) buffer InBuffer { float A[]; };
 layout(set = 0, binding = 2) buffer Weight { float B[]; };
 layout(set = 0, binding = 3) buffer Bias { float b[]; };
 
-// C(MxN) = A(MxK)*B(KxN) + b(1xN)
+// C(NxM) = B(NxK)*A(KxM) + b(Nx1)
+// PyTorch: [OutCh, InCh] @ [InCh, Points] = [OutCh, Points]
 layout(push_constant) uniform PushConstants {
-    int M;  // # of batchs
-    int K;  // # of inputs
-    int N;  // # of outputs
+    int N;  // # of output channels (outer dimension)
+    int K;  // # of input channels
+    int M;  // # of points (inner dimension)
 };
 
 void main() 
 {
-    int n = int(gl_GlobalInvocationID.x); 
-    int m = int(gl_GlobalInvocationID.y); 
+    int m = int(gl_GlobalInvocationID.x);  // point index (inner)
+    int n = int(gl_GlobalInvocationID.y);  // output channel (outer)
 
-    if (m >= M || n >= N) 
+    if (n >= N || m >= M) 
         return;
 
     float sum = b[n];
     for (int k = 0; k < K; ++k)
-        sum += A[m * K + k] * B[k * N + n];
+        sum += B[n * K + k] * A[k * M + m];
 
-    C[m * N + n] = sum;
+    C[n * M + m] = sum;
 }
 )";
 
@@ -491,88 +494,85 @@ layout(set = 0, binding = 1) buffer InBuffer { float A[]; };
 layout(set = 0, binding = 2) buffer Weight   { float B[]; };
 layout(set = 0, binding = 3) buffer Bias     { float b[]; };
 
-// C(MxN) = A(MxK)*B(KxN) + b(1xN)  
+// C(NxM) = B(NxK)*A(KxM) + b(Nx1)
+// PyTorch: [OutCh, InCh] @ [InCh, Points] = [OutCh, Points]
 layout(push_constant) uniform PushConstants {
-    int M;  // # of rows (batches)
-    int K;  // # of inputs
-    int N;  // # of outputs
+    int N;  // # of output channels (rows in output)
+    int K;  // # of input channels
+    int M;  // # of points (cols in output)
 };
 
-shared float As[BM * BK]; // BMxBK
-shared float Bs[BK * BN]; // BKxBN
+shared float Bs[BN * BK]; // BNxBK for B tiles
+shared float As[BK * BM]; // BKxBM for A tiles
 
 void main() 
 {
-    int tileCol = int(gl_WorkGroupID.x);
-    int tileRow = int(gl_WorkGroupID.y);
+    int tileCol = int(gl_WorkGroupID.x);  // M direction (points)
+    int tileRow = int(gl_WorkGroupID.y);  // N direction (output channels)
     int t = int(gl_LocalInvocationID.x);
     int T = int(gl_WorkGroupSize.x);        // 64 or 256 (== (BM*BN)/(TM*TN))
 
-    // A/B 로드용 로컬 인덱스
-    int innerRowA = t / BK;
-    int innerColA = t % BK;
-    int rowStrideA = T / BK;    // 8 or 32
+    // B loading indices (B is [N, K])
+    int innerRowB = t / BK;
+    int innerColB = t % BK;
+    int rowStrideB = T / BK;    // 8 or 32
 
-    int innerRowB = t / BN;
-    int innerColB = t % BN;
-    int rowStrideB = T / BN;    // 1(64/64) or 2(256/128)
+    // A loading indices (A is [K, M])
+    int innerRowA = t / BM;
+    int innerColA = t % BM;
+    int rowStrideA = T / BM;    // 1(64/64) or 2(256/128)
 
-    // 이 스레드가 계산할 결과 블록 (TMxTN)
-    int t_n = t % (BN / TN);
-    int t_m = t / (BN / TN);
+    // Thread result block (TNxTM)
+    int t_m = t % (BM / TM);
+    int t_n = t / (BM / TM);
 
-    // 결과와 레지스터 캐시
-    float threadResults[TM * TN];
-    for (int i = 0; i < TM*TN; ++i) threadResults[i] = 0.0;
-    float regM[TM];
+    // Result and register cache
+    float threadResults[TN * TM];
+    for (int i = 0; i < TN*TM; ++i) threadResults[i] = 0.0;
     float regN[TN];
+    float regM[TM];
 
-    int m0 = tileRow * BM + innerRowA;
-    int n0 = tileCol * BN + innerColB;
-    int t_t = innerColA * BM + innerRowA; // transposed index of t
+    int n0 = tileRow * BN + innerRowB;
+    int m0 = tileCol * BM + innerColA;
+    int t_t = innerColB * BN + innerRowB; // transposed index of t
 
     for (int k0 = 0; k0 < K; k0 += BK) 
     {
-        int k = k0 + innerColA;
-        for (int bm = 0; bm < BM; bm += rowStrideA)  // 8(64/8) or 4(128/32)
+        // Load B tile [BN, BK] from B[N, K]
+        int k = k0 + innerColB;
+        for (int bn = 0; bn < BN; bn += rowStrideB)
         {
-            int m = m0 + bm;
-            /*
-            * bm * BK + t 
-            * == bm * BK + (innerRowA * BK + innerColA)
-            * == (bm + innerRowA) * BK + innerColA
-            * transpose => 
-            * innerColA * BM + (bm + innerRowA)
-            */
-            As[bm + t_t] = (m < M && k < K) ? A[m * K + k] : 0.0;
-
+            int n = n0 + bn;
+            Bs[bn + t_t] = (n < N && k < K) ? B[n * K + k] : 0.0;
         }
         
-        int n = n0;
-        for (int bk = 0; bk < BK; bk += rowStrideB) // 8(8/1) or 4(8/2)
+        // Load A tile [BK, BM] from A[K, M]
+        int m = m0;
+        for (int bk = 0; bk < BK; bk += rowStrideA)
         {
-            k = k0 + innerRowB + bk; 
-            Bs[bk * BN + t] = (k < K && n < N) ? B[k * N + n] : 0.0;
+            k = k0 + innerRowA + bk; 
+            As[bk * BM + t] = (k < K && m < M) ? A[k * M + m] : 0.0;
         }
         barrier();
 
+        // Compute
         for (int dotIdx = 0; dotIdx < BK; ++dotIdx) 
         {
-            for (int tm = 0; tm < TM; ++tm)
-                regM[tm] = As[dotIdx * BM + (t_m * TM + tm)];
-
             for (int tn = 0; tn < TN; ++tn)
                 regN[tn] = Bs[dotIdx * BN + (t_n * TN + tn)];
 
             for (int tm = 0; tm < TM; ++tm)
-                for (int tn = 0; tn < TN; ++tn)
-                    threadResults[tm*TN + tn] += regM[tm] * regN[tn];
+                regM[tm] = As[dotIdx * BM + (t_m * TM + tm)];
+
+            for (int tn = 0; tn < TN; ++tn)
+                for (int tm = 0; tm < TM; ++tm)
+                    threadResults[tn*TM + tm] += regN[tn] * regM[tm];
         }
         barrier();
     }
 
-    m0 = tileRow * BM + t_m * TM;
-    n0 = tileCol * BN + t_n * TN;
+    n0 = tileRow * BN + t_n * TN;
+    m0 = tileCol * BM + t_m * TM;
 
     for (int tn = 0; tn < TN; ++tn) 
     {
@@ -586,122 +586,124 @@ void main()
             int m = m0 + tm;
             if (m >= M)
                 break; 
-            C[m * N + n] = threadResults[tm*TN + tn] + bias;
+            C[n * M + m] = threadResults[tn*TM + tm] + bias;
         }
     }
 })";
 
 
-// Broadcast shader: repeat [1, C] to [N, C]
+// Broadcast shader: repeat [C, 1] to [C, N]
 static const char* src_broadcast = R"(
 #version 450
 layout(local_size_x = 256) in;
 
-layout(binding = 0) readonly buffer In0 { float global_feature[]; };  // [1, C]
-layout(binding = 1) writeonly buffer Out0 { float output_data[]; };   // [N, C]
+layout(binding = 0) readonly buffer In0 { float global_feature[]; };  // [C, 1]
+layout(binding = 1) writeonly buffer Out0 { float output_data[]; };   // [C, N]
 
 layout(push_constant) uniform PushConstants {
-    uint N;
-    uint C;
+    uint C;  // channels (outer dimension)
+    uint N;  // points (inner dimension)
 };
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
-    if (idx >= N * C) return;
+    if (idx >= C * N) return;
     
-    uint n = idx / C;
-    uint c = idx % C;
-    output_data[idx] = global_feature[c];
+    uint c = idx / N;  // channel (outer)
+    uint n = idx % N;  // point (inner)
+    output_data[idx] = global_feature[c];  // idx = c * N + n
 }
 )";
 
-// Concat shader: concatenate [N, C1] + [N, C2] → [N, C1+C2]
+// Concat shader: concatenate [C1, N] + [C2, N] → [C1+C2, N]
 static const char* src_concat = R"(
 #version 450
 layout(local_size_x = 256) in;
 
-layout(binding = 0) readonly buffer In0 { float input0[]; };   // [N, C1]
-layout(binding = 1) readonly buffer In1 { float input1[]; };   // [N, C2]
-layout(binding = 2) writeonly buffer Out0 { float output_data[]; };  // [N, C1+C2]
+layout(binding = 0) readonly buffer In0 { float input0[]; };   // [C1, N]
+layout(binding = 1) readonly buffer In1 { float input1[]; };   // [C2, N]
+layout(binding = 2) writeonly buffer Out0 { float output_data[]; };  // [C1+C2, N]
 
 layout(push_constant) uniform PushConstants {
-    uint N;
-    uint C1;
-    uint C2;
+    uint C1;  // channels in first input
+    uint C2;  // channels in second input
+    uint N;   // points
 };
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
-    uint total = N * (C1 + C2);
+    uint total = (C1 + C2) * N;
     if (idx >= total) return;
     
-    uint n = idx / (C1 + C2);
-    uint c = idx % (C1 + C2);
+    uint c = idx / N;  // channel (outer)
+    uint n = idx % N;  // point (inner)
     
     if (c < C1) {
-        output_data[idx] = input0[n * C1 + c];
+        output_data[idx] = input0[c * N + n];
     } else {
-        output_data[idx] = input1[n * C2 + (c - C1)];
+        output_data[idx] = input1[(c - C1) * N + n];
     }
 }
 )";
 
-// Slice shader: extract channels [start, end) from [N, C_in] → [N, slice_size]
+// Slice shader: extract channels [start, end) from [C_in, N] → [slice_size, N]
 static const char* src_slice = R"(
 #version 450
 layout(local_size_x = 256) in;
 
-layout(binding = 0) readonly buffer In { float input_data[]; };   // [N, C_in]
-layout(binding = 1) writeonly buffer Out { float output_data[]; }; // [N, slice_size]
+layout(binding = 0) readonly buffer In { float input_data[]; };   // [C_in, N]
+layout(binding = 1) writeonly buffer Out { float output_data[]; }; // [slice_size, N]
 
 layout(push_constant) uniform PushConstants {
-    uint N;            // number of points
-    uint C_in;         // input channels
+    uint C_in;         // input channels (outer dimension)
+    uint N;            // number of points (inner dimension)
     uint start_ch;     // start channel index
     uint slice_size;   // number of channels to slice (end - start)
 };
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
-    uint total = N * slice_size;
+    uint total = slice_size * N;
     if (idx >= total) return;
     
-    uint n = idx / slice_size;     // point index
-    uint c = idx % slice_size;     // channel index in output
+    uint c_out = idx / N;      // output channel index (outer)
+    uint n = idx % N;          // point index (inner)
     
-    uint in_idx = n * C_in + start_ch + c;
+    uint c_in = start_ch + c_out;
+    uint in_idx = c_in * N + n;
     output_data[idx] = input_data[in_idx];
 }
 )";
 
-// Matrix multiplication shader: C[N, M] = A[N, K] @ B[K, M]
+// Matrix multiplication shader: C[M, N] = B[M, K] @ A[K, N]
 // No bias addition (pure matrix multiplication)
+// For TNet: transformation matrix [3,3] or [64,64]
 static const char* src_matmul = R"(
 #version 450
 layout(local_size_x = 16, local_size_y = 16) in;
-layout(set = 0, binding = 0) buffer OutBuffer { float C[]; };  // [N, M]
-layout(set = 0, binding = 1) buffer InBuffer  { float A[]; };  // [N, K]
-layout(set = 0, binding = 2) buffer Weight    { float B[]; };  // [K, M]
+layout(set = 0, binding = 0) buffer OutBuffer { float C[]; };  // [M, N]
+layout(set = 0, binding = 1) buffer InBuffer  { float A[]; };  // [K, N]
+layout(set = 0, binding = 2) buffer Weight    { float B[]; };  // [M, K]
 
 layout(push_constant) uniform PushConstants {
-    int N;  // # of rows in A
-    int K;  // # of cols in A, rows in B
-    int M;  // # of cols in B
+    int M;  // # of output dim (rows in output)
+    int K;  // # of intermediate dim
+    int N;  // # of points (cols in output)
 };
 
 void main() 
 {
-    int n = int(gl_GlobalInvocationID.y); 
-    int m = int(gl_GlobalInvocationID.x); 
+    int n = int(gl_GlobalInvocationID.x);  // point index (inner, col)
+    int m = int(gl_GlobalInvocationID.y);  // output dim (outer, row)
 
-    if (n >= N || m >= M) 
+    if (m >= M || n >= N) 
         return;
 
     float sum = 0.0;
     for (int k = 0; k < K; ++k)
-        sum += A[n * K + k] * B[k * M + m];
+        sum += B[m * K + k] * A[k * N + n];
 
-    C[n * M + m] = sum;
+    C[m * N + n] = sum;
 }
 )";
 
@@ -876,15 +878,15 @@ void PointWiseMLPNode::prepare()
 {
     const auto& inShape = (*this)["in0"].shape();
     _ASSERT(inShape.size() == 2);
-    _ASSERT(inShape[1] == Cin);
+    _ASSERT(inShape[0] == Cin);  // [Cin, N] layout - channels is outer dimension
     _ASSERT((*this)["weight"].validShape());
     _ASSERT((*this)["weight"].isShapeOf(Cin, Cout));
     _ASSERT((*this)["bias"].validShape());
     _ASSERT((*this)["bias"].isShapeOf(Cout));
 
-    (*this)["out0"] = Tensor(inShape[0], Cout);
-    (*this)["conv_out"] = Tensor(inShape[0], Cout);
-    (*this)["bn_out"] = Tensor(inShape[0], Cout);
+    (*this)["out0"] = Tensor(Cout, inShape[1]);      // [Cout, N]
+    (*this)["conv_out"] = Tensor(Cout, inShape[1]);  // [Cout, N]
+    (*this)["bn_out"] = Tensor(Cout, inShape[1]);    // [Cout, N]
     
     // Set default BatchNorm parameters if not provided
     if (!(*this)["bn_mean"].validShape()) {
@@ -908,9 +910,11 @@ void PointWiseMLPNode::prepare()
 void PointWiseMLPNode::run(CommandBuffer cmdBuff)
 {
     const auto& inShape = (*this)["in0"].shape();
-    uint32_t N = inShape[0];
+    uint32_t Cin_actual = inShape[0];  // input channels (outer)
+    uint32_t M = inShape[1];           // points (inner)
 
     // Stage 1: Conv1x1 (GEMM)
+    // C(NxM) = B(NxK)*A(KxM) + b
     gemmDesc.write({
         (*this)["conv_out"].buffer(),
         (*this)["in0"].buffer(),
@@ -919,15 +923,15 @@ void PointWiseMLPNode::run(CommandBuffer cmdBuff)
     });
 
     uint32_t pc_gemm[] = {
-        N,        // M
-        Cin,      // K
-        Cout      // N
+        Cout,         // N (output channels, outer)
+        Cin_actual,   // K (input channels)
+        M             // M (points, inner)
     };
     cmdBuff
         .bindPipeline(gemm)
         .bindDescSets({gemmDesc})
         .setPushConstants(0, sizeof(pc_gemm), pc_gemm)
-        .dispatch0(CEIL_DIV(Cout, 32), CEIL_DIV(N, 32))
+        .dispatch0(CEIL_DIV(M, 32), CEIL_DIV(Cout, 32))  // x=M, y=N
         .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["conv_out"].buffer()
@@ -945,13 +949,13 @@ void PointWiseMLPNode::run(CommandBuffer cmdBuff)
     });
 
     float eps = 1e-5f;
-    uint32_t pc_bn[] = { N, Cout };
+    uint32_t pc_bn[] = { Cout, M };  // [C, N] layout
     cmdBuff
         .bindPipeline(batchnorm)
         .bindDescSets({batchnormDesc})
         .setPushConstants(0, sizeof(pc_bn), pc_bn)
         .setPushConstants(sizeof(pc_bn), sizeof(float), &eps)
-        .dispatch0(CEIL_DIV(N * Cout, 256))
+        .dispatch0(CEIL_DIV(Cout * M, 256))
         .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["bn_out"].buffer()
@@ -964,7 +968,7 @@ void PointWiseMLPNode::run(CommandBuffer cmdBuff)
         (*this)["bn_out"].buffer()
     });
 
-    int total = N * Cout;
+    int total = Cout * M;
     cmdBuff
         .bindPipeline(relu)
         .setPushConstants(0, sizeof(int), &total)
@@ -1166,7 +1170,7 @@ void BatchNorm1DNode::prepare()
 {
     const auto& inShape = (*this)["in0"].shape();
     _ASSERT(inShape.size() == 2);
-    _ASSERT(inShape[1] == C);
+    _ASSERT(inShape[0] == C);  // [C, N] layout - channels is outer dimension
     _ASSERT((*this)["mean"].validShape());
     _ASSERT((*this)["mean"].isShapeOf(C));
     _ASSERT((*this)["var"].validShape());
@@ -1182,8 +1186,9 @@ void BatchNorm1DNode::prepare()
 void BatchNorm1DNode::run(CommandBuffer cmdBuff)
 {
     const auto& inShape = (*this)["in0"].shape();
-    uint32_t N = inShape[0];
-    uint32_t total = N * C;
+    uint32_t C_actual = inShape[0];  // channels (outer)
+    uint32_t N = inShape[1];         // points (inner)
+    uint32_t total = C_actual * N;
     
     batchnormDesc.write({
         (*this)["out0"].buffer(),
@@ -1194,7 +1199,7 @@ void BatchNorm1DNode::run(CommandBuffer cmdBuff)
         (*this)["beta"].buffer(),
     });
     
-    struct { uint32_t N, C; float eps; } pc = {N, C, 1e-5f};
+    struct { uint32_t C, N; float eps; } pc = {C_actual, N, 1e-5f};
     
     cmdBuff
         .bindPipeline(batchnorm)
@@ -1225,21 +1230,22 @@ void MaxPooling1DNode::prepare()
 {
     const auto& inShape = (*this)["in0"].shape();
     _ASSERT(inShape.size() == 2);
-    uint32_t C = inShape[1];
+    uint32_t C = inShape[0];  // [C, N] layout - channels is outer dimension
     (*this)["out0"] = Tensor(C);
 }
 
 void MaxPooling1DNode::run(CommandBuffer cmdBuff)
 {
     const auto& inShape = (*this)["in0"].shape();
-    uint32_t N = inShape[0], C = inShape[1];
+    uint32_t C = inShape[0];  // channels (outer)
+    uint32_t N = inShape[1];  // points (inner)
 
     desc.write({
         (*this)["out0"].buffer(),
         (*this)["in0"].buffer(),
     });
 
-    uint32_t pc[] = {N, C};
+    uint32_t pc[] = {C, N};
 
     cmdBuff
         .bindPipeline(maxpool)
@@ -1365,9 +1371,11 @@ void FullyConnectedNode::prepare()
 
 void FullyConnectedNode::run(CommandBuffer cmdBuff) 
 {
-    uint32_t M = 1;
-    uint32_t K = (*this)["in0"].shape()[0];
-    uint32_t N = (*this)["out0"].shape()[0];
+    // FC on 1D vector: out[O] = weight[O, I] @ in[I] + bias[O]
+    // Using GEMM: C(NxM) = B(NxK)*A(KxM) + b
+    uint32_t N = (*this)["out0"].shape()[0];  // output size
+    uint32_t K = (*this)["in0"].shape()[0];   // input size
+    uint32_t M = 1;  // single point
     
     gemmDescSet.write({
         (*this)["out0"].buffer(),
@@ -1376,13 +1384,13 @@ void FullyConnectedNode::run(CommandBuffer cmdBuff)
         (*this)["bias"].buffer(),
     });
 
-    uint32_t gemmConstants[] = {M, K, N};
+    uint32_t gemmConstants[] = {N, K, M};
 
     cmdBuff
         .bindPipeline(gemm)
         .bindDescSets({gemmDescSet})
         .setPushConstants(0, sizeof(gemmConstants), gemmConstants)
-        .dispatch0(CEIL_DIV(N, 32), CEIL_DIV(M, 32))
+        .dispatch0(CEIL_DIV(M, 32), CEIL_DIV(N, 32))  // x=M, y=N
         .barrier( 
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["out0"].buffer()
@@ -1409,34 +1417,34 @@ BroadcastNode::BroadcastNode()
 
 void BroadcastNode::prepare()
 {
-    Tensor& in0 = (*this)["in0"];  // global feature [1, C]
-    Tensor& in1 = (*this)["in1"];  // point features [N, C] for shape reference
+    Tensor& in0 = (*this)["in0"];  // global feature [C, 1]
+    Tensor& in1 = (*this)["in1"];  // point features [C, N] for shape reference
     
     _ASSERT(in0.validShape() && in1.validShape());
     _ASSERT(in0.shape().size() == 2);
     _ASSERT(in1.shape().size() == 2);
-    _ASSERT(in0.shape()[0] == 1);  // global feature should have batch size 1
-    _ASSERT(in0.shape()[1] == in1.shape()[1]); // same channel dimension
+    _ASSERT(in0.shape()[1] == 1);  // global feature should have N=1
+    _ASSERT(in0.shape()[0] == in1.shape()[0]); // same channel dimension
     
-    // Output shape: [N, C]
-    (*this)["out0"] = Tensor(in1.shape()[0], in0.shape()[1]);
+    // Output shape: [C, N]
+    (*this)["out0"] = Tensor(in0.shape()[0], in1.shape()[1]);
 }
 
 void BroadcastNode::run(CommandBuffer cmdBuff)
 {
-    Tensor& in0 = (*this)["in0"];   // [1, C]
-    Tensor& in1 = (*this)["in1"];   // [N, C]
-    Tensor& out0 = (*this)["out0"]; // [N, C]
+    Tensor& in0 = (*this)["in0"];   // [C, 1]
+    Tensor& in1 = (*this)["in1"];   // [C, N]
+    Tensor& out0 = (*this)["out0"]; // [C, N]
     
-    uint32_t N = in1.shape()[0];
-    uint32_t C = in0.shape()[1];
+    uint32_t C = in0.shape()[0];  // channels (outer)
+    uint32_t N = in1.shape()[1];  // points (inner)
     
     broadcastDescSet.write({
         in0.buffer(),
         out0.buffer()
     });
     
-    uint32_t pc[] = {N, C};
+    uint32_t pc[] = {C, N};
     
     cmdBuff
         .bindPipeline(broadcast)
@@ -1474,25 +1482,25 @@ void ConcatNode::prepare()
     _ASSERT(in0.validShape() && in1.validShape());
     _ASSERT(in0.shape().size() == 2);
     _ASSERT(in1.shape().size() == 2);
-    _ASSERT(in0.shape()[0] == in1.shape()[0]); // same N
+    _ASSERT(in0.shape()[1] == in1.shape()[1]); // same N
     
-    uint32_t N = in0.shape()[0];
-    uint32_t C1 = in0.shape()[1];
-    uint32_t C2 = in1.shape()[1];
+    uint32_t C1 = in0.shape()[0];  // channels in first input (outer)
+    uint32_t C2 = in1.shape()[0];  // channels in second input
+    uint32_t N = in0.shape()[1];   // points (inner)
     
-    // Output shape: [N, C1+C2]
-    (*this)["out0"] = Tensor(N, C1 + C2);
+    // Output shape: [C1+C2, N]
+    (*this)["out0"] = Tensor(C1 + C2, N);
 }
 
 void ConcatNode::run(CommandBuffer cmdBuff)
 {
-    Tensor& in0 = (*this)["in0"];   // [N, C1]
-    Tensor& in1 = (*this)["in1"];   // [N, C2]
-    Tensor& out0 = (*this)["out0"]; // [N, C1+C2]
+    Tensor& in0 = (*this)["in0"];   // [C1, N]
+    Tensor& in1 = (*this)["in1"];   // [C2, N]
+    Tensor& out0 = (*this)["out0"]; // [C1+C2, N]
     
-    uint32_t N = in0.shape()[0];
-    uint32_t C1 = in0.shape()[1];
-    uint32_t C2 = in1.shape()[1];
+    uint32_t C1 = in0.shape()[0];  // channels (outer)
+    uint32_t C2 = in1.shape()[0];
+    uint32_t N = in0.shape()[1];   // points (inner)
     
     concatDescSet.write({
         in0.buffer(),
@@ -1500,7 +1508,7 @@ void ConcatNode::run(CommandBuffer cmdBuff)
         out0.buffer()
     });
     
-    uint32_t pc[] = {N, C1, C2};
+    uint32_t pc[] = {C1, C2, N};
     
     cmdBuff
         .bindPipeline(concat)
@@ -1536,24 +1544,24 @@ void SliceNode::prepare()
     _ASSERT(in0.validShape());
     _ASSERT(in0.shape().size() == 2);
     
-    uint32_t N = in0.shape()[0];
-    uint32_t C_in = in0.shape()[1];
+    uint32_t C_in = in0.shape()[0];  // input channels (outer)
+    uint32_t N = in0.shape()[1];     // points (inner)
     
     _ASSERT(start_channel < end_channel);
     _ASSERT(end_channel <= C_in);
     
     uint32_t slice_size = end_channel - start_channel;
-    // Output shape: [N, slice_size]
-    (*this)["out0"] = Tensor(N, slice_size);
+    // Output shape: [slice_size, N]
+    (*this)["out0"] = Tensor(slice_size, N);
 }
 
 void SliceNode::run(CommandBuffer cmdBuff)
 {
-    Tensor& in0 = (*this)["in0"];   // [N, C_in]
-    Tensor& out0 = (*this)["out0"]; // [N, slice_size]
+    Tensor& in0 = (*this)["in0"];   // [C_in, N]
+    Tensor& out0 = (*this)["out0"]; // [slice_size, N]
     
-    uint32_t N = in0.shape()[0];
-    uint32_t C_in = in0.shape()[1];
+    uint32_t C_in = in0.shape()[0];  // input channels (outer)
+    uint32_t N = in0.shape()[1];     // points (inner)
     uint32_t slice_size = end_channel - start_channel;
     
     sliceDescSet.write({
@@ -1561,13 +1569,13 @@ void SliceNode::run(CommandBuffer cmdBuff)
         out0.buffer()
     });
     
-    uint32_t pc[] = {N, C_in, start_channel, slice_size};
+    uint32_t pc[] = {C_in, N, start_channel, slice_size};
     
     cmdBuff
         .bindPipeline(slice)
         .bindDescSets({sliceDescSet})
         .setPushConstants(0, sizeof(pc), pc)
-        .dispatch0((N * slice_size + 255) / 256, 1, 1)
+        .dispatch0((slice_size * N + 255) / 256, 1, 1)
         .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / out0.buffer()
@@ -1645,31 +1653,31 @@ MatMulNode::MatMulNode()
 
 void MatMulNode::prepare()
 {
-    Tensor& in0 = (*this)["in0"];
-    Tensor& in1 = (*this)["in1"];
+    Tensor& in0 = (*this)["in0"];  // [K, N] - point features
+    Tensor& in1 = (*this)["in1"];  // [M, K] - transformation matrix
     
     _ASSERT(in0.validShape() && in1.validShape());
     _ASSERT(in0.shape().size() == 2);
     _ASSERT(in1.shape().size() == 2);
-    _ASSERT(in0.shape()[1] == in1.shape()[0]); // K must match
+    _ASSERT(in0.shape()[0] == in1.shape()[1]); // K must match
     
-    uint32_t N = in0.shape()[0];
-    uint32_t K = in0.shape()[1];
-    uint32_t M = in1.shape()[1];
+    uint32_t K = in0.shape()[0];   // intermediate dimension
+    uint32_t N = in0.shape()[1];   // points (inner)
+    uint32_t M = in1.shape()[0];   // output dimension (outer)
     
-    // Output shape: [N, M]
-    (*this)["out0"] = Tensor(N, M);
+    // Output shape: [M, N]
+    (*this)["out0"] = Tensor(M, N);
 }
 
 void MatMulNode::run(CommandBuffer cmdBuff)
 {
-    Tensor& in0 = (*this)["in0"];   // [N, K]
-    Tensor& in1 = (*this)["in1"];   // [K, M]
-    Tensor& out0 = (*this)["out0"]; // [N, M]
+    Tensor& in0 = (*this)["in0"];   // [K, N]
+    Tensor& in1 = (*this)["in1"];   // [M, K]
+    Tensor& out0 = (*this)["out0"]; // [M, N]
     
-    uint32_t N = in0.shape()[0];
-    uint32_t K = in0.shape()[1];
-    uint32_t M = in1.shape()[1];
+    uint32_t K = in0.shape()[0];  // intermediate dimension
+    uint32_t N = in0.shape()[1];  // points (inner)
+    uint32_t M = in1.shape()[0];  // output dimension (outer)
     
     matmulDescSet.write({
         out0.buffer(),
@@ -1677,13 +1685,13 @@ void MatMulNode::run(CommandBuffer cmdBuff)
         in1.buffer()
     });
     
-    uint32_t pc[] = {N, K, M};
+    uint32_t pc[] = {M, K, N};
     
     cmdBuff
         .bindPipeline(matmul)
         .bindDescSets({matmulDescSet})
         .setPushConstants(0, sizeof(pc), pc)
-        .dispatch0((M + 15) / 16, (N + 15) / 16, 1)
+        .dispatch0((N + 15) / 16, (M + 15) / 16, 1)  // x=N, y=M
         .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / out0.buffer()
