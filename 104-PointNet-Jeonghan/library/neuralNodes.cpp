@@ -880,7 +880,7 @@ void PointWiseMLPNode::prepare()
     _ASSERT(inShape.size() == 2);
     _ASSERT(inShape[0] == Cin);  // [Cin, N] layout - channels is outer dimension
     _ASSERT((*this)["weight"].validShape());
-    _ASSERT((*this)["weight"].isShapeOf(Cin, Cout));
+    _ASSERT((*this)["weight"].isShapeOf(Cout, Cin));  // PyTorch format: [Cout, Cin]
     _ASSERT((*this)["bias"].validShape());
     _ASSERT((*this)["bias"].isShapeOf(Cout));
 
@@ -1020,14 +1020,14 @@ void PointWiseConvNode::prepare()
 {
     const auto& inShape = (*this)["in0"].shape();
     _ASSERT(inShape.size() == 2);
-    _ASSERT(inShape[1] == Cin);
+    _ASSERT(inShape[0] == Cin);  // [Cin, N] layout
     _ASSERT((*this)["weight"].validShape());
-    _ASSERT((*this)["weight"].isShapeOf(Cin, Cout));
+    _ASSERT((*this)["weight"].isShapeOf(Cout, Cin));  // PyTorch format: [Cout, Cin]
     _ASSERT((*this)["bias"].validShape());
     _ASSERT((*this)["bias"].isShapeOf(Cout));
 
-    (*this)["out0"] = Tensor(inShape[0], Cout);
-    (*this)["conv_out"] = Tensor(inShape[0], Cout);
+    (*this)["out0"] = Tensor(Cout, inShape[1]);      // [Cout, N]
+    (*this)["conv_out"] = Tensor(Cout, inShape[1]);  // [Cout, N]
     
     // Set default BatchNorm parameters if not provided
     if (!(*this)["bn_mean"].validShape()) {

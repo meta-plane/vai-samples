@@ -55,8 +55,8 @@ Tensor eval_mlp(const std::vector<float>& inputData, const SafeTensorsParser& we
     // Prepare network
     net.prepare();
     
-    // Create input tensor [N, C_in]
-    Tensor inputTensor = Tensor(N, C_in).set(inputData);
+    // Create input tensor [C_in, N]
+    Tensor inputTensor = Tensor(C_in, N).set(inputData);
     
     // Run inference
     auto result = net(inputTensor);
@@ -71,10 +71,10 @@ void test() {
     // Load reference data (SafeTensors format - preferred)
     SafeTensorsParser data(PROJECT_CURRENT_DIR"/test/mlp/reference.safetensors");
     
-    // Extract shape from tensor - direct access
+    // Extract shape from tensor - direct access [C_in, N, C_out]
     std::vector<float> shape_data = data["shape"].parseNDArray();
-    uint32_t N = static_cast<uint32_t>(shape_data[0]);
-    uint32_t C_in = static_cast<uint32_t>(shape_data[1]);
+    uint32_t C_in = static_cast<uint32_t>(shape_data[0]);
+    uint32_t N = static_cast<uint32_t>(shape_data[1]);
     uint32_t C_out = static_cast<uint32_t>(shape_data[2]);
     
     std::cout << "╔══════════════════════════════════════════╗\n";
@@ -83,7 +83,7 @@ void test() {
     std::cout << "╚══════════════════════════════════════════╝\n\n";
     
     std::cout << "Test configuration:\n";
-    std::cout << "  Shape: [N=" << N << ", C_in=" << C_in << ", C_out=" << C_out << "]\n";
+    std::cout << "  Shape: [C_in=" << C_in << ", N=" << N << ", C_out=" << C_out << "]\n";
     std::cout << "  Input size:  " << (N * C_in) << " values\n";
     std::cout << "  Output size: " << (N * C_out) << " values\n\n";
     

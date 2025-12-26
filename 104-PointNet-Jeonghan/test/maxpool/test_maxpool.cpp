@@ -39,8 +39,8 @@ Tensor eval_maxpool(uint32_t N, uint32_t C,
     // Create network
     MaxPoolTestNet net(netGlobalDevice);
     
-    // Create input tensor [N, C]
-    Tensor input_tensor = Tensor(N, C).set(input_data);
+    // Create input tensor [C, N]
+    Tensor input_tensor = Tensor(C, N).set(input_data);
     
     // Prepare network
     net.prepare();
@@ -60,13 +60,13 @@ void test() {
     // Load reference data
     SafeTensorsParser json(PROJECT_CURRENT_DIR"/test/maxpool/reference.safetensors");
     
-    // Parse configuration
+    // Parse configuration [C, N]
     std::vector<float> shape = json["shape"].parseNDArray();
-    uint32_t N = static_cast<uint32_t>(shape[0]);
-    uint32_t C = static_cast<uint32_t>(shape[1]);
+    uint32_t C = static_cast<uint32_t>(shape[0]);
+    uint32_t N = static_cast<uint32_t>(shape[1]);
     
     std::cout << "Test configuration:\n";
-    std::cout << "  Input: [" << N << ", " << C << "]\n";
+    std::cout << "  Input: [C=" << C << ", N=" << N << "]\n";
     std::cout << "  Output: [" << C << "]\n";
     std::cout << std::endl;
     

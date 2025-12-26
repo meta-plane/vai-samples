@@ -44,9 +44,9 @@ Tensor eval_matmul(uint32_t N, uint32_t K, uint32_t M,
     // Create network
     MatMulTestNet net(netGlobalDevice);
     
-    // Create input tensors
-    Tensor A = Tensor(N, K).set(A_data);
-    Tensor B = Tensor(K, M).set(B_data);
+    // Create input tensors [K, N] and [M, K]
+    Tensor A = Tensor(K, N).set(A_data);
+    Tensor B = Tensor(M, K).set(B_data);
     
     // Run inference - prepare() is called inside run() for each node
     auto result = net(A, B);
@@ -61,12 +61,12 @@ void test() {
     // Load reference data
     SafeTensorsParser json = SafeTensorsParser(PROJECT_CURRENT_DIR"/test/matmul/reference.safetensors");
     
-    // Parse dimensions
+    // Parse dimensions [M, K, N]
     std::vector<float> shape = json["shape"].parseNDArray();
     
-    uint32_t N = static_cast<uint32_t>(shape[0]);
+    uint32_t M = static_cast<uint32_t>(shape[0]);
     uint32_t K = static_cast<uint32_t>(shape[1]);
-    uint32_t M = static_cast<uint32_t>(shape[2]);
+    uint32_t N = static_cast<uint32_t>(shape[2]);
     
     std::cout << "╔══════════════════════════════════════════╗\n";
     std::cout << "║      MatMul Vulkan Compute Test         ║\n";
