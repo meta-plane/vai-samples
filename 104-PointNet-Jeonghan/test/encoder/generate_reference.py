@@ -62,12 +62,12 @@ with torch.no_grad():
     x = torch.relu(model.bn2(model.conv2(x)))  # [B, 128, N]
     x = model.bn3(model.conv3(x))  # [B, 1024, N]
     
-    # For Vulkan test: point-wise features [B, 1024, N] -> [N, 1024]
-    pointwise_features = x[0].transpose(0, 1).contiguous()  # [N, 1024]
+    # For Vulkan test: point-wise features [B, 1024, N] -> [1024, N] (keep PyTorch format)
+    pointwise_features = x[0].contiguous()  # [1024, N] - no transpose!
     print(f"  Point-wise features shape: {pointwise_features.shape}")
 
-# Convert input to [N, channel] for Vulkan
-input_vulkan = input_data[0].transpose(0, 1).contiguous()  # [channel, N] → [N, channel]
+# Keep input in PyTorch format [channel, N] for Vulkan
+input_vulkan = input_data[0].contiguous()  # [channel, N] - no transpose!
 
 # Save input, expected output, and all model weights
 tensors = {
@@ -75,26 +75,29 @@ tensors = {
     'expected_output': pointwise_features,  # [N, 1024]
 }
 
-# Save all model weights with proper transposing for Vulkan GEMM
-# Conv1d weights: [out, in, 1] -> squeeze and transpose to [in, out]
-# Linear weights: [out, in] -> transpose to [in, out]
+# Save all model weights in PyTorch native format (no transpose!)
+# Conv1d weights: [out, in, 1] -> squeeze to [out, in]
+# Linear weights: [out, in] - keep as is
 for name, param in model.state_dict().items():
     if 'conv' in name and '.weight' in name and not 'bn' in name:
-        # Conv1d: [C_out, C_in, 1] -> [C_in, C_out]
-        tensors[name] = param.squeeze(-1).transpose(0, 1).contiguous()
+        # Conv1d: [C_out, C_in, 1] -> [C_out, C_in] - just squeeze
+        tensors[name] = param.squeeze(-1).contiguous()
     elif 'fc' in name and '.weight' in name:
-        # Linear: [out, in] -> [in, out]
-        tensors[name] = param.transpose(0, 1).contiguous()
+        # Linear: [out, in] - keep as is
+        tensors[name] = param.contiguous()
     else:
-        # BatchNorm, bias, running_mean, running_var - no transpose
+        # BatchNorm, bias, running_mean, running_var - no change
         tensors[name] = param
 
-save_file(tensors, 'test/encoder/reference.safetensors')
+from pathlib import Path
+output_dir = Path(__file__).parent
+output_file = output_dir / 'reference.safetensors'
+save_file(tensors, str(output_file))
 
 print(f"✓ Reference data saved")
 print(f"  Weights: {len(model.state_dict())} tensors")
-print(f"  Input: [N={N}, channel={channel}]")
-print(f"  Expected output: [N={N}, 1024]")
+print(f"  Input: [channel={channel}, N={N}] - [C, N] layout")
+print(f"  Expected output: [1024, N={N}] - [C, N] layout")
 print(f"\nFirst 5 values of expected output (first point):")
 for i in range(5):
     print(f"  [{i}] = {pointwise_features[0, i].item():.6f}")

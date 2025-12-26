@@ -173,39 +173,11 @@ void loadPointNetWeightsFromJSON(PointNetSegment& model, const std::string& weig
     // Load JSON (yanx27 format)
     JsonParser json(weights_file.c_str());
     
-    // Helper lambda to load tensor with automatic transpose for weights
-    // PyTorch format: [output_dim, input_dim, ...] → Vulkan format: [input_dim, output_dim]
+    // Helper lambda to load tensor - NO TRANSPOSE needed with PyTorch convention!
+    // PyTorch format is now used directly: [output_dim, input_dim]
     auto loadTensor = [&json](const std::string& key) -> Tensor {
         try {
-            std::vector<uint32_t> shape;
-            std::vector<float> data = json[key].parseNDArray(shape);
-            
-            // Transpose weights (but not biases or BatchNorm params)
-            if (key.find(".weight") != std::string::npos) {
-                if (shape.size() == 2) {
-                    // 2D weight: [M, N] → [N, M]
-                    uint32_t M = shape[0], N = shape[1];
-                    std::vector<float> transposed(M * N);
-                    for (uint32_t i = 0; i < M; ++i) {
-                        for (uint32_t j = 0; j < N; ++j) {
-                            transposed[j * M + i] = data[i * N + j];
-                        }
-                    }
-                    return Tensor(N, M).set(transposed);
-                } else if (shape.size() == 3 && shape[2] == 1) {
-                    // 3D weight with last dim = 1: [M, N, 1] → [N, M]
-                    // Squeeze last dimension and transpose
-                    uint32_t M = shape[0], N = shape[1];
-                    std::vector<float> transposed(M * N);
-                    for (uint32_t i = 0; i < M; ++i) {
-                        for (uint32_t j = 0; j < N; ++j) {
-                            transposed[j * M + i] = data[i * N + j];  // Skip last dim (always 0)
-                        }
-                    }
-                    return Tensor(N, M).set(transposed);
-                }
-            }
-            // No transpose needed (bias, mean, var, gamma, beta, or unsupported shape)
+            // Load tensor as-is from JSON (PyTorch native format)
             return Tensor(json[key]);
         } catch (const std::exception& e) {
             throw std::runtime_error("Failed to load tensor '" + key + "': " + e.what());

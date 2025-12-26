@@ -9,13 +9,14 @@ import torch.nn as nn
 import numpy as np
 import json
 from pathlib import Path
+from safetensors.torch import save_file
 
 # Fixed seed
 torch.manual_seed(42)
 np.random.seed(42)
 
-# Config
-N, C = 5, 3  # 5 points, 3 channels
+# Config - [C, N] layout
+C, N = 3, 5  # 3 channels, 5 points
 
 # Create BatchNorm
 bn = nn.BatchNorm1d(C)
@@ -45,14 +46,26 @@ data = {
 }
 
 # Save JSON
-output_dir = Path("test/batchnorm")
-output_dir.mkdir(parents=True, exist_ok=True)
+output_dir = Path(__file__).parent
 
 json_path = output_dir / "reference.json"
 with open(json_path, 'w') as f:
     json.dump(data, f, indent=2)
 
-print("BatchNorm1D Reference Generated (JSON)")
+# Save SafeTensors (preferred format)
+tensors = {
+    "input": torch.from_numpy(input_cn).contiguous(),
+    "expected": torch.from_numpy(output_cn).contiguous(),
+    "mean": torch.from_numpy(bn.running_mean.numpy()).contiguous(),
+    "var": torch.from_numpy(bn.running_var.numpy()).contiguous(),
+    "gamma": torch.from_numpy(bn.weight.data.numpy()).contiguous(),
+    "beta": torch.from_numpy(bn.bias.data.numpy()).contiguous(),
+    "shape": torch.tensor([C, N], dtype=torch.float32)
+}
+safetensors_path = output_dir / "reference.safetensors"
+save_file(tensors, str(safetensors_path))
+
+print("BatchNorm1D Reference Generated (JSON + SafeTensors)")
 print(f"  Input:  {input_cn.shape} -> {input_cn.size} values [C, N]")
 print(f"  Output: {output_cn.shape} -> {output_cn.size} values [C, N]")
 print(f"  Mean:   {bn.running_mean.shape}")

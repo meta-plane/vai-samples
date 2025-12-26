@@ -48,8 +48,8 @@ Tensor eval_batchnorm(const std::vector<float>& inputData, const SafeTensorsPars
     // Prepare network
     net.prepare();
     
-    // Create input tensor [N, C]
-    Tensor inputTensor = Tensor(N, C).set(inputData);
+    // Create input tensor [C, N]
+    Tensor inputTensor = Tensor(C, N).set(inputData);
     
     // Run inference
     auto result = net(inputTensor);
@@ -64,17 +64,17 @@ void test() {
     // Load reference data
     SafeTensorsParser json = SafeTensorsParser(PROJECT_CURRENT_DIR"/test/batchnorm/reference.safetensors");
     
-    // Extract shape from array [N, C]
+    // Extract shape from array [C, N]
     std::vector<float> shape_data = json["shape"].parseNDArray();
-    uint32_t N = static_cast<uint32_t>(shape_data[0]);
-    uint32_t C = static_cast<uint32_t>(shape_data[1]);
+    uint32_t C = static_cast<uint32_t>(shape_data[0]);
+    uint32_t N = static_cast<uint32_t>(shape_data[1]);
     
     std::cout << "╔══════════════════════════════════════════╗\n";
     std::cout << "║   BatchNorm1D Vulkan Compute Test       ║\n";
     std::cout << "╚══════════════════════════════════════════╝\n\n";
     
     std::cout << "Test configuration:\n";
-    std::cout << "  Shape: [" << N << ", " << C << "]\n";
+    std::cout << "  Shape: [C=" << C << ", N=" << N << "]\n";
     std::cout << "  Total values: " << (N * C) << "\n\n";
     
     // Get input data
