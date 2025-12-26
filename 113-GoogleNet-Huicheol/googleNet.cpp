@@ -96,9 +96,9 @@ layout(set = 0, binding = 3) buffer InBuffer2 { float in2[]; };
 layout(set = 0, binding = 4) buffer InBuffer3 { float in3[]; };
 
 layout(push_constant) uniform PushConstants {
+    int C_out;
     int H;
     int W;
-    int C_out;
     int C0;
     int C1;
     int C2;
@@ -108,30 +108,32 @@ layout(push_constant) uniform PushConstants {
 void main() 
 {
     int idx = int(gl_GlobalInvocationID.x);
-    int totalElements = H * W * C_out;
+    int totalElements = C_out * H * W;
     if (idx >= totalElements) return;
 
-    int c_out = idx % C_out;
-    int hw = idx / C_out;
+    int c_out = idx / (H * W);
+    int hw = idx - c_out * H * W;
+    int h = hw / W;
+    int w = hw - h * W;
 
     float val = 0.0;
 
     if (c_out < C0) {
-        val = in0[hw * C0 + c_out];
+        val = in0[(c_out * H + h) * W + w];
     } else if (c_out < C0 + C1) {
-        val = in1[hw * C1 + (c_out - C0)];
+        val = in1[((c_out - C0) * H + h) * W + w];
     } else if (c_out < C0 + C1 + C2) {
-        val = in2[hw * C2 + (c_out - C0 - C1)];
+        val = in2[((c_out - C0 - C1) * H + h) * W + w];
     } else {
-        val = in3[hw * C3 + (c_out - C0 - C1 - C2)];
+        val = in3[((c_out - C0 - C1 - C2) * H + h) * W + w];
     }
 
-    out0[idx] = val;
+    out0[(c_out * H + h) * W + w] = val;
 })";
 
 static DescriptorPool gDestSetPool = netGlobalDevice.createDescriptorPool({
-    .maxTypes = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER <= 200}, 
-    .maxSets = 100
+    .maxTypes = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER <= 200000}, 
+    .maxSets = 100000
 });
 
 static ComputePipeline requestPipeline(const char* src)
@@ -164,38 +166,39 @@ void ConcatenationNode::prepare()
     auto& in0 = (*this)["in0"];
     _ASSERT(in0.validShape());
     const auto& shape0 = in0.shape();
-    uint32_t H = shape0[0];
-    uint32_t W = shape0[1];
-    uint32_t totalC = shape0[2];
+    uint32_t C = shape0[0];
+    uint32_t H = shape0[1];
+    uint32_t W = shape0[2];
+    uint32_t totalC = C;
 
     for (uint32_t i = 1; i < numInputs; ++i)
     {
         auto& in = (*this)["in" + std::to_string(i)];
         _ASSERT(in.validShape());
         const auto& shape = in.shape();
-        _ASSERT(shape[0] == H && shape[1] == W);
-        totalC += shape[2];
+        _ASSERT(shape[1] == H && shape[2] == W);
+        totalC += shape[0];
     }
 
-    (*this)["out0"] = Tensor(H, W, totalC);
+    (*this)["out0"] = Tensor(totalC, H, W);
 }
 
 void ConcatenationNode::run(CommandBuffer cmdBuff)
 {
     auto& out = (*this)["out0"];
     const auto& outShape = out.shape();
-    uint32_t H = outShape[0];
-    uint32_t W = outShape[1];
-    uint32_t C_out = outShape[2];
+    uint32_t C_out = outShape[0];
+    uint32_t H = outShape[1];
+    uint32_t W = outShape[2];
 
     std::vector<Buffer> buffers = { out.buffer() };
-    std::vector<int> pushConstants = { (int)H, (int)W, (int)C_out };
+    std::vector<int> pushConstants = { (int)C_out, (int)H, (int)W };
 
     for (uint32_t i = 0; i < numInputs; ++i)
     {
         auto& in = (*this)["in" + std::to_string(i)];
         buffers.push_back(in.buffer());
-        pushConstants.push_back((int)in.shape()[2]);
+        pushConstants.push_back((int)in.shape()[0]);
     }
     // Fill remaining slots if < 4 inputs (though Inception uses 4)
     for (uint32_t i = numInputs; i < 4; ++i)
@@ -242,10 +245,10 @@ InceptionBlockNode::InceptionBlockNode(uint32_t inChannels, uint32_t ch1x1, uint
     conv3x3 = std::make_unique<ConvolutionNode>(ch3x3red, ch3x3, 3, 1, 1);
     relu3x3 = std::make_unique<ReluNode>();
 
-    // 5x5 branch (single 5x5 conv as in torchvision GoogLeNet)
+    // 5x5 branch (torchvision uses a 3x3 here, replacing the original 5x5)
     conv5x5_reduce = std::make_unique<ConvolutionNode>(inChannels, ch5x5red, 1);
     relu5x5_reduce = std::make_unique<ReluNode>();
-    conv5x5 = std::make_unique<ConvolutionNode>(ch5x5red, ch5x5, 5, 1, 2);
+    conv5x5 = std::make_unique<ConvolutionNode>(ch5x5red, ch5x5, 3, 1, 1);
     relu5x5 = std::make_unique<ReluNode>();
 
     // Pooling branch
@@ -309,7 +312,7 @@ void InceptionBlockNode::loadWeights(const JsonParser* json, const SafeTensorsPa
     loadConv(*conv3x3_reduce, inChannels, ch3x3redOut, 1, "3x3_reduce");
     loadConv(*conv3x3, ch3x3redOut, ch3x3Out, 3, "3x3");
     loadConv(*conv5x5_reduce, inChannels, ch5x5redOut, 1, "5x5_reduce");
-    loadConv(*conv5x5, ch5x5redOut, ch5x5Out, 5, "5x5");
+    loadConv(*conv5x5, ch5x5redOut, ch5x5Out, 3, "5x5");
     loadConv(*pool_proj, inChannels, poolProjOut, 1, "pool_proj");
 }
 
@@ -322,14 +325,16 @@ GoogleNet::GoogleNet(Device& device, uint32_t numClasses)
     , numClasses(numClasses)
     , conv1(3, 64, 7, 2, 3) // stride 2, pad 3
     , relu1()
-    , pool1(3, 2, 1)
+    , pool1(3, 2, 0)
+    // , lrn1()
     , conv2_reduce(64, 64, 1)
     , relu2_reduce()
     , conv2(64, 192, 3, 1, 1) // pad 1
     , relu2()
-    , pool2(3, 2, 1)
-    , pool3(3, 2, 1)
-    , pool4(3, 2, 1)
+    // , lrn2()
+    , pool2(3, 2, 0)
+    , pool3(3, 2, 0)
+    , pool4(2, 2, 0) // after inception4e (matches torchvision: 2x2 stride 2 ceil)
     , avgPool()
     , flatten()
     , fc(1024, numClasses)
@@ -349,7 +354,7 @@ GoogleNet::GoogleNet(Device& device, uint32_t numClasses)
 
     // Connect layers
     // Stem
-    input(0) - conv1 - relu1 - pool1 - conv2_reduce - relu2_reduce - conv2 - relu2 - pool2;
+    input(0) - conv1 - relu1 - pool1 /*- lrn1*/ - conv2_reduce - relu2_reduce - conv2 - relu2 /*- lrn2*/ - pool2;
 
     // Inception 3a
     // Note: We need to connect pool2 output to ALL branches of inception3a.
@@ -396,6 +401,13 @@ void GoogleNet::loadWeights(const JsonParser* json, const SafeTensorsParser* st)
 
 void GoogleNet::loadWeights(const SafeTensorsParser* safetensors)
 {
+    if (safetensors) {
+        std::cout << "SafeTensors Keys:" << std::endl;
+        auto names = safetensors->getTensorNames();
+        for (const auto& name : names) {
+            std::cout << "  " << name << std::endl;
+        }
+    }
     loadWeights(nullptr, safetensors);
 }
 
@@ -426,6 +438,7 @@ Tensor& GoogleNet::debugTensor(const std::string& name)
 {
     if (name == "conv1.out") return conv1["out0"];
     if (name == "pool1.out") return pool1["out0"];
+    if (name == "conv2_reduce.out") return conv2_reduce["out0"];
     if (name == "conv2.out") return conv2["out0"];
     if (name == "pool2.out") return pool2["out0"];
     if (name == "inception3a.out") return (*inception3a)["out0"];

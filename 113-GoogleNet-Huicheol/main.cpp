@@ -1,16 +1,15 @@
 #include <GLFW/glfw3.h>
 #include <iostream>
 
-int main()
+void test(const char* imagePath = nullptr);
+
+int main(int argc, char** argv)
 {
     glfwInit();
-    
-    // Window creation might be handled in test() or vulkanApp.cpp depending on the exact pattern
-    // For now, we keep the basic setup but delegate logic to test()
-    
-    void test();
-    test();
-    
+
+    const char* imgPath = (argc > 1) ? argv[1] : nullptr;
+    test(imgPath);
+
     glfwTerminate();
     return 0;
 }

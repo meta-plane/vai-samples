@@ -38,7 +38,6 @@ public:
 
 class MaxPoolingNode : public Node
 {
-    const bool discardTail = true; 
     uint32_t P;
     uint32_t S;
     uint32_t padding;

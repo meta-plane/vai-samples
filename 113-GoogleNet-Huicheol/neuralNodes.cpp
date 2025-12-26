@@ -57,9 +57,9 @@ layout(local_size_x = 256) in;
 layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };
 layout(set = 0, binding = 1) buffer InBuffer { float in0[]; };
 layout(push_constant) uniform PushConstants {
+    int C;
     int H;
     int W;
-    int C;
     int size;    // window size across channels (e.g., 5)
     float alpha; // usually 1e-4
     float beta;  // usually 0.75
@@ -69,12 +69,11 @@ layout(push_constant) uniform PushConstants {
 void main()
 {
     int idx = int(gl_GlobalInvocationID.x);
-    int HW = H * W;
-    int total = HW * C;
+    int total = C * H * W;
     if (idx >= total) return;
 
-    int hw = idx / C;
-    int c = idx - hw * C;
+    int c = idx / (H * W);
+    int hw = idx - c * H * W;
     int h = hw / W;
     int w = hw - h * W;
 
@@ -82,11 +81,11 @@ void main()
     float sumSq = 0.0;
     for (int cc = max(0, c - halfWindow); cc <= min(C - 1, c + halfWindow); ++cc)
     {
-        float v = in0[(h * W + w) * C + cc];
+        float v = in0[(cc * H + h) * W + w];
         sumSq += v * v;
     }
 
-    float norm = pow(k + (alpha / float(size)) * sumSq, beta);
+    float norm = pow(k + alpha * sumSq, beta);
     out0[idx] = in0[idx] / norm;
 }
 )";
@@ -94,14 +93,13 @@ void main()
 static const char* src_maxpool = R"(
 #version 450
 #define FLT_MIN -3.402823466e+38
-#define DISCARD_TAIL
 layout(local_size_x = 64, local_size_y = 4, local_size_z = 4) in;
 layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };
 layout(set = 0, binding = 1) buffer InBuffer { float in0[]; };
 layout(push_constant) uniform PushConstants {
+    int C;
     int H;      // input height
     int W;      // input width
-    int C;
     int P;      // pooling window
     int S;      // stride
     int pad;    // symmetric padding
@@ -112,13 +110,8 @@ void main()
     int h_ = int(gl_GlobalInvocationID.x);  // output row
     int w_ = int(gl_GlobalInvocationID.y);  // output col
     int c = int(gl_GlobalInvocationID.z);   // channel
-#ifdef DISCARD_TAIL
-    int H_ = (H + 2 * pad - P) / S + 1;
-    int W_ = (W + 2 * pad - P) / S + 1;
-#else
     int H_ = (H + 2 * pad - P + S - 1) / S + 1;
     int W_ = (W + 2 * pad - P + S - 1) / S + 1;
-#endif
     if (h_ >= H_ || w_ >= W_ || c >= C)
         return;
 
@@ -134,11 +127,11 @@ void main()
 
             if (0 <= h && h < H && 0 <= w && w < W) 
             {
-                maxVal = max(maxVal, in0[(h * W + w) * C + c]);
+                maxVal = max(maxVal, in0[(c * H + h) * W + w]);
             }
         }
     }
-    out0[(h_ * W_ + w_) * C + c] = maxVal;
+    out0[(c * H_ + h_) * W_ + w_] = maxVal;
 })";
 
 static const char* src_im2col = R"(
@@ -147,9 +140,9 @@ layout(local_size_x = 64, local_size_y = 16) in;
 layout(set = 0, binding = 0) writeonly buffer OutBuffer { float im2colOut[]; };
 layout(set = 0, binding = 1) readonly buffer InBuffer { float in0[]; };
 layout(push_constant) uniform PushConstants {
+    int C;
     int H;
     int W;
-    int C;
     int K;
     int S;
     int pad;
@@ -168,14 +161,14 @@ void main()
 
     int h_ = i / W_;
     int w_ = i % W_;
-    int c = j / KK;         // image channel
+    int c = j / KK;
     int k = j % KK;
 
     float value = 0.0;
     int h = h_ * S + k / K - pad;  
     int w = w_ * S + k % K - pad;   
     if (0 <= h && h < H && 0 <= w && w < W) 
-        value = in0[((h * W) + w) * C + c];
+        value = in0[(c * H + h) * W + w];
 
     im2colOut[i * CKK + j] = value;
 })";
@@ -368,6 +361,53 @@ void main()
 
     if (validThread)
         C[m * N + n] = acc + b[n];
+})";
+
+// Variant for convolution: write output as channel-major (c,h,w) => index = n * M + m,
+// where M = H_out * W_out, n = out channel.
+static const char* src_gemm_shared_conv = R"(
+#version 450
+layout(local_size_x = 32, local_size_y = 32) in;
+layout(set = 0, binding = 0) buffer OutBuffer { float C[]; };
+layout(set = 0, binding = 1) buffer InBuffer { float A[]; };
+layout(set = 0, binding = 2) buffer Weight { float B[]; };
+layout(set = 0, binding = 3) buffer Bias { float b[]; };
+
+// C(NxM) in channel-major order (n = out channel, m = spatial idx)
+layout(push_constant) uniform PushConstants {
+    int M;  // H_out * W_out
+    int K;  // input size (C * K * K)
+    int N;  // output channels
+};
+
+shared float As[32 * 32];
+shared float Bs[32 * 32];
+
+void main() 
+{
+    int n = int(gl_GlobalInvocationID.x); 
+    int m = int(gl_GlobalInvocationID.y); 
+    int _n = int(gl_LocalInvocationID.x); 
+    int _m = int(gl_LocalInvocationID.y); 
+    bool validThread = (m < M && n < N);
+
+    float acc = 0.0;
+    int sharedIdx = _m * 32 + _n;
+    for (int k0 = 0; k0 < K; k0 += 32) 
+    {
+        int n_ = k0 + _n;
+        int m_ = k0 + _m;
+        As[sharedIdx] = (m < M && n_ < K) ? A[m * K + n_] : 0.0; // A[m, n_]
+        Bs[sharedIdx] = (m_ < K && n < N) ? B[m_ * N + n] : 0.0; // B[m_, n]
+        barrier();
+
+        for (int k = 0; k < 32; ++k) 
+            acc += As[_m * 32 + k] * Bs[k * 32 + _n];
+        barrier();
+    }
+
+    if (validThread)
+        C[n * M + m] = acc + b[n];
 })";
 
 static const char* src_gemm_multiOut1d = R"(
@@ -589,9 +629,9 @@ layout(local_size_x = 64) in;
 layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };
 layout(set = 0, binding = 1) buffer InBuffer { float in0[]; };
 layout(push_constant) uniform PushConstants {
+    int C;
     int H;
     int W;
-    int C;
 };
 
 void main()
@@ -604,7 +644,7 @@ void main()
     {
         for (int w = 0; w < W; ++w)
         {
-            sum += in0[(h * W + w) * C + c];
+            sum += in0[(c * H + h) * W + w];
         }
     }
     out0[c] = sum / float(H * W);
@@ -632,6 +672,7 @@ static std::map<const char*, uint32_t> gGemmTileSize =
 {
     {src_gemm_naive, 32},
     {src_gemm_shared, 32},
+    {src_gemm_shared_conv, 32},
     {src_gemm_multiOut1d, 64},
     {src_gemm_multiOut2d, 128}
 };
@@ -667,7 +708,7 @@ ConvolutionNode::ConvolutionNode(uint32_t inChannels, uint32_t outChannels, uint
     im2col = requestPipeline(src_im2col);
     im2colDescSet = im2col.descSetLayout(0).newDescSet(gDestSetPool);
     
-    const char* gemmSrc = src_gemm_shared;
+    const char* gemmSrc = src_gemm_shared_conv;
 
     gemm = requestPipeline(gemmSrc);
     gemmTileSize = gGemmTileSize.at(gemmSrc);
@@ -676,22 +717,22 @@ ConvolutionNode::ConvolutionNode(uint32_t inChannels, uint32_t outChannels, uint
 
 void ConvolutionNode::prepare()
 {
-    _ASSERT((*this)["in0"].isShapeOf(-1, -1, C));
+    _ASSERT((*this)["in0"].isShapeOf(C, -1, -1));
     _ASSERT((*this)["weight"].isShapeOf(C*K*K, F));
     _ASSERT((*this)["bias"].isShapeOf(F));
 
     const auto& inShape = (*this)["in0"].shape();
-    uint32_t H = inShape[0], W = inShape[1];
+    uint32_t H = inShape[1], W = inShape[2];
     uint32_t H_ = (H + 2 * padding - K) / S + 1;
     uint32_t W_ = (W + 2 * padding - K) / S + 1;
-    (*this)["im2colOut"] = Tensor(H_, W_, C*K*K);
-    (*this)["out0"] = Tensor(H_, W_, F);
+    (*this)["im2colOut"] = Tensor(H_ * W_, C * K * K);
+    (*this)["out0"] = Tensor(F, H_, W_);
 }
 
 void ConvolutionNode::run(CommandBuffer cmdBuff)
 {
     const auto& inShape = (*this)["in0"].shape();
-    uint32_t H = inShape[0], W = inShape[1];
+    uint32_t H = inShape[1], W = inShape[2];
     uint32_t H_ = (H + 2 * padding - K) / S + 1;
     uint32_t W_ = (W + 2 * padding - K) / S + 1;
 
@@ -707,8 +748,7 @@ void ConvolutionNode::run(CommandBuffer cmdBuff)
         (*this)["bias"].buffer(),
     });
 
-    uint32_t im2colConstants[] = {H, W, C, K, S, padding};
-    // uint32_t gemmConstants[] = {H * W, C * K * K, F};
+    uint32_t im2colConstants[] = {C, H, W, K, S, padding};
 
     uint32_t M = H_ * W_;       // N
     uint32_t K_ = C * K * K;    // I
@@ -716,6 +756,9 @@ void ConvolutionNode::run(CommandBuffer cmdBuff)
     uint32_t gemmConstants[] = {M, K_, N};
 
     cmdBuff
+        .bindPipeline(im2col)
+        .bindDescSets({im2colDescSet})
+        .setPushConstants(0, sizeof(im2colConstants), im2colConstants)
         .bindPipeline(im2col)
         .bindDescSets({im2colDescSet})
         .setPushConstants(0, sizeof(im2colConstants), im2colConstants)
@@ -803,26 +846,34 @@ void LRNNode::prepare()
 
 void LRNNode::run(CommandBuffer cmdBuff)
 {
+    // Bypass LRN for testing: just copy in0 to out0
+    // If accuracy improves, it means the weights were trained without LRN (e.g. TorchVision)
+    
+    // We can use the copy pipeline or just dispatch a simple copy shader.
+    // Or simpler: reuse the LRN shader but set alpha=0, beta=1, k=1?
+    // norm = pow(k + alpha*sum, beta) = pow(1 + 0, 1) = 1.
+    // out = in / 1 = in.
+    
     const auto& inShape = (*this)["in0"].shape();
-    uint32_t H = inShape[0], W = inShape[1], C = inShape[2];
+    uint32_t C = inShape[0], H = inShape[1], W = inShape[2];
 
     lrnDescSet.write({
         (*this)["out0"].buffer(),
         (*this)["in0"].buffer(),
     });
 
-    struct { int H, W, C, size; float alpha, beta, k; } push{};
-    push.H = (int)H; push.W = (int)W; push.C = (int)C;
-    push.size = 5;     // matching AlexNet/GoogLeNet style
-    push.alpha = 1e-4f;
+    struct { int C, H, W, size; float alpha, beta, k; } push{};
+    push.C = (int)C; push.H = (int)H; push.W = (int)W;
+    push.size = 5;
+    push.alpha = 0.0001f / 5.0f;
     push.beta = 0.75f;
-    push.k = 1.0f;
+    push.k = 2.0f;
 
     cmdBuff
         .bindPipeline(lrn)
         .bindDescSets({lrnDescSet})
         .setPushConstants(0, sizeof(push), &push)
-        .dispatch(H * W * C)
+        .dispatch(C * H * W)
         .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["out0"].buffer()
@@ -850,35 +901,27 @@ void MaxPoolingNode::prepare()
 {
     const auto& inShape = (*this)["in0"].shape();
     _ASSERT(inShape.size() == 3);
-    uint32_t H = inShape[0], W = inShape[1], C = inShape[2];
+    uint32_t C = inShape[0], H = inShape[1], W = inShape[2];
 
-    uint32_t H_ = discardTail 
-        ? (H + 2 * padding - P) / S + 1
-        : (H + 2 * padding - P + S - 1) / S + 1;
-    uint32_t W_ = discardTail 
-        ? (W + 2 * padding - P) / S + 1
-        : (W + 2 * padding - P + S - 1) / S + 1;
+    uint32_t H_ = (H + 2 * padding - P + S - 1) / S + 1; // ceil_mode
+    uint32_t W_ = (W + 2 * padding - P + S - 1) / S + 1;
 
-    (*this)["out0"] = Tensor(H_, W_, C);
+    (*this)["out0"] = Tensor(C, H_, W_);
 }
 
 void MaxPoolingNode::run(CommandBuffer cmdBuff)
 {
     const auto& inShape = (*this)["in0"].shape();
-    uint32_t H = inShape[0], W = inShape[1], C = inShape[2];
-    uint32_t H_ = discardTail 
-        ? (H + 2 * padding - P) / S + 1
-        : (H + 2 * padding - P + S - 1) / S + 1;
-    uint32_t W_ = discardTail 
-        ? (W + 2 * padding - P) / S + 1
-        : (W + 2 * padding - P + S - 1) / S + 1;
+    uint32_t C = inShape[0], H = inShape[1], W = inShape[2];
+    uint32_t H_ = (H + 2 * padding - P + S - 1) / S + 1; // ceil_mode
+    uint32_t W_ = (W + 2 * padding - P + S - 1) / S + 1;
 
     maxpoolDescSet.write({
         (*this)["out0"].buffer(),
         (*this)["in0"].buffer(),
     });
 
-    uint32_t maxpoolConstants[] = {H, W, C, P, S, padding};
+    uint32_t maxpoolConstants[] = {C, H, W, P, S, padding};
 
     cmdBuff
         .bindPipeline(maxpool)
@@ -1003,21 +1046,21 @@ void GlobalAvgPoolNode::prepare()
 {
     const auto& inShape = (*this)["in0"].shape();
     _ASSERT(inShape.size() == 3);
-    uint32_t C = inShape[2];
-    (*this)["out0"] = Tensor(1, 1, C);
+    uint32_t C = inShape[0];
+    (*this)["out0"] = Tensor(C, 1, 1);
 }
 
 void GlobalAvgPoolNode::run(CommandBuffer cmdBuff)
 {
     const auto& inShape = (*this)["in0"].shape();
-    uint32_t H = inShape[0], W = inShape[1], C = inShape[2];
+    uint32_t C = inShape[0], H = inShape[1], W = inShape[2];
 
     avgpoolDescSet.write({
         (*this)["out0"].buffer(),
         (*this)["in0"].buffer(),
     });
 
-    uint32_t pushConstants[] = {H, W, C};
+    uint32_t pushConstants[] = {C, H, W};
 
     cmdBuff
         .bindPipeline(avgpool)
