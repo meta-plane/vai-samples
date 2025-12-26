@@ -11,13 +11,13 @@ from pathlib import Path
 def main():
     torch.manual_seed(42)
     
-    # Test configuration
-    N = 16   # Number of points
-    C = 128  # Number of channels
+    # Test configuration ([C, N] layout)
+    C = 128  # Number of channels (outer dimension)
+    N = 16   # Number of points (inner dimension)
     
     print(f"Generating MaxPooling1D reference data...")
-    print(f"  Input: [{N}, {C}]")
-    print(f"  Output: [{C}]")
+    print(f"  Input: [{C}, {N}] - [channels, points]")
+    print(f"  Output: [{C}] - max over points dimension")
     
     # Generate random input [C, N] - PyTorch native format
     x = torch.randn(C, N)
@@ -51,6 +51,18 @@ def main():
     print(f"✓ Saved to {output_file}")
     print(f"  Input values: {C * N}")
     print(f"  Output values: {C}")
+    
+    # Save SafeTensors (preferred format)
+    from safetensors.torch import save_file
+    tensors = {
+        'input': x.flatten().contiguous(),
+        'output': output.contiguous(),
+        'indices': indices.contiguous(),
+        'shape': torch.tensor([C, N], dtype=torch.float32)
+    }
+    safetensors_file = output_dir / 'reference.safetensors'
+    save_file(tensors, str(safetensors_file))
+    print(f"✓ Saved SafeTensors to {safetensors_file}")
     
     # Show some sample values
     print(f"\nSample values:")

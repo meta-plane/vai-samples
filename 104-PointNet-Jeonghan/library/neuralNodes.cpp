@@ -193,7 +193,7 @@ void main()
 
 static const char* src_gemm_naive = R"(
 #version 450
-layout(local_size_x = 32, local_size_y = 32) in;
+layout(local_size_x = 16, local_size_y = 16) in;
 layout(set = 0, binding = 0) buffer OutBuffer { float C[]; };
 layout(set = 0, binding = 1) buffer InBuffer { float A[]; };
 layout(set = 0, binding = 2) buffer Weight { float B[]; };
@@ -201,6 +201,7 @@ layout(set = 0, binding = 3) buffer Bias { float b[]; };
 
 // C(NxM) = B(NxK)*A(KxM) + b(Nx1)
 // PyTorch: [OutCh, InCh] @ [InCh, Points] = [OutCh, Points]
+// Same layout as matmul but with bias
 layout(push_constant) uniform PushConstants {
     int N;  // # of output channels (outer dimension)
     int K;  // # of input channels
@@ -209,8 +210,8 @@ layout(push_constant) uniform PushConstants {
 
 void main() 
 {
-    int m = int(gl_GlobalInvocationID.x);  // point index (inner)
-    int n = int(gl_GlobalInvocationID.y);  // output channel (outer)
+    int m = int(gl_GlobalInvocationID.x);  // point index (inner, col)
+    int n = int(gl_GlobalInvocationID.y);  // output channel (outer, row)
 
     if (n >= N || m >= M) 
         return;
@@ -345,11 +346,12 @@ layout(set = 0, binding = 1) buffer InBuffer { float A[]; };
 layout(set = 0, binding = 2) buffer Weight { float B[]; };
 layout(set = 0, binding = 3) buffer Bias { float b[]; };
 
-// C(MxN) = A(MxK)*B(KxN) + b(1xN)  
+// C(NxM) = B(NxK)*A(KxM) + b(Nx1)  
+// PyTorch: [OutCh, InCh] @ [InCh, Points] = [OutCh, Points]
 layout(push_constant) uniform PushConstants {
-    int M;  // # of batchs
-    int K;  // # of inputs
-    int N;  // # of outputs
+    int N;  // # of output channels (outer dimension)
+    int K;  // # of input channels
+    int M;  // # of points (inner dimension)
 };
 
 shared float As[32 * 32];
@@ -357,29 +359,34 @@ shared float Bs[32 * 32];
 
 void main() 
 {
-    int n = int(gl_GlobalInvocationID.x); 
-    int m = int(gl_GlobalInvocationID.y); 
-    int _n = int(gl_LocalInvocationID.x); 
-    int _m = int(gl_LocalInvocationID.y); 
-    bool validThread = (m < M && n < N);
+    int m = int(gl_GlobalInvocationID.x);  // point index (inner)
+    int n = int(gl_GlobalInvocationID.y);  // output channel index (outer)
+    int _m = int(gl_LocalInvocationID.x); 
+    int _n = int(gl_LocalInvocationID.y); 
+    bool validThread = (n < N && m < M);
 
     float acc = 0.0;
-    int sharedIdx = _m * 32 + _n;
     for (int k0 = 0; k0 < K; k0 += 32) 
     {
-        int n_ = k0 + _n;
-        int m_ = k0 + _m;
-        As[sharedIdx] = (m < M && n_ < K) ? A[m * K + n_] : 0.0; // A[m, n_]
-        Bs[sharedIdx] = (m_ < K && n < N) ? B[m_ * N + n] : 0.0; // B[m_, n]
+        // Load A tile: As[k, _m] = A[k0+k, m]
+        // Each thread loads one element per row
+        int k_idx = k0 + _n;  // use _n for k index to distribute work
+        As[_n * 32 + _m] = (k_idx < K && m < M) ? A[k_idx * M + m] : 0.0;
+        
+        // Load B tile: Bs[_n, k] = B[n, k0+k]
+        // Each thread loads one element per row
+        int k_idx_b = k0 + _m;  // use _m for k index to distribute work
+        Bs[_n * 32 + _m] = (n < N && k_idx_b < K) ? B[n * K + k_idx_b] : 0.0;
         barrier();
 
+        // Compute: accumulate dot product
         for (int k = 0; k < 32; ++k) 
-            acc += As[_m * 32 + k] * Bs[k * 32 + _n];
+            acc += Bs[_n * 32 + k] * As[k * 32 + _m];
         barrier();
     }
 
     if (validThread)
-        C[m * N + n] = acc + b[n];
+        C[n * M + m] = acc + b[n];
 })";
 
 static const char* src_gemm_multiOut1d = R"(
@@ -864,7 +871,7 @@ PointWiseMLPNode::PointWiseMLPNode(uint32_t inDim, uint32_t outDim)
     addSlot("bn_out", NodeSlot::internal);    // After BatchNorm
 
     // Create pipelines for each stage
-    gemm = requestPipeline(src_gemm_shared);
+    gemm = requestPipeline(src_gemm_naive);
     gemmDesc = gemm.descSetLayout(0).newDescSet(gDestSetPool);
     
     batchnorm = requestPipeline(src_batchnorm1d);
@@ -931,7 +938,7 @@ void PointWiseMLPNode::run(CommandBuffer cmdBuff)
         .bindPipeline(gemm)
         .bindDescSets({gemmDesc})
         .setPushConstants(0, sizeof(pc_gemm), pc_gemm)
-        .dispatch0(CEIL_DIV(M, 32), CEIL_DIV(Cout, 32))  // x=M, y=N
+        .dispatch0(CEIL_DIV(M, 16), CEIL_DIV(Cout, 16))  // x=M, y=N (16x16 like matmul)
         .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["conv_out"].buffer()
@@ -1009,7 +1016,7 @@ PointWiseConvNode::PointWiseConvNode(uint32_t inDim, uint32_t outDim)
     addSlot("conv_out", NodeSlot::internal);  // After Conv
 
     // Create pipelines for Conv and BatchNorm only
-    gemm = requestPipeline(src_gemm_shared);
+    gemm = requestPipeline(src_gemm_naive);
     gemmDesc = gemm.descSetLayout(0).newDescSet(gDestSetPool);
     
     batchnorm = requestPipeline(src_batchnorm1d);
@@ -1051,9 +1058,11 @@ void PointWiseConvNode::prepare()
 void PointWiseConvNode::run(CommandBuffer cmdBuff)
 {
     const auto& inShape = (*this)["in0"].shape();
-    uint32_t N = inShape[0];
+    uint32_t Cin_actual = inShape[0];  // input channels (outer)
+    uint32_t M = inShape[1];           // points (inner)
 
     // Stage 1: Conv1x1 (GEMM)
+    // C(NxM) = B(NxK)*A(KxM) + b
     gemmDesc.write({
         (*this)["conv_out"].buffer(),
         (*this)["in0"].buffer(),
@@ -1062,15 +1071,15 @@ void PointWiseConvNode::run(CommandBuffer cmdBuff)
     });
 
     uint32_t pc_gemm[] = {
-        N,        // M
-        Cin,      // K
-        Cout      // N
+        Cout,         // N (output channels, outer)
+        Cin_actual,   // K (input channels)
+        M             // M (points, inner)
     };
     cmdBuff
         .bindPipeline(gemm)
         .bindDescSets({gemmDesc})
         .setPushConstants(0, sizeof(pc_gemm), pc_gemm)
-        .dispatch0(CEIL_DIV(Cout, 32), CEIL_DIV(N, 32))
+        .dispatch0(CEIL_DIV(M, 16), CEIL_DIV(Cout, 16))  // x=M, y=N (16x16 like matmul)
         .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["conv_out"].buffer()
@@ -1087,12 +1096,14 @@ void PointWiseConvNode::run(CommandBuffer cmdBuff)
         (*this)["bn_beta"].buffer()
     });
 
-    uint32_t pc_bn[] = { N, Cout };
+    uint32_t pc_bn[] = { Cout, M };  // [C, N] layout
+    float eps = 1e-5f;
     cmdBuff
         .bindPipeline(batchnorm)
         .bindDescSets({batchnormDesc})
         .setPushConstants(0, sizeof(pc_bn), pc_bn)
-        .dispatch0(CEIL_DIV(N * Cout, 256))  // FIX: dispatch for all N*C elements
+        .setPushConstants(sizeof(pc_bn), sizeof(float), &eps)
+        .dispatch0(CEIL_DIV(Cout * M, 256))
         .barrier(
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["out0"].buffer()
@@ -1363,7 +1374,7 @@ void FullyConnectedNode::prepare()
 {
     _ASSERT((*this)["in0"].isShapeOf(I));
     _ASSERT((*this)["weight"].validShape());
-    _ASSERT((*this)["weight"].isShapeOf(I, O));
+    _ASSERT((*this)["weight"].isShapeOf(O, I));  // PyTorch format: [O, I]
     _ASSERT((*this)["bias"].validShape());
     _ASSERT((*this)["bias"].isShapeOf(O));
     (*this)["out0"] = Tensor(O); 
@@ -1390,7 +1401,7 @@ void FullyConnectedNode::run(CommandBuffer cmdBuff)
         .bindPipeline(gemm)
         .bindDescSets({gemmDescSet})
         .setPushConstants(0, sizeof(gemmConstants), gemmConstants)
-        .dispatch0(CEIL_DIV(M, 32), CEIL_DIV(N, 32))  // x=M, y=N
+        .dispatch0(CEIL_DIV(M, 16), CEIL_DIV(N, 16))  // x=M, y=N (16x16 like matmul)
         .barrier( 
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["out0"].buffer()
