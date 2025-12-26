@@ -378,6 +378,7 @@ layout(push_constant) uniform PushConstants {
     int M;  // H_out * W_out
     int K;  // input size (C * K * K)
     int N;  // output channels
+    int useRelu; // 0: none, 1: relu
 };
 
 shared float As[32 * 32];
@@ -407,7 +408,11 @@ void main()
     }
 
     if (validThread)
-        C[n * M + m] = acc + b[n];
+    {
+        float val = acc + b[n];
+        if (useRelu == 1) val = max(0.0, val);
+        C[n * M + m] = val;
+    }
 })";
 
 static const char* src_gemm_multiOut1d = R"(
@@ -623,6 +628,147 @@ void main()
 })";
 
 
+static const char* src_gemm_conv_optimized = R"(
+#version 450
+#define BM 64
+#define BN 64
+#define BK 8
+#define TM 4
+#define TN 4
+
+layout(local_size_x = 256) in; // (BM*BN)/(TM*TN) = 4096 / 16 = 256
+
+layout(set = 0, binding = 0) buffer OutBuffer { float C[]; };
+layout(set = 0, binding = 1) buffer InBuffer { float A[]; };
+layout(set = 0, binding = 2) buffer Weight   { float B[]; };
+layout(set = 0, binding = 3) buffer Bias     { float b[]; };
+
+// C(NxM) in channel-major order (n = out channel, m = spatial idx)
+// A(MxK), B(KxN)
+layout(push_constant) uniform PushConstants {
+    int M;  // H_out * W_out
+    int K;  // input size (C * K * K)
+    int N;  // output channels
+    int useRelu; // 0: none, 1: relu
+};
+
+shared float As[BM * BK]; // 64*8
+shared float Bs[BK * BN]; // 8*64
+
+void main() 
+{
+    int tileCol = int(gl_WorkGroupID.x); // Tile index along N (Output Channels)
+    int tileRow = int(gl_WorkGroupID.y); // Tile index along M (Spatial)
+    int t = int(gl_LocalInvocationID.x); // Thread index (0..255)
+
+    int rowStrideA = 256 / BK; // 32
+    int rowStrideB = 256 / BN; // 4
+
+    int innerRowA = t / BK; // 0..31
+    int innerColA = t % BK; // 0..7
+    
+    int innerRowB = t / BN; // 0..3
+    int innerColB = t % BN; // 0..63
+
+    // Thread results (TMxTN = 4x4 = 16 registers)
+    float threadResults[TM * TN];
+    for (int i = 0; i < TM*TN; ++i) threadResults[i] = 0.0;
+
+    float regM[TM];
+    float regN[TN];
+
+    // Global indices for the top-left of the tile
+    int m0 = tileRow * BM;
+    int n0 = tileCol * BN;
+
+    // Thread's computation tile within the workgroup tile
+    // t ranges 0..255. 
+    // t_m = t / (BN/TN) = t / (64/4) = t / 16. (0..15)
+    // t_n = t % 16. (0..15)
+    int t_m = t / 16;
+    int t_n = t % 16;
+
+    for (int k0 = 0; k0 < K; k0 += BK) 
+    {
+        // Load As (BMxBK = 64x8 = 512 floats)
+        // Threads: 256. Loads per thread: 2.
+        for (int i = 0; i < 2; ++i)
+        {
+            int r = innerRowA + i * 32; // 0..63
+            int c = innerColA;          // 0..7
+            int globalM = m0 + r;
+            int globalK = k0 + c;
+            
+            As[c * BM + r] = (globalM < M && globalK < K) ? A[globalM * K + globalK] : 0.0;
+        }
+
+        // Load Bs (BKxBN = 8x64 = 512 floats)
+        // Threads: 256. Loads per thread: 2.
+        for (int i = 0; i < 2; ++i)
+        {
+            int r = innerRowB + i * 4; // 0..7
+            int c = innerColB;         // 0..63
+            int globalK = k0 + r;
+            int globalN = n0 + c;
+
+            Bs[r * BN + c] = (globalK < K && globalN < N) ? B[globalK * N + globalN] : 0.0;
+        }
+
+        barrier();
+
+        // Compute
+        for (int dotIdx = 0; dotIdx < BK; ++dotIdx)
+        {
+            // Load A values for this dotIdx into registers
+            for (int i = 0; i < TM; ++i)
+            {
+                regM[i] = As[dotIdx * BM + (t_m * TM + i)];
+            }
+
+            // Load B values for this dotIdx into registers
+            for (int i = 0; i < TN; ++i)
+            {
+                regN[i] = Bs[dotIdx * BN + (t_n * TN + i)];
+            }
+
+            // Outer product
+            for (int i = 0; i < TM; ++i)
+            {
+                for (int j = 0; j < TN; ++j)
+                {
+                    threadResults[i * TN + j] += regM[i] * regN[j];
+                }
+            }
+        }
+
+        barrier();
+    }
+
+    // Write results
+    int globalM_base = m0 + t_m * TM;
+    int globalN_base = n0 + t_n * TN;
+
+    for (int j = 0; j < TN; ++j)
+    {
+        int n = globalN_base + j;
+        if (n >= N) continue;
+        
+        float biasVal = b[n];
+
+        for (int i = 0; i < TM; ++i)
+        {
+            int m = globalM_base + i;
+            if (m >= M) continue;
+
+            float val = threadResults[i * TN + j] + biasVal;
+            if (useRelu == 1) val = max(0.0, val);
+
+            C[n * M + m] = val;
+        }
+    }
+})";
+
+
 static const char* src_avgpool = R"(
 #version 450
 layout(local_size_x = 64) in;
@@ -673,6 +819,7 @@ static std::map<const char*, uint32_t> gGemmTileSize =
     {src_gemm_naive, 32},
     {src_gemm_shared, 32},
     {src_gemm_shared_conv, 32},
+    {src_gemm_conv_optimized, 64}, // Tuned to 64
     {src_gemm_multiOut1d, 64},
     {src_gemm_multiOut2d, 128}
 };
@@ -687,6 +834,7 @@ void loadShaders()
     requestPipeline(src_im2col);
     requestPipeline(src_gemm_naive);
     requestPipeline(src_gemm_shared);      // used by Conv/FC
+    requestPipeline(src_gemm_conv_optimized); // New optimized shader
     requestPipeline(src_gemm_multiOut1d);  // optional alternative
     requestPipeline(src_gemm_multiOut2d);  // optional alternative
 
@@ -695,8 +843,8 @@ void loadShaders()
 /////////////////////////////////////////////////////////////////////////////////////////
 // ConvolutionNode
 /////////////////////////////////////////////////////////////////////////////////////////
-ConvolutionNode::ConvolutionNode(uint32_t inChannels, uint32_t outChannels, uint32_t kernelWidth, uint32_t stride, uint32_t padding)
-:  C(inChannels), F(outChannels), K(kernelWidth), S(stride), padding(padding)
+ConvolutionNode::ConvolutionNode(uint32_t inChannels, uint32_t outChannels, uint32_t kernelWidth, uint32_t stride, uint32_t padding, bool useRelu)
+:  C(inChannels), F(outChannels), K(kernelWidth), S(stride), padding(padding), useRelu(useRelu)
 {
     _ASSERT(K % 2 == 1);
     addSlot("in0", NodeSlot::input);
@@ -708,7 +856,7 @@ ConvolutionNode::ConvolutionNode(uint32_t inChannels, uint32_t outChannels, uint
     im2col = requestPipeline(src_im2col);
     im2colDescSet = im2col.descSetLayout(0).newDescSet(gDestSetPool);
     
-    const char* gemmSrc = src_gemm_shared_conv;
+    const char* gemmSrc = src_gemm_conv_optimized;
 
     gemm = requestPipeline(gemmSrc);
     gemmTileSize = gGemmTileSize.at(gemmSrc);
@@ -753,7 +901,8 @@ void ConvolutionNode::run(CommandBuffer cmdBuff)
     uint32_t M = H_ * W_;       // N
     uint32_t K_ = C * K * K;    // I
     uint32_t N = F;             // O
-    uint32_t gemmConstants[] = {M, K_, N};
+    uint32_t reluFlag = useRelu ? 1 : 0;
+    uint32_t gemmConstants[] = {M, K_, N, reluFlag};
 
     cmdBuff
         .bindPipeline(im2col)

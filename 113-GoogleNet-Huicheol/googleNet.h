@@ -40,24 +40,18 @@ class InceptionBlockNode : public NodeGroup
 
     // 1x1 branch
     std::unique_ptr<ConvolutionNode> conv1x1;
-    std::unique_ptr<ReluNode> relu1x1;
 
     // 3x3 branch
     std::unique_ptr<ConvolutionNode> conv3x3_reduce;
-    std::unique_ptr<ReluNode> relu3x3_reduce;
     std::unique_ptr<ConvolutionNode> conv3x3;
-    std::unique_ptr<ReluNode> relu3x3;
 
     // 5x5 branch
     std::unique_ptr<ConvolutionNode> conv5x5_reduce;
-    std::unique_ptr<ReluNode> relu5x5_reduce;
     std::unique_ptr<ConvolutionNode> conv5x5;
-    std::unique_ptr<ReluNode> relu5x5;
 
     // Pooling branch
     std::unique_ptr<MaxPoolingNode> pool;
     std::unique_ptr<ConvolutionNode> pool_proj;
-    std::unique_ptr<ReluNode> relu_pool;
 
     // Concatenation
     std::unique_ptr<ConcatenationNode> concat;
@@ -74,13 +68,10 @@ class GoogleNet : public NeuralNet
     uint32_t numClasses;
     // Initial layers
     ConvolutionNode conv1;
-    ReluNode relu1;
     MaxPoolingNode pool1;
     // LRNNode lrn1; 
     ConvolutionNode conv2_reduce;
-    ReluNode relu2_reduce;
     ConvolutionNode conv2;
-    ReluNode relu2;
     // LRNNode lrn2; 
     MaxPoolingNode pool2;
 

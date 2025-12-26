@@ -236,25 +236,19 @@ InceptionBlockNode::InceptionBlockNode(uint32_t inChannels, uint32_t ch1x1, uint
     inputFan = std::make_unique<IdentityNode>();
 
     // 1x1 branch
-    conv1x1 = std::make_unique<ConvolutionNode>(inChannels, ch1x1, 1);
-    relu1x1 = std::make_unique<ReluNode>();
+    conv1x1 = std::make_unique<ConvolutionNode>(inChannels, ch1x1, 1, 1, 0, true); // fused relu
 
     // 3x3 branch
-    conv3x3_reduce = std::make_unique<ConvolutionNode>(inChannels, ch3x3red, 1);
-    relu3x3_reduce = std::make_unique<ReluNode>();
-    conv3x3 = std::make_unique<ConvolutionNode>(ch3x3red, ch3x3, 3, 1, 1);
-    relu3x3 = std::make_unique<ReluNode>();
+    conv3x3_reduce = std::make_unique<ConvolutionNode>(inChannels, ch3x3red, 1, 1, 0, true); // fused relu
+    conv3x3 = std::make_unique<ConvolutionNode>(ch3x3red, ch3x3, 3, 1, 1, true); // fused relu
 
     // 5x5 branch (torchvision uses a 3x3 here, replacing the original 5x5)
-    conv5x5_reduce = std::make_unique<ConvolutionNode>(inChannels, ch5x5red, 1);
-    relu5x5_reduce = std::make_unique<ReluNode>();
-    conv5x5 = std::make_unique<ConvolutionNode>(ch5x5red, ch5x5, 3, 1, 1);
-    relu5x5 = std::make_unique<ReluNode>();
+    conv5x5_reduce = std::make_unique<ConvolutionNode>(inChannels, ch5x5red, 1, 1, 0, true); // fused relu
+    conv5x5 = std::make_unique<ConvolutionNode>(ch5x5red, ch5x5, 3, 1, 1, true); // fused relu
 
     // Pooling branch
     pool = std::make_unique<MaxPoolingNode>(3, 1, 1); // preserve H/W
-    pool_proj = std::make_unique<ConvolutionNode>(inChannels, poolProj, 1);
-    relu_pool = std::make_unique<ReluNode>();
+    pool_proj = std::make_unique<ConvolutionNode>(inChannels, poolProj, 1, 1, 0, true); // fused relu
 
     concat = std::make_unique<ConcatenationNode>(4);
 
@@ -266,22 +260,22 @@ InceptionBlockNode::InceptionBlockNode(uint32_t inChannels, uint32_t ch1x1, uint
     inputFan->slot("out0") - pool->slot("in0");
 
     // Connect 1x1
-    *conv1x1 - *relu1x1;
+    // *conv1x1 (fused) -> concat
 
     // Connect 3x3
-    *conv3x3_reduce - *relu3x3_reduce - *conv3x3 - *relu3x3;
+    *conv3x3_reduce - *conv3x3; // fused
 
     // Connect 5x5
-    *conv5x5_reduce - *relu5x5_reduce - *conv5x5 - *relu5x5;
+    *conv5x5_reduce - *conv5x5; // fused
 
     // Connect Pool
-    *pool - *pool_proj - *relu_pool;
+    *pool - *pool_proj; // fused
 
     // Connect to Concat
-    relu1x1->slot("out0") - concat->slot("in0");
-    relu3x3->slot("out0") - concat->slot("in1");
-    relu5x5->slot("out0") - concat->slot("in2");
-    relu_pool->slot("out0") - concat->slot("in3");
+    conv1x1->slot("out0") - concat->slot("in0");
+    conv3x3->slot("out0") - concat->slot("in1");
+    conv5x5->slot("out0") - concat->slot("in2");
+    pool_proj->slot("out0") - concat->slot("in3");
 
     // Expose slots
     defineSlot("out0", concat->slot("out0"));
@@ -323,14 +317,11 @@ void InceptionBlockNode::loadWeights(const JsonParser* json, const SafeTensorsPa
 GoogleNet::GoogleNet(Device& device, uint32_t numClasses)
     : NeuralNet(device)
     , numClasses(numClasses)
-    , conv1(3, 64, 7, 2, 3) // stride 2, pad 3
-    , relu1()
+    , conv1(3, 64, 7, 2, 3, true) // stride 2, pad 3, fused relu
     , pool1(3, 2, 0)
     // , lrn1()
-    , conv2_reduce(64, 64, 1)
-    , relu2_reduce()
-    , conv2(64, 192, 3, 1, 1) // pad 1
-    , relu2()
+    , conv2_reduce(64, 64, 1, 1, 0, true) // fused relu
+    , conv2(64, 192, 3, 1, 1, true) // pad 1, fused relu
     // , lrn2()
     , pool2(3, 2, 0)
     , pool3(3, 2, 0)
@@ -354,7 +345,7 @@ GoogleNet::GoogleNet(Device& device, uint32_t numClasses)
 
     // Connect layers
     // Stem
-    input(0) - conv1 - relu1 - pool1 /*- lrn1*/ - conv2_reduce - relu2_reduce - conv2 - relu2 /*- lrn2*/ - pool2;
+    input(0) - conv1 - pool1 /*- lrn1*/ - conv2_reduce - conv2 /*- lrn2*/ - pool2;
 
     // Inception 3a
     // Note: We need to connect pool2 output to ALL branches of inception3a.

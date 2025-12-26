@@ -1,5 +1,6 @@
 # Ignore local build outputs and weight blobs in this sample
 build/
+report/
 *.safetensors
 *.pth
 *.pt
