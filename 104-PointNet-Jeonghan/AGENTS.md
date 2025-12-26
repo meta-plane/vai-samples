@@ -52,7 +52,7 @@ cd .. && ./build.sh
 ../bin/debug/104-PointNet-Jeonghan
 
 # Run all tests
-cd ../build && ctest --output-on-failure
+cd ../build/104-PointNet-Jeonghan && ctest --output-on-failure
 
 # Run specific test
 ../bin/debug/test_mlp
