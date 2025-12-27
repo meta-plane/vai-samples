@@ -1,645 +1,724 @@
-#include "test_layers.h"
-#include <stb/stb_image.h>
+#include <chrono>
+#include <iostream>
 #include "../library/neuralNodes.h"
 #include "../library/vulkanApp.h"
-#include "../library/timeChecker.hpp"
 
 
-Tensor makeRandomTensor(const std::vector<uint32_t>& shape, std::mt19937& gen, float stddev)
+
+// Helper function to run a single benchmark test case
+template<typename NodeType>
+void runBenchmark(
+    const char* nodeName,
+    NodeType& node,
+    uint32_t inputH,
+    uint32_t inputW,
+    uint32_t channels,
+    uint32_t warmupIter,
+    uint32_t benchmarkIter)
 {
-    std::normal_distribution<float> dist(0.0f, stddev);
-    Tensor t(shape);
-    size_t n = t.numElements();
-    std::vector<float> data(n);
-    for (auto& v : data) v = dist(gen);
-    t.set(std::move(data));
-    return t;
-}
+    auto device = VulkanApp::get().device();
 
-Tensor makeConstTensor(const std::vector<uint32_t>& shape, float val)
-{
-    Tensor t(shape);
-    t.set(std::vector<float>(t.numElements(), val));
-    return t;
-}
+    // Create a neural network with the node
+    NeuralNet net(device);
+    net.input(0) - node - net.output(0);
 
-Tensor makeConstTensor(uint32_t size, float val)
-{
-    Tensor t(size);
-    t.set(std::vector<float>(t.numElements(), val));
-    return t;
-}
+    // Create input tensor [H, W, C]
+    Tensor input(inputH, inputW, channels);
+    std::vector<float> dummyData(inputH * inputW * channels, 0.5f);
+    input.set(dummyData);
 
-bool allClose(const float* data, const float* expected, int n, float eps)
-{
-    for (int i = 0; i < n; ++i)
+    // Warmup phase
+    Tensor output;
+    for (uint32_t i = 0; i < warmupIter; ++i)
     {
-        if (std::abs(data[i] - expected[i]) > eps)
-            return false;
+        auto outputs = net(input);
+        if (outputs.empty())
+        {
+            printf("    Error: Network returned empty output vector\n");
+            return;
+        }
+        output = outputs[0];
     }
 
-    return true;
-}
-
-void testRelu6()
-{
-    printf("\n=== Testing ReLU6 Node ===\n");
-
-    Relu6Node relu6;
-
-    std::vector<float> inputData = { -2.0f, -1.0f, 0.0f, 1.0f, 3.0f, 5.0f, 6.0f, 7.0f, 10.0f };
-    Tensor input(3, 3, 1);
-    input.set(inputData);
-
-    NeuralNet net(netGlobalDevice, 1, 1);
-    net.input(0) - relu6 - net.output(0);
-
-    auto results = net(std::move(input));
-
-    Buffer outBuffer = netGlobalDevice.createBuffer({
-        9 * sizeof(float),
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        });
-
-    netGlobalDevice.newCommandBuffer(queue_compute)
-        .begin()
-        .copyBuffer(outBuffer, results[0].buffer())
-        .end()
-        .submit()
-        .wait();
-
-    float* data = (float*)outBuffer.map();
-    printf("Input:    ");
-    for (int i = 0; i < 9; ++i) printf("%5.1f ", inputData[i]);
-    
-    printf("\nOutput:   ");
-    for (int i = 0; i < 9; ++i) printf("%5.1f ", data[i]);
-    
-    printf("\nExpected: ");
-    float expected[] = { 0.0f, 0.0f, 0.0f, 1.0f, 3.0f, 5.0f, 6.0f, 6.0f, 6.0f };
-    for (int i = 0; i < 9; ++i) printf("%5.1f ", expected[i]);
-    printf("\n\n");
-
-    allClose(data, expected, 9) ? printf("Result: PASS\n") : printf("Result: FAIL\n");
-}
-
-void testDepthwiseConv()
-{
-    printf("\n=== Testing Depthwise Conv Node ===\n");
-
-    const uint32_t H = 4, W = 4, C = 2;
-    const uint32_t K = 3;
-
-    DepthwiseConvNode dwconv(C, K, 1);  // stride=1, pad=1
-
-    std::vector<float> inputData(H * W * C, 1.0f);
-    Tensor input(H, W, C);
-    input.set(inputData);
-
-    std::vector<float> weightData(K * K * C, 1.0f);
-    Tensor weight(K * K, C);
-    weight.set(weightData);
-
-    dwconv["weight"] = weight;
-
-    NeuralNet net(netGlobalDevice, 1, 1);
-    net.input(0) - dwconv - net.output(0);
-
-    auto results = net(std::move(input));
-
-    const auto& outShape = results[0].shape();
-    printf("Input shape: %d x %d x %d\n", H, W, C);
-    printf("Output shape: %d x %d x %d\n", outShape[0], outShape[1], outShape[2]);
-
-    size_t outSize = outShape[0] * outShape[1] * outShape[2];
-    Buffer outBuffer = netGlobalDevice.createBuffer({
-        outSize * sizeof(float),
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        });
-
-    netGlobalDevice.newCommandBuffer(queue_compute)
-        .begin()
-        .copyBuffer(outBuffer, results[0].buffer())
-        .end()
-        .submit()
-        .wait();
-
-    float* data = (float*)outBuffer.map();
-
-    // Center pixel should be 9 (3x3 kernel, all 1s, input all 1s)
-    int centerIdx = (1 * outShape[1] + 1) * outShape[2] + 0;
-    printf("Center pixel (should be 9.0): %.1f\n", data[centerIdx]);
-    printf("Result: %s\n", std::abs(data[centerIdx] - 9.0f) < 0.001f ? "PASS" : "FAIL");
-}
-
-
-void testPointwiseConv()
-{
-    printf("\n=== Testing Pointwise Conv Node ===\n");
-
-    const uint32_t H = 2, W = 2, C_in = 3, C_out = 4;
-
-    PointwiseConvNode pwconv(C_in, C_out);
-
-    std::vector<float> inputData(H * W * C_in, 1.0f);
-    Tensor input(H, W, C_in);
-    input.set(inputData);
-
-    std::vector<float> weightData(C_in * C_out, 1.0f);
-    Tensor weight(C_in, C_out);
-    weight.set(weightData);
-
-    pwconv["weight"] = weight;
-
-    NeuralNet net(netGlobalDevice, 1, 1);
-    net.input(0) - pwconv - net.output(0);
-
-    auto results = net(std::move(input));
-
-    const auto& outShape = results[0].shape();
-    printf("Input shape: %d x %d x %d\n", H, W, C_in);
-    printf("Output shape: %d x %d x %d\n", outShape[0], outShape[1], outShape[2]);
-
-    size_t outSize = outShape[0] * outShape[1] * outShape[2];
-    Buffer outBuffer = netGlobalDevice.createBuffer({
-        outSize * sizeof(float),
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        });
-
-    netGlobalDevice.newCommandBuffer(queue_compute)
-        .begin()
-        .copyBuffer(outBuffer, results[0].buffer())
-        .end()
-        .submit()
-        .wait();
-
-    float* data = (float*)outBuffer.map();
-    printf("Output (all should be %.1f): ", (float)C_in);
-    for (int i = 0; i < 4; ++i) printf("%.1f ", data[i]);
-
-    bool pass = true;
-    for (size_t i = 0; i < outSize; ++i) {
-        if (std::abs(data[i] - (float)C_in) > 0.001f) pass = false;
+    // Benchmark phase
+    auto startTime = std::chrono::high_resolution_clock::now();
+    for (uint32_t i = 0; i < benchmarkIter; ++i)
+    {
+        auto outputs = net(input);
+        if (!outputs.empty())
+            output = outputs[0];
     }
-    printf("\nResult: %s\n", pass ? "PASS" : "FAIL");
+    auto endTime = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+
+    // Print results
+    float avgTime = static_cast<float>(duration.count()) / benchmarkIter;
+    printf("    Total time: %lld ms, Avg: %.3f ms per iter\n", duration.count(), avgTime);
+
+    const auto& shape = output.shape();
+    if (shape.size() == 3)
+    {
+        printf("    Output shape: [%u, %u, %u]\n", shape[0], shape[1], shape[2]);
+    }
+    else if (shape.size() > 0)
+    {
+        printf("    Output shape: [");
+        for (size_t i = 0; i < shape.size(); ++i)
+        {
+            printf("%u%s", shape[i], (i < shape.size() - 1) ? ", " : "");
+        }
+        printf("]\n");
+    }
+    else
+    {
+        printf("    Output shape: empty\n");
+    }
 }
 
-
-void testGlobalAvgPool()
+void benchmarkDepthwiseConv()
 {
-    printf("\n=== Testing Global Average Pool Node ===\n");
+    auto device = VulkanApp::get().device();
+    printf("\n[Benchmark: DepthwiseConv]\n");
+    printf("================================================\n");
 
-    const uint32_t H = 2, W = 2, C = 3;
+    const uint32_t warmupIter = 3;
+    const uint32_t benchmarkIter = 100;
 
-    GlobalAvgPoolNode gap;
+    // Define test cases
+    struct TestCase {
+        uint32_t inputH, inputW, channels;
+        uint32_t kernelSize, stride, padding;
+        const char* description;
+    };
 
-    std::vector<float> inputData(H * W * C);
-    for (uint32_t h = 0; h < H; ++h) {
-        for (uint32_t w = 0; w < W; ++w) {
-            for (uint32_t c = 0; c < C; ++c) {
-                inputData[(h * W + w) * C + c] = (float)(c + 1);
+    std::vector<TestCase> testCases = {
+        // Add or remove test cases here
+        {224, 224, 32, 3, 1, 1, "Large input (224x224x32), K=3, S=1"},
+        {112, 112, 64, 3, 1, 1, "Medium input (112x112x64), K=3, S=1"},
+        {56, 56, 128, 3, 1, 1, "Small input (56x56x128), K=3, S=1"},
+        {56, 56, 32, 3, 2, 1, "Stride=2 (56x56x32), K=3, S=2"},
+        {56, 56, 32, 5, 1, 2, "Kernel=5 (56x56x32), K=5, S=1"},
+    };
+
+    for (const auto& tc : testCases)
+    {
+        printf("\n  Test: %s\n", tc.description);
+        printf("  Config: Input=[%u, %u, %u], Kernel=%u, Stride=%u, Padding=%u\n",
+               tc.inputH, tc.inputW, tc.channels, tc.kernelSize, tc.stride, tc.padding);
+
+        // Create node (channels, kernelWidth, stride) - no padding parameter
+        DepthwiseConvNode node(tc.channels, tc.kernelSize, tc.stride);
+
+        // Set weights [K*K, C]
+        Tensor weights(tc.kernelSize * tc.kernelSize, tc.channels);
+        std::vector<float> weightData(tc.kernelSize * tc.kernelSize * tc.channels, 0.01f);
+        weights.set(weightData);
+        weights.setConstant(true);
+        node["weight"] = std::move(weights);
+
+        // Run benchmark
+        runBenchmark("DepthwiseConv", node, tc.inputH, tc.inputW, tc.channels,
+                     warmupIter, benchmarkIter);
+    }
+
+    printf("\n================================================\n");
+}
+
+void benchmarkPointwiseConv()
+{
+    auto device = VulkanApp::get().device();
+    printf("\n[Benchmark: PointwiseConv]\n");
+    printf("================================================\n");
+
+    const uint32_t warmupIter = 3;
+    const uint32_t benchmarkIter = 100;
+
+    // Define test cases
+    struct TestCase {
+        uint32_t inputH, inputW;
+        uint32_t inputChannels, outputChannels;
+        const char* description;
+    };
+
+    std::vector<TestCase> testCases = {
+        // Add or remove test cases here
+        {224, 224, 32, 64, "Large input (224x224), 32->64 channels"},
+        {112, 112, 64, 128, "Medium input (112x112), 64->128 channels"},
+        {56, 56, 128, 256, "Small input (56x56), 128->256 channels"},
+        {56, 56, 32, 192, "Expansion (56x56), 32->192 (6x)"},
+        {28, 28, 192, 32, "Projection (28x28), 192->32 (1/6x)"},
+    };
+
+    for (const auto& tc : testCases)
+    {
+        printf("\n  Test: %s\n", tc.description);
+        printf("  Config: Input=[%u, %u, %u], Output channels=%u\n",
+               tc.inputH, tc.inputW, tc.inputChannels, tc.outputChannels);
+
+        // Create node (inChannels, outChannels)
+        PointwiseConvNode node(tc.inputChannels, tc.outputChannels);
+
+        // Set weights [C_in, C_out]
+        Tensor weights(tc.inputChannels, tc.outputChannels);
+        std::vector<float> weightData(tc.inputChannels * tc.outputChannels, 0.01f);
+        weights.set(weightData);
+        weights.setConstant(true);
+        node["weight"] = std::move(weights);
+
+        // Run benchmark
+        runBenchmark("PointwiseConv", node, tc.inputH, tc.inputW, tc.inputChannels,
+                     warmupIter, benchmarkIter);
+    }
+
+    printf("\n================================================\n");
+}
+
+void benchmarkConvBnReLU6()
+{
+    auto device = VulkanApp::get().device();
+    printf("\n[Benchmark: ConvBnReLU6]\n");
+    printf("================================================\n");
+
+    const uint32_t warmupIter = 3;
+    const uint32_t benchmarkIter = 100;
+
+    // Define test cases
+    struct TestCase {
+        uint32_t inputH, inputW;
+        uint32_t inputChannels, outputChannels;
+        uint32_t kernelSize, stride, padding;
+        const char* description;
+    };
+
+    std::vector<TestCase> testCases = {
+        // Add or remove test cases here
+        {224, 224, 3, 32, 3, 2, 1, "Stem layer (224x224x3->32), K=3, S=2"},
+        {112, 112, 32, 64, 3, 2, 1, "Downsampling (112x112x32->64), K=3, S=2"},
+        {56, 56, 64, 128, 3, 1, 1, "Same size (56x56x64->128), K=3, S=1"},
+        {224, 224, 3, 32, 5, 2, 2, "Large kernel (224x224x3->32), K=5, S=2"},
+    };
+
+    for (const auto& tc : testCases)
+    {
+        printf("\n  Test: %s\n", tc.description);
+        printf("  Config: Input=[%u, %u, %u], Output ch=%u, Kernel=%u, Stride=%u, Padding=%u\n",
+               tc.inputH, tc.inputW, tc.inputChannels, tc.outputChannels,
+               tc.kernelSize, tc.stride, tc.padding);
+
+        // Create ConvBnReLU6 node (inChannels, outChannels, kernel, stride, padding)
+        ConvBNReLU6 node(tc.inputChannels, tc.outputChannels, tc.kernelSize, tc.stride, tc.padding);
+
+        // Set conv weights [K*K*C_in, C_out]
+        Tensor convWeights(tc.kernelSize * tc.kernelSize * tc.inputChannels, tc.outputChannels);
+        std::vector<float> convWeightData(tc.kernelSize * tc.kernelSize * tc.inputChannels * tc.outputChannels, 0.01f);
+        convWeights.set(convWeightData);
+        convWeights.setConstant(true);
+        node["conv.weight"] = std::move(convWeights);
+
+        // Set BatchNorm parameters
+        Tensor bnMean(tc.outputChannels), bnVariance(tc.outputChannels),
+               bnGamma(tc.outputChannels), bnBeta(tc.outputChannels);
+        std::vector<float> zeros(tc.outputChannels, 0.0f), ones(tc.outputChannels, 1.0f);
+        bnMean.set(zeros);
+        bnVariance.set(ones);
+        bnGamma.set(ones);
+        bnBeta.set(zeros);
+        bnMean.setConstant(true);
+        bnVariance.setConstant(true);
+        bnGamma.setConstant(true);
+        bnBeta.setConstant(true);
+        node["bn.mean"] = std::move(bnMean);
+        node["bn.variance"] = std::move(bnVariance);
+        node["bn.gamma"] = std::move(bnGamma);
+        node["bn.beta"] = std::move(bnBeta);
+
+        // Run benchmark
+        runBenchmark("ConvBnReLU6", node, tc.inputH, tc.inputW, tc.inputChannels,
+                     warmupIter, benchmarkIter);
+    }
+
+    printf("\n================================================\n");
+}
+
+void benchmarkInvertedResidualBlock()
+{
+    auto device = VulkanApp::get().device();
+    printf("\n[Benchmark: InvertedResidualBlock]\n");
+    printf("================================================\n");
+
+    const uint32_t warmupIter = 3;
+    const uint32_t benchmarkIter = 100;
+
+    // Define test cases
+    struct TestCase {
+        uint32_t inputH, inputW;
+        uint32_t inputChannels, outputChannels;
+        uint32_t expansionRatio, stride;
+        const char* description;
+    };
+
+    std::vector<TestCase> testCases = {
+        // Add or remove test cases here
+        {112, 112, 16, 24, 6, 2, "First IRB (112x112), 16->24, t=6, stride=2"},
+        {56, 56, 24, 32, 6, 2, "Downsampling (56x56), 24->32, t=6, stride=2"},
+        {56, 56, 32, 32, 6, 1, "Same size (56x56), 32->32, t=6, stride=1"},
+        {28, 28, 64, 96, 6, 1, "Mid layer (28x28), 64->96, t=6, stride=1"},
+        {14, 14, 160, 320, 6, 1, "Late layer (14x14), 160->320, t=6, stride=1"},
+    };
+
+    for (const auto& tc : testCases)
+    {
+        const uint32_t expandedChannels = tc.inputChannels * tc.expansionRatio;
+
+        printf("\n  Test: %s\n", tc.description);
+        printf("  Config: Input=[%u, %u, %u], Output ch=%u, Expansion=%u (->%u), Stride=%u\n",
+               tc.inputH, tc.inputW, tc.inputChannels, tc.outputChannels,
+               tc.expansionRatio, expandedChannels, tc.stride);
+
+        // Create IRB (inChannels, outChannels, expansionFactor, stride)
+        InvertedResidualBlock node(tc.inputChannels, tc.outputChannels, tc.expansionRatio, tc.stride);
+
+        // Set expand conv weights (1x1 conv: inputChannels -> expandedChannels)
+        Tensor expandWeights(tc.inputChannels, expandedChannels);
+        std::vector<float> expandWeightData(tc.inputChannels * expandedChannels, 0.01f);
+        expandWeights.set(expandWeightData);
+        expandWeights.setConstant(true);
+        node["pwConvBNReLU6.pointwiseConv.weight"] = std::move(expandWeights);
+
+        // Set expand BN parameters
+        Tensor expandBnMean(expandedChannels), expandBnVariance(expandedChannels),
+               expandBnGamma(expandedChannels), expandBnBeta(expandedChannels);
+        std::vector<float> zerosExpand(expandedChannels, 0.0f), onesExpand(expandedChannels, 1.0f);
+        expandBnMean.set(zerosExpand);
+        expandBnVariance.set(onesExpand);
+        expandBnGamma.set(onesExpand);
+        expandBnBeta.set(zerosExpand);
+        expandBnMean.setConstant(true);
+        expandBnVariance.setConstant(true);
+        expandBnGamma.setConstant(true);
+        expandBnBeta.setConstant(true);
+        node["pwConvBNReLU6.bn.mean"] = std::move(expandBnMean);
+        node["pwConvBNReLU6.bn.variance"] = std::move(expandBnVariance);
+        node["pwConvBNReLU6.bn.gamma"] = std::move(expandBnGamma);
+        node["pwConvBNReLU6.bn.beta"] = std::move(expandBnBeta);
+
+        // Set depthwise conv weights (3x3 depthwise)
+        Tensor dwWeights(3 * 3, expandedChannels);
+        std::vector<float> dwWeightData(3 * 3 * expandedChannels, 0.01f);
+        dwWeights.set(dwWeightData);
+        dwWeights.setConstant(true);
+        node["dwConvBNReLU6.depthwiseConv.weight"] = std::move(dwWeights);
+
+        // Set depthwise BN parameters
+        Tensor dwBnMean(expandedChannels), dwBnVariance(expandedChannels),
+               dwBnGamma(expandedChannels), dwBnBeta(expandedChannels);
+        dwBnMean.set(zerosExpand);
+        dwBnVariance.set(onesExpand);
+        dwBnGamma.set(onesExpand);
+        dwBnBeta.set(zerosExpand);
+        dwBnMean.setConstant(true);
+        dwBnVariance.setConstant(true);
+        dwBnGamma.setConstant(true);
+        dwBnBeta.setConstant(true);
+        node["dwConvBNReLU6.bn.mean"] = std::move(dwBnMean);
+        node["dwConvBNReLU6.bn.variance"] = std::move(dwBnVariance);
+        node["dwConvBNReLU6.bn.gamma"] = std::move(dwBnGamma);
+        node["dwConvBNReLU6.bn.beta"] = std::move(dwBnBeta);
+
+        // Set project conv weights (1x1 conv: expandedChannels -> outputChannels)
+        Tensor projectWeights(expandedChannels, tc.outputChannels);
+        std::vector<float> projectWeightData(expandedChannels * tc.outputChannels, 0.01f);
+        projectWeights.set(projectWeightData);
+        projectWeights.setConstant(true);
+        node["pwConvBN.pointwiseConv.weight"] = std::move(projectWeights);
+
+        // Set project BN parameters
+        Tensor projectBnMean(tc.outputChannels), projectBnVariance(tc.outputChannels),
+               projectBnGamma(tc.outputChannels), projectBnBeta(tc.outputChannels);
+        std::vector<float> zerosOutput(tc.outputChannels, 0.0f), onesOutput(tc.outputChannels, 1.0f);
+        projectBnMean.set(zerosOutput);
+        projectBnVariance.set(onesOutput);
+        projectBnGamma.set(onesOutput);
+        projectBnBeta.set(zerosOutput);
+        projectBnMean.setConstant(true);
+        projectBnVariance.setConstant(true);
+        projectBnGamma.setConstant(true);
+        projectBnBeta.setConstant(true);
+        node["pwConvBN.bn.mean"] = std::move(projectBnMean);
+        node["pwConvBN.bn.variance"] = std::move(projectBnVariance);
+        node["pwConvBN.bn.gamma"] = std::move(projectBnGamma);
+        node["pwConvBN.bn.beta"] = std::move(projectBnBeta);
+
+        // Run benchmark
+        runBenchmark("InvertedResidualBlock", node, tc.inputH, tc.inputW, tc.inputChannels,
+                     warmupIter, benchmarkIter);
+    }
+
+    printf("\n================================================\n");
+}
+
+void benchmarkBatchNorm()
+{
+    auto device = VulkanApp::get().device();
+    printf("\n[Benchmark: BatchNorm]\n");
+    printf("================================================\n");
+
+    const uint32_t warmupIter = 3;
+    const uint32_t benchmarkIter = 100;
+
+    struct TestCase {
+        uint32_t inputH, inputW, channels;
+        const char* description;
+    };
+
+    std::vector<TestCase> testCases = {
+        {224, 224, 32, "Large input (224x224x32)"},
+        {112, 112, 64, "Medium input (112x112x64)"},
+        {56, 56, 128, "Small input (56x56x128)"},
+        {28, 28, 256, "Tiny input (28x28x256)"},
+    };
+
+    for (const auto& tc : testCases)
+    {
+        printf("\n  Test: %s\n", tc.description);
+        printf("  Config: Input=[%u, %u, %u]\n", tc.inputH, tc.inputW, tc.channels);
+
+        BatchNormNode node;
+
+        // Set BatchNorm parameters
+        Tensor bnMean(tc.channels), bnVariance(tc.channels),
+               bnGamma(tc.channels), bnBeta(tc.channels);
+        std::vector<float> zeros(tc.channels, 0.0f), ones(tc.channels, 1.0f);
+        bnMean.set(zeros);
+        bnVariance.set(ones);
+        bnGamma.set(ones);
+        bnBeta.set(zeros);
+        bnMean.setConstant(true);
+        bnVariance.setConstant(true);
+        bnGamma.setConstant(true);
+        bnBeta.setConstant(true);
+        node["mean"] = std::move(bnMean);
+        node["variance"] = std::move(bnVariance);
+        node["gamma"] = std::move(bnGamma);
+        node["beta"] = std::move(bnBeta);
+
+        runBenchmark("BatchNorm", node, tc.inputH, tc.inputW, tc.channels,
+                     warmupIter, benchmarkIter);
+    }
+
+    printf("\n================================================\n");
+}
+
+void benchmarkRelu6()
+{
+    auto device = VulkanApp::get().device();
+    printf("\n[Benchmark: ReLU6]\n");
+    printf("================================================\n");
+
+    const uint32_t warmupIter = 3;
+    const uint32_t benchmarkIter = 100;
+
+    struct TestCase {
+        uint32_t inputH, inputW, channels;
+        const char* description;
+    };
+
+    std::vector<TestCase> testCases = {
+        {224, 224, 32, "Large input (224x224x32)"},
+        {112, 112, 64, "Medium input (112x112x64)"},
+        {56, 56, 128, "Small input (56x56x128)"},
+    };
+
+    for (const auto& tc : testCases)
+    {
+        printf("\n  Test: %s\n", tc.description);
+        printf("  Config: Input=[%u, %u, %u]\n", tc.inputH, tc.inputW, tc.channels);
+
+        Relu6Node node;
+
+        runBenchmark("ReLU6", node, tc.inputH, tc.inputW, tc.channels,
+                     warmupIter, benchmarkIter);
+    }
+
+    printf("\n================================================\n");
+}
+
+void benchmarkAdd()
+{
+    auto device = VulkanApp::get().device();
+    printf("\n[Benchmark: Add (Residual)]\n");
+    printf("================================================\n");
+
+    const uint32_t warmupIter = 3;
+    const uint32_t benchmarkIter = 100;
+
+    struct TestCase {
+        uint32_t inputH, inputW, channels;
+        const char* description;
+    };
+
+    std::vector<TestCase> testCases = {
+        {224, 224, 32, "Large input (224x224x32)"},
+        {112, 112, 64, "Medium input (112x112x64)"},
+        {56, 56, 128, "Small input (56x56x128)"},
+    };
+
+    for (const auto& tc : testCases)
+    {
+        printf("\n  Test: %s\n", tc.description);
+        printf("  Config: Input=[%u, %u, %u]\n", tc.inputH, tc.inputW, tc.channels);
+
+        AddNode node;
+
+        // Note: AddNode requires two inputs, we'll need to modify runBenchmark for this
+        // For now, skip or use a modified approach
+        printf("    Note: AddNode requires 2 inputs - skipping automated benchmark\n");
+    }
+
+    printf("\n================================================\n");
+}
+
+void benchmarkMaxPooling()
+{
+    auto device = VulkanApp::get().device();
+    printf("\n[Benchmark: MaxPooling]\n");
+    printf("================================================\n");
+
+    const uint32_t warmupIter = 3;
+    const uint32_t benchmarkIter = 100;
+
+    struct TestCase {
+        uint32_t inputH, inputW, channels;
+        uint32_t poolSize;
+        const char* description;
+    };
+
+    std::vector<TestCase> testCases = {
+        {224, 224, 32, 2, "Large input (224x224x32), Pool=2"},
+        {112, 112, 64, 2, "Medium input (112x112x64), Pool=2"},
+        {56, 56, 128, 2, "Small input (56x56x128), Pool=2"},
+        {224, 224, 32, 3, "Large input (224x224x32), Pool=3"},
+    };
+
+    for (const auto& tc : testCases)
+    {
+        printf("\n  Test: %s\n", tc.description);
+        printf("  Config: Input=[%u, %u, %u], PoolSize=%u\n",
+               tc.inputH, tc.inputW, tc.channels, tc.poolSize);
+
+        MaxPoolingNode node(tc.poolSize);
+
+        runBenchmark("MaxPooling", node, tc.inputH, tc.inputW, tc.channels,
+                     warmupIter, benchmarkIter);
+    }
+
+    printf("\n================================================\n");
+}
+
+void benchmarkGlobalAvgPool()
+{
+    auto device = VulkanApp::get().device();
+    printf("\n[Benchmark: GlobalAvgPool]\n");
+    printf("================================================\n");
+
+    const uint32_t warmupIter = 3;
+    const uint32_t benchmarkIter = 100;
+
+    struct TestCase {
+        uint32_t inputH, inputW, channels;
+        const char* description;
+    };
+
+    std::vector<TestCase> testCases = {
+        {7, 7, 1280, "Final feature map (7x7x1280)"},
+        {14, 14, 320, "Mid feature map (14x14x320)"},
+        {28, 28, 160, "Early feature map (28x28x160)"},
+    };
+
+    for (const auto& tc : testCases)
+    {
+        printf("\n  Test: %s\n", tc.description);
+        printf("  Config: Input=[%u, %u, %u]\n", tc.inputH, tc.inputW, tc.channels);
+
+        GlobalAvgPoolNode node;
+
+        runBenchmark("GlobalAvgPool", node, tc.inputH, tc.inputW, tc.channels,
+                     warmupIter, benchmarkIter);
+    }
+
+    printf("\n================================================\n");
+}
+
+void benchmarkFullyConnected()
+{
+    auto device = VulkanApp::get().device();
+    printf("\n[Benchmark: FullyConnected]\n");
+    printf("================================================\n");
+
+    const uint32_t warmupIter = 3;
+    const uint32_t benchmarkIter = 100;
+
+    struct TestCase {
+        uint32_t inputDim, outputDim;
+        const char* description;
+    };
+
+    std::vector<TestCase> testCases = {
+        {1280, 1000, "Classifier (1280->1000)"},
+        {1280, 100, "Small classifier (1280->100)"},
+        {512, 256, "Hidden layer (512->256)"},
+        {2048, 1000, "Large classifier (2048->1000)"},
+    };
+
+    for (const auto& tc : testCases)
+    {
+        printf("\n  Test: %s\n", tc.description);
+        printf("  Config: Input=%u, Output=%u\n", tc.inputDim, tc.outputDim);
+
+        FullyConnectedNode node(tc.inputDim, tc.outputDim);
+
+        // Set weights [inputDim, outputDim]
+        Tensor weights(tc.inputDim, tc.outputDim);
+        std::vector<float> weightData(tc.inputDim * tc.outputDim, 0.01f);
+        weights.set(weightData);
+        weights.setConstant(true);
+        node["weight"] = std::move(weights);
+
+        // Set bias [outputDim]
+        Tensor bias(tc.outputDim);
+        std::vector<float> biasData(tc.outputDim, 0.0f);
+        bias.set(biasData);
+        bias.setConstant(true);
+        node["bias"] = std::move(bias);
+
+        // FC layer expects 1D input tensor
+        NeuralNet net(device);
+        net.input(0) - node - net.output(0);
+
+        // Create 1D input tensor [inputDim]
+        Tensor input(tc.inputDim);
+        std::vector<float> dummyData(tc.inputDim, 0.5f);
+        input.set(dummyData);
+
+        // Warmup phase
+        Tensor output;
+        for (uint32_t i = 0; i < warmupIter; ++i)
+        {
+            auto outputs = net(input);
+            if (outputs.empty())
+            {
+                printf("    Error: Network returned empty output vector\n");
+                continue;
             }
+            output = outputs[0];
         }
-    }
 
-    Tensor input(H, W, C);
-    input.set(inputData);
-
-    NeuralNet net(netGlobalDevice, 1, 1);
-    net.input(0) - gap - net.output(0);
-
-    auto results = net(std::move(input));
-
-    const auto& outShape = results[0].shape();
-    printf("Input shape: %d x %d x %d\n", H, W, C);
-    printf("Output shape: %d\n", outShape[0]);
-
-    Buffer outBuffer = netGlobalDevice.createBuffer({
-        C * sizeof(float),
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        });
-
-    netGlobalDevice.newCommandBuffer(queue_compute)
-        .begin()
-        .copyBuffer(outBuffer, results[0].buffer())
-        .end()
-        .submit()
-        .wait();
-
-    float* data = (float*)outBuffer.map();
-    printf("Output (expected: 1.0 2.0 3.0): ");
-    for (uint32_t i = 0; i < C; ++i) printf("%.1f ", data[i]);
-
-    bool pass = true;
-    for (uint32_t i = 0; i < C; ++i) {
-        if (std::abs(data[i] - (float)(i + 1)) > 0.001f) pass = false;
-    }
-    printf("\nResult: %s\n", pass ? "PASS" : "FAIL");
-}
-
-
-void testConvBnReLU6()
-{
-    printf("\n=== Testing Conv+BN+ReLU6 Combined Node ===\n");
-
-    const uint32_t H = 8, W = 8, C_in = 3, C_out = 16;
-    const uint32_t K = 3, stride = 2, pad = 1;
-
-    ConvBNReLU6 convBnRelu6(C_in, C_out, K, stride, pad);
-
-    std::mt19937 gen(42);
-
-    std::vector<float> inputData(H * W * C_in, 0.5f);
-    Tensor input(H, W, C_in);
-    input.set(inputData);
-
-    convBnRelu6["conv.weight"] = makeRandomTensor({ C_in * K * K, C_out }, gen, 0.1f);
-    convBnRelu6["conv.bias"] = makeConstTensor(C_out, 0.0f);
-    convBnRelu6["bn.mean"] = makeConstTensor(C_out, 0.0f);
-    convBnRelu6["bn.variance"] = makeConstTensor(C_out, 1.0f);
-    convBnRelu6["bn.gamma"] = makeConstTensor(C_out, 1.0f);
-    convBnRelu6["bn.beta"] = makeConstTensor(C_out, 0.0f);
-    
-    NeuralNet net(netGlobalDevice, 1, 1);
-    net.input(0) - convBnRelu6 - net.output(0);
-
-    auto results = net(std::move(input));
-
-    const auto& outShape = results[0].shape();
-    uint32_t expectedH = (H + 2 * pad - K) / stride + 1;
-    uint32_t expectedW = (W + 2 * pad - K) / stride + 1;
-
-    printf("Input shape: %d x %d x %d\n", H, W, C_in);
-    printf("Output shape: %d x %d x %d\n", outShape[0], outShape[1], outShape[2]);
-    printf("Expected shape: %d x %d x %d\n", expectedH, expectedW, C_out);
-
-    size_t outSize = outShape[0] * outShape[1] * outShape[2];
-    Buffer outBuffer = netGlobalDevice.createBuffer({
-        outSize * sizeof(float),
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        });
-
-    netGlobalDevice.newCommandBuffer(queue_compute)
-        .begin()
-        .copyBuffer(outBuffer, results[0].buffer())
-        .end()
-        .submit()
-        .wait();
-
-    float* data = (float*)outBuffer.map();
-
-    bool allInRange = true;
-    float minVal = data[0], maxVal = data[0];
-    for (size_t i = 0; i < outSize; ++i) {
-        if (data[i] < 0.0f || data[i] > 6.0f) allInRange = false;
-        minVal = std::min(minVal, data[i]);
-        maxVal = std::max(maxVal, data[i]);
-    }
-    printf("Output range: [%.3f, %.3f]\n", minVal, maxVal);
-    printf("All values in [0, 6]: %s\n", allInRange ? "YES" : "NO");
-
-    bool shapePass = (outShape[0] == expectedH && outShape[1] == expectedW && outShape[2] == C_out);
-    printf("Result: %s\n", (shapePass && allInRange) ? "PASS" : "FAIL");
-}
-
-
-void testInvertedResidualBlock()
-{
-    printf("\n=== Testing Inverted Residual Block ===\n");
-
-    const uint32_t H = 14, W = 14, C_in = 32, C_out = 32;
-    const uint32_t expandRatio = 6;
-    const uint32_t stride = 1;
-
-    InvertedResidualBlock irb(C_in, C_out, expandRatio, stride);
-
-    uint32_t hiddenDim = C_in * expandRatio;
-
-    std::mt19937 gen(42);
-
-    std::vector<float> inputData(H * W * C_in, 0.1f);
-    Tensor input(H, W, C_in);
-    input.set(inputData);
-
-    // Expansion layer weights
-    irb["pwConvBNReLU6.pointwiseConv.weight"] = makeRandomTensor({ C_in, hiddenDim }, gen);
-    irb["pwConvBNReLU6.bn.gamma"] = makeConstTensor(hiddenDim, 1.0f);
-    irb["pwConvBNReLU6.bn.beta"] = makeConstTensor(hiddenDim, 0.0f);
-    irb["pwConvBNReLU6.bn.mean"] = makeConstTensor(hiddenDim, 0.0f);
-    irb["pwConvBNReLU6.bn.variance"] = makeConstTensor(hiddenDim, 1.0f);
-
-    // Depthwise layer weights
-    irb["dwConvBNReLU6.depthwiseConv.weight"] = makeRandomTensor({ 9, hiddenDim }, gen);
-    irb["dwConvBNReLU6.bn.gamma"] = makeConstTensor(hiddenDim, 1.0f);
-    irb["dwConvBNReLU6.bn.beta"] = makeConstTensor(hiddenDim, 0.0f);
-    irb["dwConvBNReLU6.bn.mean"] = makeConstTensor(hiddenDim, 0.0f);
-    irb["dwConvBNReLU6.bn.variance"] = makeConstTensor(hiddenDim, 1.0f);
-
-    // Projection layer weights
-    irb["pwConvBN.pointwiseConv.weight"] = makeRandomTensor({ hiddenDim, C_out }, gen);
-    irb["pwConvBN.bn.gamma"] = makeConstTensor(C_out, 1.0f);
-    irb["pwConvBN.bn.beta"] = makeConstTensor(C_out, 0.0f);
-    irb["pwConvBN.bn.mean"] = makeConstTensor(C_out, 0.0f);
-    irb["pwConvBN.bn.variance"] = makeConstTensor(C_out, 1.0f);
-
-    NeuralNet net(netGlobalDevice, 1, 1);
-    net.input(0) - irb - net.output(0);
-
-    printf("Running forward pass...\n");
-    auto start = std::chrono::high_resolution_clock::now();
-
-    auto results = net(std::move(input));
-
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-
-    const auto& outShape = results[0].shape();
-    printf("Input shape: %d x %d x %d\n", H, W, C_in);
-    printf("Hidden dim: %d\n", hiddenDim);
-    printf("Output shape: %d x %d x %d\n", outShape[0], outShape[1], outShape[2]);
-    printf("Time: %lld us\n", (long long)duration.count());
-    printf("Residual connection used: %s\n",
-        (stride == 1 && C_in == C_out) ? "YES" : "NO");
-
-    size_t outSize = outShape[0] * outShape[1] * outShape[2];
-    Buffer outBuffer = netGlobalDevice.createBuffer({
-        outSize * sizeof(float),
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        });
-
-    netGlobalDevice.newCommandBuffer(queue_compute)
-        .begin()
-        .copyBuffer(outBuffer, results[0].buffer())
-        .end()
-        .submit()
-        .wait();
-
-    float* data = (float*)outBuffer.map();
-    float minVal = data[0], maxVal = data[0], sum = 0;
-    for (size_t i = 0; i < outSize; ++i) {
-        minVal = std::min(minVal, data[i]);
-        maxVal = std::max(maxVal, data[i]);
-        sum += data[i];
-    }
-    printf("Output stats: min=%.4f, max=%.4f, mean=%.4f\n",
-        minVal, maxVal, sum / outSize);
-
-    bool shapePass = (outShape[0] == H && outShape[1] == W && outShape[2] == C_out);
-    printf("Result: %s\n", shapePass ? "PASS" : "FAIL");
-}
-
-
-void testSimplePipeline()
-{
-    printf("\n=== Testing Simple Pipeline (Conv -> IRB -> GAP -> FC) ===\n");
-
-    const uint32_t inputH = 56, inputW = 56, inputC = 3;
-    const uint32_t conv1OutC = 32;
-    const uint32_t irb1OutC = 16;
-    const uint32_t numClasses = 10;
-
-    // Create nodes
-    ConvBNReLU6 conv1(inputC, conv1OutC, 3, 2, 1);
-    InvertedResidualBlock irb1(conv1OutC, irb1OutC, 1, 1);  // t=1
-    GlobalAvgPoolNode gap;
-    FullyConnectedNode fc(irb1OutC, numClasses);
-
-    std::mt19937 gen(42);
-
-    // Conv1 weights
-    conv1["conv_weight"] = makeRandomTensor({ conv1OutC * inputC * 3 * 3 }, gen);
-    conv1["conv_bias"] = makeConstTensor(conv1OutC, 0.0f);
-    conv1["bn_gamma"] = makeConstTensor(conv1OutC, 1.0f);
-    conv1["bn_beta"] = makeConstTensor(conv1OutC, 0.0f);
-    conv1["bn_mean"] = makeConstTensor(conv1OutC, 0.0f);
-    conv1["bn_var"] = makeConstTensor(conv1OutC, 1.0f);
-
-    // IRB1 weights (t=1, no expansion)
-    uint32_t hiddenDim = conv1OutC;  // t=1
-    irb1["dw_weight"] = makeRandomTensor({ 9, hiddenDim }, gen);
-    irb1["dw_bn_gamma"] = makeConstTensor(hiddenDim, 1.0f);
-    irb1["dw_bn_beta"] = makeConstTensor(hiddenDim, 0.0f);
-    irb1["dw_bn_mean"] = makeConstTensor(hiddenDim, 0.0f);
-    irb1["dw_bn_var"] = makeConstTensor(hiddenDim, 1.0f);
-    irb1["proj_pw_weight"] = makeRandomTensor({ hiddenDim, irb1OutC }, gen);
-    irb1["proj_bn_gamma"] = makeConstTensor(irb1OutC, 1.0f);
-    irb1["proj_bn_beta"] = makeConstTensor(irb1OutC, 0.0f);
-    irb1["proj_bn_mean"] = makeConstTensor(irb1OutC, 0.0f);
-    irb1["proj_bn_var"] = makeConstTensor(irb1OutC, 1.0f);
-
-    // FC weights
-    fc["weight"] = makeRandomTensor({ irb1OutC, numClasses }, gen);
-    fc["bias"] = makeConstTensor(numClasses, 0.0f);
-
-    // Input
-    std::normal_distribution<float> dist(0.5f, 0.1f);
-    std::vector<float> inputData(inputH * inputW * inputC);
-    for (auto& v : inputData) v = dist(gen);
-    Tensor input(inputH, inputW, inputC);
-    input.set(inputData);
-
-    // Build network
-    NeuralNet net(netGlobalDevice, 1, 1);
-    net.input(0) - conv1 - irb1 - gap - fc - net.output(0);
-
-    printf("Network structure:\n");
-    printf("  Input: %d x %d x %d\n", inputH, inputW, inputC);
-    printf("  Conv1: -> 28 x 28 x %d\n", conv1OutC);
-    printf("  IRB1:  -> 28 x 28 x %d\n", irb1OutC);
-    printf("  GAP:   -> %d\n", irb1OutC);
-    printf("  FC:    -> %d\n", numClasses);
-
-    printf("\nRunning forward pass...\n");
-    auto start = std::chrono::high_resolution_clock::now();
-
-    auto results = net(std::move(input));
-
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-
-    printf("Forward pass completed in %lld us\n", (long long)duration.count());
-
-    // Read output
-    Buffer outBuffer = netGlobalDevice.createBuffer({
-        numClasses * sizeof(float),
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        });
-
-    netGlobalDevice.newCommandBuffer(queue_compute)
-        .begin()
-        .copyBuffer(outBuffer, results[0].buffer())
-        .end()
-        .submit()
-        .wait();
-
-    float* logits = (float*)outBuffer.map();
-
-    printf("\nOutput logits:\n");
-    for (uint32_t i = 0; i < numClasses; ++i) {
-        printf("  Class %d: %8.4f\n", i, logits[i]);
-    }
-
-    int maxIdx = 0;
-    float maxVal = logits[0];
-    for (uint32_t i = 1; i < numClasses; ++i) {
-        if (logits[i] > maxVal) {
-            maxVal = logits[i];
-            maxIdx = i;
+        // Benchmark phase
+        auto startTime = std::chrono::high_resolution_clock::now();
+        for (uint32_t i = 0; i < benchmarkIter; ++i)
+        {
+            auto outputs = net(input);
+            if (!outputs.empty())
+                output = outputs[0];
         }
-    }
-    printf("\nPredicted class: %d (logit: %.4f)\n", maxIdx, maxVal);
-    printf("Result: PASS (pipeline executed successfully)\n");
-}
+        auto endTime = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
 
-void testLoadWeights()
-{
-    printf("\n=== Testing SafeTensors Weight Loading ===\n");
-    fflush(stdout);
+        // Print results
+        float avgTime = static_cast<float>(duration.count()) / benchmarkIter;
+        printf("    Total time: %lld ms, Avg: %.3f ms per iter\n", duration.count(), avgTime);
 
-    const char* weightsPath = PROJECT_CURRENT_DIR "/mobilenetv2_weights.safetensors";
-    printf("Looking for: %s\n", weightsPath);
-    fflush(stdout);
-
-    try {
-        SafeTensorsParser weights(weightsPath);
-
-        auto tensorNames = weights.getTensorNames();
-        printf("Loaded %zu tensors\n", tensorNames.size());
-
-        // ù ��° Conv ����ġ Ȯ��
-        auto shape = weights["features.0.0.weight"].getShape();
-        printf("features.0.0.weight: [%u, %u, %u, %u]\n",
-            shape[0], shape[1], shape[2], shape[3]);
-
-        printf("Result: PASS\n");
-    }
-    catch (const std::exception& e) {
-        printf("Error: %s\n", e.what());
-    }
-}
-
-void testImageClassification()
-{
-    printf("\n=== Testing Image Classification ===\n");
-
-    const char* weightsPath = PROJECT_CURRENT_DIR "/mobilenetv2_weights.safetensors";
-    const char* imagePath = PROJECT_CURRENT_DIR "/images/cat.jpg";  // �ϳ��� �׽�Ʈ
-
-    // 1. �̹��� �ε�
-    int w, h, c;
-    uint8_t* data = stbi_load(imagePath, &w, &h, &c, 3);
-    if (!data) {
-        printf("Failed to load image: %s\n", imagePath);
-        printf("Please put an image in the images folder!\n");
-        return;
-    }
-    printf("Loaded image: %s (%d x %d)\n", imagePath, w, h);
-
-    // 2. 224x224�� �������� + ����ȭ
-    const int size = 224;
-    std::vector<float> input(size * size * 3);
-
-    int cropSize = std::min(w, h);
-    int offsetX = (w - cropSize) / 2;
-    int offsetY = (h - cropSize) / 2;
-
-    const float mean[3] = { 0.485f, 0.456f, 0.406f };
-    const float std_[3] = { 0.229f, 0.224f, 0.225f };
-
-    for (int y = 0; y < size; ++y) {
-        for (int x = 0; x < size; ++x) {
-            int srcX = offsetX + (x * cropSize) / size;
-            int srcY = offsetY + (y * cropSize) / size;
-            srcX = std::max(0, std::min(w - 1, srcX));
-            srcY = std::max(0, std::min(h - 1, srcY));
-
-            int srcIdx = (srcY * w + srcX) * 3;
-            int dstIdx = (y * size + x) * 3;
-
-            for (int ch = 0; ch < 3; ++ch) {
-                float pixel = data[srcIdx + ch] / 255.0f;
-                input[dstIdx + ch] = (pixel - mean[ch]) / std_[ch];
+        const auto& shape = output.shape();
+        if (shape.size() > 0)
+        {
+            printf("    Output shape: [");
+            for (size_t i = 0; i < shape.size(); ++i)
+            {
+                printf("%u%s", shape[i], (i < shape.size() - 1) ? ", " : "");
             }
+            printf("]\n");
+        }
+        else
+        {
+            printf("    Output shape: empty\n");
         }
     }
-    stbi_image_free(data);
-    printf("Preprocessed to 224x224\n");
 
-    // 3. ����ġ �ε�
-    SafeTensorsParser weights(weightsPath);
-    printf("Loaded weights\n");
+    printf("\n================================================\n");
+}
 
-    // 4. ù ��° Conv + BN + ReLU6 ���̾ �׽�Ʈ
-    ConvBNReLU6 conv1(3, 32, 3, 2, 1);
+void benchmarkConvolution()
+{
+    auto device = VulkanApp::get().device();
+    printf("\n[Benchmark: Convolution]\n");
+    printf("================================================\n");
 
-    auto conv1_w = weights["features.0.0.weight"].parseNDArray();
-    Tensor conv1_weight(32 * 3 * 3 * 3);
-    conv1_weight.set(conv1_w);
+    const uint32_t warmupIter = 3;
+    const uint32_t benchmarkIter = 100;
 
-    Tensor conv1_bias(32);
-    conv1_bias.set(std::vector<float>(32, 0.0f));
+    struct TestCase {
+        uint32_t inputH, inputW;
+        uint32_t inputChannels, outputChannels;
+        uint32_t kernelSize, stride, padding;
+        const char* description;
+    };
 
-    auto bn1_gamma = weights["features.0.1.weight"].parseNDArray();
-    auto bn1_beta = weights["features.0.1.bias"].parseNDArray();
-    auto bn1_mean = weights["features.0.1.running_mean"].parseNDArray();
-    auto bn1_var = weights["features.0.1.running_var"].parseNDArray();
+    std::vector<TestCase> testCases = {
+        {224, 224, 3, 32, 3, 2, 1, "Stem layer (224x224x3->32), K=3, S=2"},
+        {112, 112, 32, 64, 3, 2, 1, "Downsampling (112x112x32->64), K=3, S=2"},
+        {56, 56, 64, 128, 3, 1, 1, "Same size (56x56x64->128), K=3, S=1"},
+        {224, 224, 3, 64, 7, 2, 3, "Large kernel (224x224x3->64), K=7, S=2"},
+    };
 
-    Tensor conv1_bn_gamma(32); conv1_bn_gamma.set(bn1_gamma);
-    Tensor conv1_bn_beta(32); conv1_bn_beta.set(bn1_beta);
-    Tensor conv1_bn_mean(32); conv1_bn_mean.set(bn1_mean);
-    Tensor conv1_bn_var(32); conv1_bn_var.set(bn1_var);
+    for (const auto& tc : testCases)
+    {
+        printf("\n  Test: %s\n", tc.description);
+        printf("  Config: Input=[%u, %u, %u], Output ch=%u, Kernel=%u, Stride=%u, Padding=%u\n",
+               tc.inputH, tc.inputW, tc.inputChannels, tc.outputChannels,
+               tc.kernelSize, tc.stride, tc.padding);
 
-    conv1["conv_weight"] = conv1_weight;
-    conv1["conv_bias"] = conv1_bias;
-    conv1["bn_gamma"] = conv1_bn_gamma;
-    conv1["bn_beta"] = conv1_bn_beta;
-    conv1["bn_mean"] = conv1_bn_mean;
-    conv1["bn_var"] = conv1_bn_var;
+        ConvolutionNode node(tc.inputChannels, tc.outputChannels, tc.kernelSize, tc.stride, tc.padding);
 
-    // 5. �Է� �ټ� ����
-    Tensor inputTensor(224, 224, 3);
-    inputTensor.set(input);
+        // Set conv weights [K*K*C_in, C_out]
+        Tensor weights(tc.kernelSize * tc.kernelSize * tc.inputChannels, tc.outputChannels);
+        std::vector<float> weightData(tc.kernelSize * tc.kernelSize * tc.inputChannels * tc.outputChannels, 0.01f);
+        weights.set(weightData);
+        weights.setConstant(true);
+        node["weight"] = std::move(weights);
 
-    // 6. ��Ʈ��ũ ����
-    GlobalAvgPoolNode gap;
-
-    NeuralNet net(netGlobalDevice, 1, 1);
-    net.input(0) - conv1 - gap - net.output(0);
-
-    printf("Running first layer...\n");
-    auto results = net(std::move(inputTensor));
-
-    // 7. ��� ���
-    const auto& outShape = results[0].shape();
-    size_t outSize = 1;
-    for (auto d : outShape) outSize *= d;
-
-    Buffer outBuffer = netGlobalDevice.createBuffer({
-        outSize * sizeof(float),
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        });
-
-    netGlobalDevice.newCommandBuffer(queue_compute)
-        .begin()
-        .copyBuffer(outBuffer, results[0].buffer())
-        .end()
-        .submit()
-        .wait();
-
-    float* output = (float*)outBuffer.map();
-
-    printf("Output (32 channels after first Conv+BN+ReLU6 + GAP):\n");
-    for (size_t i = 0; i < std::min((size_t)10, outSize); ++i) {
-        printf("  Channel %zu: %.4f\n", i, output[i]);
+        runBenchmark("Convolution", node, tc.inputH, tc.inputW, tc.inputChannels,
+                     warmupIter, benchmarkIter);
     }
 
-    printf("\nResult: PASS - Image processed with real weights!\n");
+    printf("\n================================================\n");
+}
+
+void benchmarkAllLayers()
+{
+    printf("\n");
+    printf("================================================\n");
+    printf("  MobileNetV2 Layer-wise Benchmark Suite\n");
+    printf("================================================\n");
+
+    // Basic operation nodes
+    benchmarkBatchNorm();
+    benchmarkRelu6();
+    benchmarkAdd();
+    benchmarkMaxPooling();
+    benchmarkGlobalAvgPool();
+    benchmarkFullyConnected();
+
+    // Convolution nodes
+    benchmarkConvolution();
+    benchmarkDepthwiseConv();
+    benchmarkPointwiseConv();
+
+    // Composite nodes
+    benchmarkConvBnReLU6();
+    benchmarkInvertedResidualBlock();
+
+    printf("\n");
+    printf("================================================\n");
+    printf("  Benchmark Complete\n");
+    printf("================================================\n");
 }

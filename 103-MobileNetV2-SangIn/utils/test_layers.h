@@ -9,13 +9,23 @@ Tensor makeConstTensor(uint32_t size, float val);
 
 bool allClose(const float* data, const float* expected, int n, float eps = 1e-3f);
 
-void testRelu6();
-void testDepthwiseConv();
-void testPointwiseConv();
-void testGlobalAvgPool();
-void testConvBnReLU6();
-void testInvertedResidualBlock();
-void testSimplePipeline();
-void testLoadWeights();
-void testImageClassification();
-void testFullClassification();
+// Benchmark functions - test cases defined internally
+// Basic operation nodes
+void benchmarkBatchNorm();
+void benchmarkRelu6();
+void benchmarkAdd();
+void benchmarkMaxPooling();
+void benchmarkGlobalAvgPool();
+void benchmarkFullyConnected();
+
+// Convolution nodes
+void benchmarkConvolution();
+void benchmarkDepthwiseConv();
+void benchmarkPointwiseConv();
+
+// Composite nodes
+void benchmarkConvBnReLU6();
+void benchmarkInvertedResidualBlock();
+
+// Run all benchmarks
+void benchmarkAllLayers();

@@ -178,6 +178,12 @@ public:
         return _isConstant;
     }
 
+    // Debug purpose
+    void setConstant(bool isConst)
+    {
+        _isConstant = isConst;
+    }
+
     template <typename... Ts>
     bool isShapeOf(Ts... dims) const
     {

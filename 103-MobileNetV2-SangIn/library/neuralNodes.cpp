@@ -927,7 +927,6 @@ void DepthwiseConvNode::prepare()
 {
     const auto& inShape = (*this)["in0"].shape(); // (H, W, C)
     _ASSERT(inShape.size() == 3 && inShape[2] == C);
-
     _ASSERT((*this)["weight"].isShapeOf(K * K, C));
 
     auto& bias = (*this)["bias"];
