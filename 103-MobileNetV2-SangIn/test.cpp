@@ -5,7 +5,6 @@
 #include "library/timeChecker.hpp"
 #include "models/MobileNetV2.h"
 #include "utils/utils.h"
-#include "utils/test_layers.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb/stb_image.h>
@@ -14,8 +13,6 @@
 #include <cstring>
 #include <iostream>
 #include <filesystem>
-
-// #define DEBUG_INFO
 
 
 template<uint32_t Channels>
@@ -50,23 +47,6 @@ std::vector<float> preprocess(const std::vector<uint8_t>& image, int w, int h) {
             result[i * 3 + c] = (val - mean[c]) / std[c];
         }
     }
-
-    #if defined(DEBUG_INFO)
-    // Debug: print 
-    for (auto [x,y] : {std::pair{0,0}, {56,56}, {112,112}}) 
-    {
-        uint32_t idx = (y * w + x) * 3;
-        
-        printf("Debug Preprocess Check at (%u,%u):\n", x, y);
-        printf("[Before] (%u, %u, %u) // [After] (%f, %f, %f)\n",
-            image[idx],
-            image[idx+1],
-            image[idx+2],
-            result[idx],
-            result[idx+1],
-            result[idx+2]);        
-    }
-    #endif
 
     return result;
 }
@@ -106,32 +86,6 @@ void loadWeights(MobileNetV2& net, const SafeTensorsParser& weights)
             
             net[cppName] = std::move(tensor);
             net.setNodeNameFromParam(cppName);
-            
-            // // print loaded tensor shape and first 10 elements (weight)
-            // printf("Tensor: %s shape=[", cppName.c_str());
-            // const auto& finalShape = net[cppName].shape();
-            // for(size_t i=0; i<finalShape.size() - 1; ++i) {
-            //     printf("%d x ", finalShape[i]);
-            // }
-            // printf("%d]\n", finalShape[finalShape.size() - 1]);
-            
-            // printf(" First 10 elements: [");
-            // const auto& data = net[cppName].hostData();
-            // for (size_t i = 0; i < std::min<size_t>(10 , net[cppName].numElements()); ++i) {
-            //     printf("%f%s", data[i], i < std::min<size_t>(10, net[cppName].numElements()) - 1 ? ", " : "");
-            // }
-            // printf("]\n");
-
-            #if defined(DEBUG_INFO)
-
-            // Debug info
-            const auto& finalShape = net[cppName].shape();
-            printf("✓ Loaded %-40s <- %-40s shape=[", cppName.c_str(), ptName.c_str());
-            for(size_t i=0; i<finalShape.size(); ++i) {
-                printf("%d%s", finalShape[i], i<finalShape.size()-1?"x":"");
-            }
-            printf("]\n");
-            #endif
 
         } catch (const std::exception& e) {
             std::cerr << "[Failed to load] " << cppName << " <- " << ptName << ": " << e.what() << std::endl;
@@ -282,17 +236,6 @@ void test()
     _ASSERT(width == resolution && height == resolution);
 
     auto inputData = preprocess(srcImage, resolution, resolution);
-
-
-#if defined(DEBUG_INFO)
-    // Individual Node Tests
-    testRelu6();
-    testDepthwiseConv();
-    testPointwiseConv();
-    testInvertedResidualBlock();
-    testGlobalAvgPool();
-    testConvBnReLU6();
-#endif
 
     // Eval MobileNetV2
     const uint8_t iter = 1U;

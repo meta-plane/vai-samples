@@ -1521,7 +1521,6 @@ void FullyConnectedNode::run(CommandBuffer cmdBuff)
         .bindDescSets({gemmDescSet})
         .setPushConstants(0, sizeof(gemmConstants), gemmConstants)
         .dispatch0(CEIL_DIV(N, 32), M, CEIL_DIV(K, 16))
-        //.dispatch0(CEIL_DIV(N, gemmTileSize), CEIL_DIV(M, gemmTileSize))
         .barrier( 
             (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
             / (*this)["out0"].buffer()
