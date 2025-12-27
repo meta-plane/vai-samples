@@ -2,8 +2,8 @@
 #define TENSOR_H
 
 
-#include "jsonParser.h"
 #include "safeTensorsParser.h"
+#include "jsonParser.h"
 #include "vulkanApp.h"
 #include "error.h"
 #include <memory>
@@ -11,12 +11,11 @@
 #include <map>
 #include <unordered_map>
 
-
 class BufferPool
 {
     // vk::Device device;
     std::unordered_map<
-        VkBufferUsageFlags,
+        VkBufferUsageFlags, 
         std::multimap<size_t, std::pair<vk::Buffer, VkMemoryPropertyFlags>> > bufferPool;
 
 public:
@@ -27,8 +26,8 @@ public:
     }
 
     vk::Buffer requestBuffer(
-        vk::Device device,
-        uint32_t usageFlags,
+        vk::Device& device,
+        uint32_t usageFlags, 
         uint32_t reqMemProps,
         size_t minSize,
         size_t maxSize = size_t(-1)
@@ -37,8 +36,8 @@ public:
         auto& subPool = bufferPool[usageFlags];
 
         for (auto it = subPool.lower_bound(minSize);
-            it != subPool.end() && it->first <= maxSize;
-            ++it)
+             it != subPool.end() && it->first <= maxSize;
+             ++it)
         {
             const auto& [buffer, memProps] = it->second;
             if ((memProps & reqMemProps) == reqMemProps)
@@ -54,15 +53,15 @@ public:
             .size = minSize,
             .usage = usageFlags,
             .reqMemProps = reqMemProps
-            });
+        });
     }
 
     void returnBuffer(vk::Buffer buffer)
     {
-        if (buffer)
+        if (buffer) 
         {
             bufferPool[buffer.usage()].emplace(
-                buffer.size(),
+                buffer.size(), 
                 std::make_pair(std::move(buffer), buffer.memoryProperties())
             );
         }
@@ -70,16 +69,15 @@ public:
 };
 
 
-class TensorImpl
+class TensorData
 {
     friend class Tensor;
-    std::vector<uint32_t> shape;
-    std::vector<float> data;
-    vk::Buffer _buffer;
-    bool _isConstant = false;
+    // std::vector<uint32_t> shape;
+    std::vector<float> hostData; 
+    vk::Buffer _buffer; 
 
 public:
-    ~TensorImpl()
+    ~TensorData()
     {
         BufferPool::get().returnBuffer(_buffer); // temporary code
     }
@@ -87,68 +85,73 @@ public:
 };
 
 
-class Tensor
+class Tensor 
 {
-    std::shared_ptr<TensorImpl> impl;
+    std::shared_ptr<TensorData> _data;
+    std::vector<uint32_t> _shape;
+    bool _isConstant = false;
 
 public:
     template <typename... Ts>
-    Tensor(Ts... dims) : impl(std::make_shared<TensorImpl>())
+    Tensor(Ts... dims) : _data(std::make_shared<TensorData>())
     {
         static_assert((std::conjunction_v<std::is_integral<Ts>...>), "All dims must be integral types");
-        impl->shape = { static_cast<uint32_t>(dims)... };
+        _shape = {static_cast<uint32_t>(dims)...};
     }
 
-    Tensor(const std::vector<uint32_t>& shape) : impl(std::make_shared<TensorImpl>())
+    Tensor(const std::vector<uint32_t>& shape) : _data(std::make_shared<TensorData>())
     {
-        impl->shape = shape;
+        _shape = shape;
     }
 
-    // JSON 파서에서 생성
-    Tensor(const JsonParserRef& json) : impl(std::make_shared<TensorImpl>())
+    Tensor(const JsonParserRef& json) : _data(std::make_shared<TensorData>())
     {
-        set(json.parseNDArray(impl->shape));
+        set(json.parseNDArray(_shape));
+        _isConstant = true;
     }
 
-    // SafeTensors 파서에서 생성
-    Tensor(const SafeTensorsParserRef& safetensors) : impl(std::make_shared<TensorImpl>())
+    Tensor(const SafeTensorsParserRef& safetensors) : _data(std::make_shared<TensorData>())
     {
-        impl->shape = safetensors.getShape();
+        _shape = safetensors.getShape();
         set(safetensors.parseNDArray());
-        impl->_isConstant = true;
-    }
-
+        _isConstant = true;
+    } 
+    
     Tensor() = default;
     Tensor(const Tensor&) = default;
     Tensor(Tensor&&) = default;
     Tensor& operator=(const Tensor&) = default;
     Tensor& operator=(Tensor&&) = default;
 
-    Tensor& set(const std::vector<float>& data)&
+    Tensor& set(const std::vector<float>& inData) &
     {
-        _ASSERT(numElements() == data.size());
-        impl->data = data;
+        _ASSERT(!hasDeviceData());  // Force not to set host data if device data is bound
+        _ASSERT(numElements() == inData.size());
+        _data->hostData = inData;
         return *this;
     }
 
-    Tensor&& set(const std::vector<float>& data)&&
+    Tensor&& set(const std::vector<float>& inData) &&
     {
-        _ASSERT(numElements() == data.size());
-        impl->data = data;
+        _ASSERT(!hasDeviceData());
+        _ASSERT(numElements() == inData.size());
+        _data->hostData = inData;
         return std::move(*this);
     }
 
-    Tensor& set(std::vector<float>&& data)&
+    Tensor& set(std::vector<float>&& inData) &
     {
-        _ASSERT(numElements() == data.size());
-        impl->data = std::move(data);
+        _ASSERT(!hasDeviceData());
+        _ASSERT(numElements() == inData.size());
+        _data->hostData = std::move(inData);
         return *this;
     }
 
-    Tensor&& set(std::vector<float>&& data)&&
+    Tensor&& set(std::vector<float>&& inData) &&
     {
-        _ASSERT(numElements() == data.size());
-        impl->data = std::move(data);
+        _ASSERT(!hasDeviceData());
+        _ASSERT(numElements() == inData.size());
+        _data->hostData = std::move(inData);
         return std::move(*this);
     }
 
@@ -157,7 +160,7 @@ public:
     {
         static_assert((std::conjunction_v<std::is_integral<Ts>...>), "All dims must be integral types");
         _ASSERT(numElements() == (static_cast<size_t>(dims) * ...));
-        impl->shape = { static_cast<uint32_t>(dims)... };
+        _shape = {static_cast<uint32_t>(dims)...};
         return *this;
     }
 
@@ -167,91 +170,111 @@ public:
     const std::vector<uint32_t>& shape() const
     {
         static const std::vector<uint32_t> emptyShape{};
-        return impl ? impl->shape : emptyShape;
+        return _data ? _shape : emptyShape;
+    }
+
+    bool isConstant() const
+    {
+        return _isConstant;
     }
 
     template <typename... Ts>
     bool isShapeOf(Ts... dims) const
     {
         static_assert((std::conjunction_v<std::is_integral<Ts>...>), "All dims must be integral types");
-        if (!impl || impl->shape.size() != sizeof...(Ts))
+        if (!_data || _shape.size() != sizeof...(Ts))
             return false;
 
         const uint32_t dimArray[] = { uint32_t(dims)... };
 
-        return[&]<std::size_t... Is>(std::index_sequence<Is...>) {
-            return ((dimArray[Is] == impl->shape[Is] || dimArray[Is] == uint32_t(-1)) && ...);
+        return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+            return ((dimArray[Is] == _shape[Is] || dimArray[Is] == uint32_t(-1)) && ...);
         }(std::index_sequence_for<Ts...>{});
     }
 
     size_t numElements() const
     {
-        if (!impl || impl->shape.empty()) return 0;
-        size_t sz = 1; for (uint32_t dim : impl->shape) sz *= dim;
+        if (!_data || _shape.empty()) return 0;
+        size_t sz = 1; for (uint32_t dim : _shape) sz *= dim;
         return sz;
     }
 
     bool validShape() const
     {
-        if (!impl || impl->shape.empty()) return false;
-        for (uint32_t dim : impl->shape) if (dim == 0) return false;
+        if (!_data || _shape.empty()) return false;
+        for (uint32_t dim : _shape) if (dim == 0) return false;
         return true;
     }
 
-    bool hasData() const
+    bool hasHostData() const
     {
-        return impl && !impl->data.empty();
+        return _data && !_data->hostData.empty();
     }
 
-    float* data()
+    float* hostData()
     {
-        if (!impl || impl->data.empty()) return nullptr;
-        return impl->data.data();
+        if (!_data || _data->hostData.empty()) return nullptr;
+        return _data->hostData.data();
     }
 
-    const float* data() const
+    void clearHostData()
     {
-        if (!impl || impl->data.empty()) return nullptr;
-        return impl->data.data();
+        _ASSERT(_data);
+        _data->hostData.clear();
     }
 
-    void clearData()
+    // bool isBufferBound() const
+    bool hasDeviceData() const
     {
-        _ASSERT(impl);
-        impl->data.clear();
-    }
-
-    bool isBufferBound() const
-    {
-        return impl && impl->_buffer;
+        return _data && _data->_buffer;
     }
 
     void bindBuffer(vk::Buffer buf)
     {
-        _ASSERT(impl);
-        impl->_buffer = buf;
+        _ASSERT(_data);
+        _data->_buffer = buf;
     }
 
     void unbindBuffer()
     {
-        _ASSERT(impl);
-        impl->_buffer = vk::Buffer();
+        _ASSERT(_data);
+        _data->_buffer = vk::Buffer();
     }
 
     vk::Buffer buffer() const
     {
-        _ASSERT(impl && impl->_buffer);
-        return impl->_buffer;
+        _ASSERT(_data && _data->_buffer);
+        return _data->_buffer;
     }
 
-    bool isConstant() const
+    Tensor clone() const 
     {
-        return impl && impl->_isConstant;
+        Tensor t(_shape);
+        if (hasHostData()) {
+            t._data->hostData = _data->hostData;
+        }
+        t._isConstant = _isConstant;
+        return t;
     }
 
-    void setConstant(bool val)
+    uint32_t size(uint32_t dim) const 
     {
-        if (impl) impl->_isConstant = val;
+        _ASSERT(dim < _shape.size());
+        return _shape[dim];
+    }
+
+    float at(size_t idx) const 
+    {
+        _ASSERT(hasHostData());
+        _ASSERT(idx < _data->hostData.size());
+        return _data->hostData[idx];
+    }
+
+    void set(size_t idx, float v) 
+    {
+        _ASSERT(hasHostData());
+        _ASSERT(idx < _data->hostData.size());
+        _data->hostData[idx] = v;
     }
 };
 
@@ -260,9 +283,9 @@ template <typename... Ts>
 inline Tensor& Tensor::permute(Ts... Perms)
 {
     static_assert((std::conjunction_v<std::is_integral<Ts>...>), "All dims must be integral types");
-    _ASSERT(impl && !impl->data.empty());
-
-    const uint32_t rank = impl->shape.size();
+    _ASSERT(_data && !_data->hostData.empty());
+    
+    const uint32_t rank = _shape.size();
     _ASSERT(sizeof...(Perms) == rank);
     _ASSERT(((Perms < rank) && ...)); // Ensure all Perms are valid indices
 
@@ -272,24 +295,24 @@ inline Tensor& Tensor::permute(Ts... Perms)
         for (size_t j = i + 1; j < rank; ++j)
             _ASSERT(permutation[i] != permutation[j]);
 
-    std::vector<uint32_t> dstShape(impl->shape.size());
-    for (size_t i = 0; i < impl->shape.size(); ++i)
-        dstShape[i] = impl->shape[permutation[i]];
+    std::vector<uint32_t> dstShape(_shape.size());
+    for (size_t i = 0; i < _shape.size(); ++i)
+        dstShape[i] = _shape[permutation[i]];
 
     std::vector<size_t> srcStrides(rank);
     srcStrides[rank - 1] = 1;
     for (int i = rank - 2; i >= 0; --i)
-        srcStrides[i] = srcStrides[i + 1] * impl->shape[i + 1];
+        srcStrides[i] = srcStrides[i + 1] * _shape[i + 1];
 
     std::vector<size_t> dstStrides(rank);
     dstStrides[rank - 1] = 1;
     for (int i = rank - 2; i >= 0; --i)
         dstStrides[i] = dstStrides[i + 1] * dstShape[i + 1];
 
-    std::vector<float> dstData(impl->data.size());
+    std::vector<float> dstData(_data->hostData.size());
     std::vector<uint32_t> srcIndices(rank);
     std::vector<uint32_t> dstIndices(rank);
-    for (size_t linear = 0; linear < impl->data.size(); ++linear)
+    for (size_t linear = 0; linear < _data->hostData.size(); ++linear)
     {
         // linear → multi-dim
         size_t remaining = linear;
@@ -308,11 +331,11 @@ inline Tensor& Tensor::permute(Ts... Perms)
         for (uint32_t i = 0; i < rank; ++i)
             dstLinear += dstIndices[i] * dstStrides[i];
 
-        dstData[dstLinear] = impl->data[linear];
+        dstData[dstLinear] = _data->hostData[linear];
     }
-
-    impl->shape = std::move(dstShape);
-    impl->data = std::move(dstData);
+    
+    _shape = std::move(dstShape);
+    _data->hostData = std::move(dstData);
     return *this;
 }
 

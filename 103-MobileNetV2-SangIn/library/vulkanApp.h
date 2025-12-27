@@ -55,7 +55,27 @@ class Impl; Impl* impl; \
 public: \
 operator bool() const { return impl != nullptr; } \
 private: \
-        
+
+
+#define VULKAN_CLASS_COMMON2 \
+friend class VulkanApp; \
+friend class Device; \
+friend class Queue; \
+friend class CommandPool; \
+friend class CommandBuffer; \
+friend class Fence; \
+friend class Semaphore; \
+friend class ShaderModule; \
+friend class ComputePipeline; \
+friend class GraphicsPipeline; \
+friend class RaytracingPipeline; \
+friend class Buffer; \
+friend class DescriptorSetLayout; \
+friend class PipelineLayout; \
+friend class DescriptorPool; \
+friend class DescriptorSet; \
+friend class Submitting; \
+class Impl; 
 
 
 struct ComputePipelineCreateInfo;
@@ -92,7 +112,7 @@ struct DeviceSettings {
     bool requireGrapicsQueues = true;
     bool requireComputeQueues = true;
     bool requireTransferQueues = true;
-    bool supportPresent = true;
+    bool supportPresent = false;
     bool supportRaytracing = false;
 };
 
@@ -115,81 +135,52 @@ enum class OwnershipTransferOpType {
 class VulkanApp {
     VULKAN_CLASS_COMMON
     ~VulkanApp();
-    VulkanApp();
+    VulkanApp(DeviceSettings defaultSettings = {});
     VulkanApp(const VulkanApp&) = delete;
     VulkanApp& operator=(const VulkanApp&) = delete;
+
 public:
-
     static VulkanApp& get();    // singleton pattern
-
-    Device createDevice(DeviceSettings settings={});
-
-    Device device(uint32_t index=0);
+    bool initDevice(uint32_t gpuIndex, DeviceSettings settings={});
+    Device device(uint32_t gpuIndex=uint32_t(-1));
 };
 
 
 class Device {
     VULKAN_CLASS_COMMON
+
 public:
-
     void reportGPUQueueFamilies() const;
-
     void reportAssignedQueues() const;    
 
     uint32_t queueCount(QueueType type) const;
-
     bool supportPresent(QueueType type) const;
-
     Queue queue(QueueType type, uint32_t index=0) const;
-
     QueueSelector queue(uint32_t index=0) const;
 
     CommandPool createCommandPool(QueueType type, VkCommandPoolCreateFlags flags=0);
-
-    CommandPool setDefalutCommandPool(
-        QueueType type, 
-        CommandPool cmdPool
-    );
-
-    CommandBuffer newCommandBuffer(
-        QueueType type, 
-        VkCommandPoolCreateFlags poolFlags=0
-    );
+    CommandPool setDefalutCommandPool(QueueType type, CommandPool cmdPool);
+    CommandBuffer newCommandBuffer(QueueType type, VkCommandPoolCreateFlags poolFlags=0);
 
     Fence createFence(VkFenceCreateFlags flags=0);
-
     VkResult waitFences(std::vector<Fence> fences, bool waitAll, uint64_t timeout=uint64_t(-1));
-
     void resetFences(std::vector<Fence> fences);
-
     Semaphore createSemaphore();
 
     // ShaderModule createShaderModule(ShaderModuleCreateInfo info);
-
     ComputePipeline createComputePipeline(const ComputePipelineCreateInfo& info);
-
     Buffer createBuffer(const BufferCreateInfo& info);
-
     DescriptorSetLayout createDescriptorSetLayout(const DescriptorSetLayoutDesc& desc);
-
     PipelineLayout createPipelineLayout(const PipelineLayoutDesc& desc);
-
     DescriptorPool createDescriptorPool(const DescriptorPoolCreateInfo& info);
 
     void destroyCommandPools(std::string groupName);
-
     void destroyFences(std::string groupName);
-
     void destroySemaphores(std::string groupName);
-
     void destroyComputePipelines(std::string groupName);
-
     void destroyBuffers(std::string groupName);
-
     void destroyDescriptorSetLayouts(std::string groupName);
-
     void destroyPipelineLayouts(std::string groupName);
-
     void destroyDescriptorPools(std::string groupName);
 };
 
@@ -320,6 +311,11 @@ public:
         uint32_t numThreadsInY=1, 
         uint32_t numThreadsInZ=1
     );
+
+    CommandBuffer dispatch0(
+        uint32_t groupCountX, 
+        uint32_t groupCountY=1, 
+        uint32_t groupCountZ=1);
 };
 
 

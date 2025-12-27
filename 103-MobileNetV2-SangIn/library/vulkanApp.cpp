@@ -83,64 +83,32 @@ static VkInstance createVkInstance()
     });
 }
 
-static std::vector<VkPhysicalDevice> getPhysicalDevices(
-    VkInstance instance,
-    const std::vector<const char*>& requiredExtentions, 
-    VkQueueFlags requiredQueueFlags, 
-    bool presentSupport)
+static void printGpuInfo(uint32_t order, VkPhysicalDevice physicalDevice)
 {
-    auto physicalDevices0 = arrayFrom(vkEnumeratePhysicalDevices, instance);
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(physicalDevice, &props);
+    printf("[GPU %d] Device Name: %-30s API Version: %d.%d.%d  Driver Version: %d.%d.%d  Device Type: %-15s\n",
+        order,
+        props.deviceName,
+        VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion), VK_VERSION_PATCH(props.apiVersion),
+        VK_VERSION_MAJOR(props.driverVersion), VK_VERSION_MINOR(props.driverVersion), VK_VERSION_PATCH(props.driverVersion),
+        props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? "Integrated GPU" :
+            props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? "Discrete GPU" :
+                props.deviceType == VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU ? "Virtual GPU" :
+                    props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ? "CPU" : "Other");
+}
 
-    auto isDeviceSuitable = [&](VkPhysicalDevice physicalDevice) {
-        auto deviceExtensions = arrayFrom(vkEnumerateDeviceExtensionProperties, physicalDevice, nullptr);
+static bool deviceSupportsExtensions(
+    VkPhysicalDevice physicalDevice, 
+    const std::vector<const char*>& extensions)
+{
+    auto deviceExtensions = arrayFrom(vkEnumerateDeviceExtensionProperties, physicalDevice, nullptr);
 
-        return std::all_of(requiredExtentions.begin(), requiredExtentions.end(), [&](const char* reqExtention) {
-            return std::any_of(deviceExtensions.begin(), deviceExtensions.end(), [&](const VkExtensionProperties& props) {
-                return strcmp(props.extensionName, reqExtention) == 0;
-            });
+    return std::all_of(extensions.begin(), extensions.end(), [&](const char* reqExtension) {
+        return std::any_of(deviceExtensions.begin(), deviceExtensions.end(), [&](const VkExtensionProperties& props) {
+            return strcmp(props.extensionName, reqExtension) == 0;
         });
-    };
-
-    auto physicalDevices1 = physicalDevices0 | std::views::filter(isDeviceSuitable);
-
-    auto isDeviceSuitable2 = [&](VkPhysicalDevice physicalDevice) {
-        auto queueFamilies = arrayFrom(vkGetPhysicalDeviceQueueFamilyProperties, physicalDevice);
-
-        VkQueueFlags flag = 0;
-        bool presentSupport0 = false;
-        uint32_t i = 0;
-        for (auto queueFamily : queueFamilies) {
-            flag |= queueFamily.queueFlags & requiredQueueFlags;
-            presentSupport0 |= (bool) glfwGetPhysicalDevicePresentationSupport(instance, physicalDevice, i++);
-        }
-        
-        if (flag == requiredQueueFlags) {
-            return presentSupport ? presentSupport0 : true;
-        }
-        return false;
-    };
-
-    auto physicalDevices2 = physicalDevices1 | std::views::filter(isDeviceSuitable2);
-    auto physicalDevices = std::vector<VkPhysicalDevice>(physicalDevices2.begin(), physicalDevices2.end());
-    
-    printf("Found %d suitable physical devices:\n", (uint32_t)physicalDevices.size());
-    uint32_t i = 0;
-    for (auto physicalDevice : physicalDevices2) {
-        VkPhysicalDeviceProperties props;
-        vkGetPhysicalDeviceProperties(physicalDevice, &props);
-        printf("[GPU %d] Device Name: %-30s API Version: %d.%d.%d  Driver Version: %d.%d.%d  Device Type: %-15s\n",
-            i++,
-            props.deviceName,
-            VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion), VK_VERSION_PATCH(props.apiVersion),
-            VK_VERSION_MAJOR(props.driverVersion), VK_VERSION_MINOR(props.driverVersion), VK_VERSION_PATCH(props.driverVersion),
-            props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? "Integrated GPU" :
-                props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? "Discrete GPU" :
-                    props.deviceType == VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU ? "Virtual GPU" :
-                        props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ? "CPU" : "Other");
-    }
-    fflush(stdout);
-
-    return physicalDevices;
+    });
 }
 
 static inline VkPhysicalDeviceMemoryProperties getMemorySpec(VkPhysicalDevice physicalDevice)
@@ -170,8 +138,7 @@ static std::pair<VkMemoryAllocateInfo, VkMemoryPropertyFlags> getMemoryAllocInfo
     else if constexpr (std::is_same_v<VkResource, VkImage>)
         vkGetImageMemoryRequirements(device, resource, &memRequirements);
     else 
-        // static_assert(false, "Invalid VkResource type");
-        throw std::runtime_error("Invalid VkResource type");
+        static_assert(false, "Invalid VkResource type");
 
     /*
     In Vulkan specification, the memoryTypes array is ordered by the following rules:
@@ -209,19 +176,24 @@ using Groups = std::map<std::string, std::vector<T>>;
 /////////////////////////////////////////////////////////////////////////////////////////
 struct VulkanApp::Impl {
     const VkInstance instance;
-    std::vector<Device> devices;
+    std::vector<VkPhysicalDevice> physicalDevices;
+    std::map<VkPhysicalDevice, std::vector<VkQueueFamilyProperties>> qfProps;
+    std::map<VkPhysicalDevice, std::vector<bool>> qfSupportPresent;
+    std::map<VkPhysicalDevice, Device> devices;
+    uint32_t defaultPhysicalDeviceIndex = 0;
 
     Impl(VkInstance instance) : instance(instance) {}
 };
 
 
 struct Device::Impl {
-    const uint32_t qfIndices[queue_max];    // uint32_t(-1) if and only if DeviceSettings does not require the queue type
+    const uint32_t qfIndex[queue_max];    // uint32_t(-1) if and only if DeviceSettings does not require the queue type
     const uint32_t qCount[queue_max];
     const std::vector<std::vector<Queue>> queues;
     const VkPhysicalDevice vkPhysicalDevice;
     const VkDevice vkDevice;
-    const VkInstance vkInstance;
+    // const VkInstance vkInstance;
+    const VulkanApp& parent;
 
     Groups<DescriptorSetLayout> descSetLayouts = { {GROUP_PERMANENT, {} } };
     Groups<PipelineLayout> pipelineLayouts = { {GROUP_PERMANENT, {} } };
@@ -238,15 +210,15 @@ struct Device::Impl {
 
     Impl(VkPhysicalDevice vkPhysicalDevice,   
         VkDevice vkDevice, 
-        VkInstance vkInstance,
+        const VulkanApp& parent,
         uint32_t graphicsQfIndex,
         uint32_t computeQfIndex,
         uint32_t transferQfIndex,
         std::vector<std::vector<Queue>>&& queues) 
     : vkPhysicalDevice(vkPhysicalDevice)
     , vkDevice(vkDevice)
-    , vkInstance(vkInstance)
-    , qfIndices{
+    , parent(parent)
+    , qfIndex{
         graphicsQfIndex, 
         computeQfIndex, 
         transferQfIndex}
@@ -498,14 +470,59 @@ DescriptorPool::Impl::~Impl()
 /////////////////////////////////////////////////////////////////////////////////////////
 // VulkanApp
 /////////////////////////////////////////////////////////////////////////////////////////
-VulkanApp::VulkanApp()
+VulkanApp::VulkanApp(DeviceSettings defaultSettings)
 : impl(new Impl(createVkInstance())) 
 {
+    impl->physicalDevices = arrayFrom(vkEnumeratePhysicalDevices, impl->instance);
+    _ASSERT(impl->physicalDevices.size() > 0);
+    
+    for (auto pd : impl->physicalDevices)
+    {
+        impl->qfProps[pd] = arrayFrom(vkGetPhysicalDeviceQueueFamilyProperties, pd);
+
+        impl->qfSupportPresent[pd].resize(impl->qfProps[pd].size());
+        for (uint32_t i = 0; i < impl->qfProps[pd].size(); ++i) 
+        {
+            impl->qfSupportPresent[pd][i] = glfwGetPhysicalDevicePresentationSupport(impl->instance, pd, i);
+        }
+    }
+
+    if (impl->physicalDevices.size() == 1)
+    {
+        bool res = initDevice(0, defaultSettings);
+        _ASSERT(res);
+        impl->defaultPhysicalDeviceIndex = 0;
+    }
+    else
+    {
+        while(true)
+        {
+            int selected = -1;
+            printf("Select a physical device (0-%d): ", (uint32_t)impl->physicalDevices.size() - 1);
+            fflush(stdout);
+            scanf("%d", &selected);
+            if (selected < 0 || selected >= (int)impl->physicalDevices.size())
+            {            
+                fprintf(stderr, "[Error] Invalid index %d.\n", selected);
+                continue;
+            }
+    
+            if (initDevice((uint32_t)selected, defaultSettings))
+            {
+                impl->defaultPhysicalDeviceIndex = (uint32_t)selected;
+                printf("[Info] Successfully initialized context for physical device %d.\n", selected);
+                fflush(stdout);
+                break;
+            }
+
+            fprintf(stderr, "[Error] Failed to initialize context for physical device %d. Please select again.\n", selected);
+        }
+    }
 }
 
 VulkanApp::~VulkanApp()
 {
-    for (auto& device : impl->devices) 
+    for (auto& [pd, device] : impl->devices) 
         delete device.impl;
     vkDestroyInstance(impl->instance, nullptr); 
     delete impl;
@@ -517,68 +534,84 @@ VulkanApp& VulkanApp::get()
     return singleton;
 }
 
-Device VulkanApp::device(uint32_t index)
+Device VulkanApp::device(uint32_t gpuIndex)
 {
-    ASSERT_(index < impl->devices.size());
-    return impl->devices[index];
+    ASSERT_(gpuIndex == uint32_t(-1) || gpuIndex < impl->physicalDevices.size());
+    uint32_t idx = gpuIndex == uint32_t(-1) ? impl->defaultPhysicalDeviceIndex : gpuIndex;
+    return impl->devices.at(impl->physicalDevices[idx]);
 }
 
-Device VulkanApp::createDevice(DeviceSettings settings)
+bool VulkanApp::initDevice(uint32_t gpuIndex, DeviceSettings settings)
 {
+    _ASSERT(gpuIndex < impl->physicalDevices.size());
+    VkPhysicalDevice physicalDevice = impl->physicalDevices[gpuIndex];
+
+    const std::vector<VkQueueFamilyProperties>& qfProps = impl->qfProps[physicalDevice];
+    const std::vector<bool>& qfSupportPresent = impl->qfSupportPresent[physicalDevice];
+    _ASSERT(qfProps.size() > 0);
+    _ASSERT(qfSupportPresent.size() == qfProps.size());
+
     std::vector<const char*> reqExtentions;
-    if (settings.supportPresent) {
+    if (settings.supportPresent) 
+    {
+        bool presentSupport = std::any_of(
+            qfSupportPresent.begin(), 
+            qfSupportPresent.end(), 
+            [](bool support) { return support; }
+        );
+
+        if (!presentSupport) 
+        {
+            fprintf(stderr, "[Error] The selected physical device does not support presentation.\n");
+            return false;
+        }
+
         reqExtentions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
     }
+    reqExtentions.push_back(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME);
 
-    VkQueueFlags reqQueueFlags = 0;
-    reqQueueFlags |= settings.requireGrapicsQueues ? (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT) : 0;
-    reqQueueFlags |= settings.requireComputeQueues ? VK_QUEUE_COMPUTE_BIT : 0;
-
-    auto physicalDevice = getPhysicalDevices(
-        impl->instance,
-        reqExtentions, 
-        reqQueueFlags, 
-        settings.supportPresent) [0];   // TODO: Implement a selection strategy for the best candidate.
-
-    VkPhysicalDeviceProperties props;
-    vkGetPhysicalDeviceProperties(physicalDevice, &props);
-    printf("The first suitable physical device (%s) is selected.\n", props.deviceName);
-    fflush(stdout);
-
-    auto qfProps = arrayFrom(vkGetPhysicalDeviceQueueFamilyProperties, physicalDevice);
+    if (!deviceSupportsExtensions(physicalDevice, reqExtentions))
+    {
+        fprintf(stderr, "[Error] The selected physical device does not support the required extensions.\n");
+        return false;
+    }
     
     std::vector<uint32_t> qfIndices[queue_max];
     for (uint32_t i = 0; i < qfProps.size(); i++) 
     {
         if (qfProps[i].queueFlags & VK_QUEUE_GRAPHICS_BIT 
-            && qfProps[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
+            && qfProps[i].queueFlags & VK_QUEUE_COMPUTE_BIT) 
             qfIndices[queue_graphics].push_back(i);
-        }
-        else if (qfProps[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
+        
+        else if (qfProps[i].queueFlags & VK_QUEUE_COMPUTE_BIT) 
             qfIndices[queue_compute].push_back(i);
-        }
-        else if (qfProps[i].queueFlags & VK_QUEUE_TRANSFER_BIT) {
+        
+        else if (qfProps[i].queueFlags & VK_QUEUE_TRANSFER_BIT) 
             qfIndices[queue_transfer].push_back(i);
-        }
     }
 
-    if(qfIndices[queue_graphics].size() > 1) {
-        printf("[Note] Multiple queue families with Graphics (and Compute) support detected:\n");
+    if(qfIndices[queue_graphics].size() > 1) 
+    {
+        printf("[Note] Multiple queue families supporting Graphics (and Compute) operations were detected:\n");
         for (uint32_t i : qfIndices[queue_graphics])
             printQueueFamily(i, qfProps[i].queueCount, qfProps[i].queueFlags);
-        printf("Selecting the first available queue family.\n");
+        printf("The first available queue family will be selected.\n");
     }
-    if(qfIndices[queue_compute].size() > 1) {
-        printf("[Note] Multiple queue families with Compute support detected:\n");
+
+    if(qfIndices[queue_compute].size() > 1) 
+    {
+        printf("[Note] Multiple queue families supporting Compute operations were detected:\n");
         for (uint32_t i : qfIndices[queue_compute])
             printQueueFamily(i, qfProps[i].queueCount, qfProps[i].queueFlags);
-        printf("Selecting the first available queue family.\n");
+        printf("The first available queue family will be selected.\n");
     }
-    if(qfIndices[queue_transfer].size() > 1) {
-        printf("[Note] Multiple queue families with Transfer support detected:\n");
+
+    if(qfIndices[queue_transfer].size() > 1) 
+    {
+        printf("[Note] Multiple queue families supporting Transfer operations were detected:\n");
         for (uint32_t i : qfIndices[queue_transfer])
             printQueueFamily(i, qfProps[i].queueCount, qfProps[i].queueFlags);
-        printf("Selecting the first available queue family.\n");
+        printf("The first available queue family will be selected.\n");
     }
 
     uint32_t qfIndex[queue_max] = { uint32_t(-1), uint32_t(-1), uint32_t(-1) };
@@ -591,8 +624,8 @@ Device VulkanApp::createDevice(DeviceSettings settings)
         } 
         else 
         {
-            fprintf(stdout, "[Error] No queue family with Graphics support found.\n");
-            throw;
+            fprintf(stderr, "[Error] No queue family with Graphics support found.\n");
+            return false;
         }
     } 
     ASSERT_(!settings.requireGrapicsQueues || qfIndex[queue_graphics] != uint32_t(-1));
@@ -617,8 +650,8 @@ Device VulkanApp::createDevice(DeviceSettings settings)
                 } 
                 else // qfIndices[queue_compute].empty() && qfIndices[queue_graphics].empty()
                 {
-                    fprintf(stdout, "[Error] No queue family with Compute support found.\n");
-                    throw;
+                    fprintf(stderr, "[Error] No queue family with Compute support found.\n");
+                    return false;
                 }
             }
         }
@@ -657,8 +690,8 @@ Device VulkanApp::createDevice(DeviceSettings settings)
             } 
             else // qfIndices[queue_transfer].empty() && qfIndices[queue_graphics].empty() && qfIndices[queue_compute].empty()
             {
-                fprintf(stdout, "[Error] No queue family with Transfer support found.\n");
-                throw;
+                fprintf(stderr, "[Error] No queue family with Transfer support found.\n");
+                return false;
             }
         }
     }
@@ -682,7 +715,7 @@ Device VulkanApp::createDevice(DeviceSettings settings)
         queueFamilyInfos.emplace_back(
             VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
             nullptr,
-            0,
+            VkDeviceQueueCreateFlags(0),
             qfIndex,
             qfProps[qfIndex].queueCount,
             priorities[qfIndex].data()     // TODO: Set queue priorities (How to set accross different types but same family?)
@@ -694,16 +727,23 @@ Device VulkanApp::createDevice(DeviceSettings settings)
         .synchronization2 = VK_TRUE,
     };
     
+    VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomicFloatFeatures = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT,
+		.pNext = &sync2Features, 
+        .shaderBufferFloat32AtomicAdd = VK_TRUE,// for storageBuffer
+        //.shaderSharedFloat32AtomicAdd = VK_TRUE // for shared memory
+    };
+
     VkDeviceCreateInfo deviceCreateInfo{
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        .pNext = &sync2Features,
+        .pNext = &atomicFloatFeatures,
         .queueCreateInfoCount = (uint32_t)queueFamilyInfos.size(),
         .pQueueCreateInfos = queueFamilyInfos.data(),
         .enabledExtensionCount = (uint32_t)reqExtentions.size(),
         .ppEnabledExtensionNames = reqExtentions.data(),
     };
     
-    VkDevice logicalDevice = create<VkDevice>(physicalDevice, deviceCreateInfo);
+    VkDevice vkDevice = create<VkDevice>(physicalDevice, deviceCreateInfo);
     
     std::vector<std::vector<Queue>> queues(qfProps.size());
     for (auto qfIndex : uniqueQfIndices) 
@@ -716,7 +756,7 @@ Device VulkanApp::createDevice(DeviceSettings settings)
         for (uint32_t j = 0; j < qfProps[qfIndex].queueCount; ++j) 
         {
             VkQueue vkQueue;
-            vkGetDeviceQueue(logicalDevice, qfIndex, j, &vkQueue);
+            vkGetDeviceQueue(vkDevice, qfIndex, j, &vkQueue);
             queues[qfIndex][j].impl = new Queue::Impl(
                 vkQueue,
                 qfIndex,
@@ -725,17 +765,18 @@ Device VulkanApp::createDevice(DeviceSettings settings)
         }
     }
 
-    Device result;
-    result.impl = new Device::Impl(
+    auto& device = impl->devices[physicalDevice] = Device();
+    device.impl = new Device::Impl(
         physicalDevice,
-        logicalDevice,
-        impl->instance,
+        vkDevice,
+        *this,
         qfIndex[queue_graphics],
         qfIndex[queue_compute],
         qfIndex[queue_transfer],
         std::move(queues)
     );
-    return impl->devices.emplace_back(result);
+
+    return true;
 }
 
 
@@ -781,29 +822,29 @@ void Device::reportAssignedQueues() const
             q.priority());
     };
     printf("***Graphics Queues***\n");
-    reportQfs(impl->queues[impl->qfIndices[queue_graphics]]);
+    reportQfs(impl->queues[impl->qfIndex[queue_graphics]]);
     printf("***Compute Queues***\n");
-    reportQfs(impl->queues[impl->qfIndices[queue_compute]]);
+    reportQfs(impl->queues[impl->qfIndex[queue_compute]]);
     printf("***Transfer Queues***\n");
-    reportQfs(impl->queues[impl->qfIndices[queue_transfer]]);
+    reportQfs(impl->queues[impl->qfIndex[queue_transfer]]);
     fflush(stdout);
 }
 
 uint32_t Device::queueCount(QueueType type) const 
 { 
-    return impl->qCount[type];  // 0 if and only if impl->qfIndices[type] == uint32_t(-1)
+    return impl->qCount[type];  // 0 if and only if impl->qfIndex[type] == uint32_t(-1)
 }
 
 bool Device::supportPresent(QueueType type) const 
 { 
-    return impl->qfIndices[type] == uint32_t(-1) ? false
-        : glfwGetPhysicalDevicePresentationSupport(impl->vkInstance, impl->vkPhysicalDevice, impl->qfIndices[type]);
+    return impl->qfIndex[type] != uint32_t(-1) ? false : 
+        impl->parent.impl->qfSupportPresent.at(impl->vkPhysicalDevice)[impl->qfIndex[type]];
 }
 
 Queue Device::queue(QueueType type, uint32_t index) const 
 { 
-    ASSERT_(impl->qfIndices[type] != uint32_t(-1));
-    Queue q = impl->queues[impl->qfIndices[type]] [index % impl->qCount[type]];
+    ASSERT_(impl->qfIndex[type] != uint32_t(-1));
+    Queue q = impl->queues[impl->qfIndex[type]] [index % impl->qCount[type]];
     q._type = type;
     return q;
 }
@@ -815,14 +856,14 @@ QueueSelector Device::queue(uint32_t index) const
 
 CommandPool Device::setDefalutCommandPool(QueueType type, CommandPool cmdPool)
 {
-    ASSERT_(impl->qfIndices[type] != uint32_t(-1));
+    ASSERT_(impl->qfIndex[type] != uint32_t(-1));
     impl->defaultCmdPool[type][cmdPool.impl->flags] = cmdPool;
     return cmdPool;
 }
 
 CommandBuffer Device::newCommandBuffer(QueueType type, VkCommandPoolCreateFlags poolFlags)
 {
-    ASSERT_(impl->qfIndices[type] != uint32_t(-1));
+    ASSERT_(impl->qfIndex[type] != uint32_t(-1));
     if (impl->defaultCmdPool[type][poolFlags].impl == nullptr) {
         impl->defaultCmdPool[type][poolFlags] = createCommandPool(type, poolFlags);
     }
@@ -1032,7 +1073,7 @@ Queue Queue::waitIdle()
 /////////////////////////////////////////////////////////////////////////////////////////
 CommandPool Device::createCommandPool(QueueType type, VkCommandPoolCreateFlags flags)
 {
-    uint32_t qfIndex = impl->qfIndices[type];
+    uint32_t qfIndex = impl->qfIndex[type];
     ASSERT_(qfIndex != uint32_t(-1));
 
     auto vkHandle = create<VkCommandPool>(impl->vkDevice, {
@@ -1265,11 +1306,11 @@ CommandBuffer CommandBuffer::barriers(
                 if (barrier.opType == OwnershipTransferOpType::release)
                 {
                     srcQueueFamilyIndex = queueFamilyIndex();
-                    dstQueueFamilyIndex = impl->device.impl->qfIndices[barrier.pairedQueue];
+                    dstQueueFamilyIndex = impl->device.impl->qfIndex[barrier.pairedQueue];
                 }
                 else if (barrier.opType == OwnershipTransferOpType::acquire)
                 {
-                    srcQueueFamilyIndex = impl->device.impl->qfIndices[barrier.pairedQueue];
+                    srcQueueFamilyIndex = impl->device.impl->qfIndex[barrier.pairedQueue];
                     dstQueueFamilyIndex = queueFamilyIndex();
                 }
                 else ASSERT_(barrier.opType == OwnershipTransferOpType::none);
@@ -1342,11 +1383,11 @@ CommandBuffer CommandBuffer::barriers(
                 if (barrier.opType == OwnershipTransferOpType::release)
                 {
                     srcQueueFamilyIndex = queueFamilyIndex();
-                    dstQueueFamilyIndex = impl->device.impl->qfIndices[barrier.pairedQueue];
+                    dstQueueFamilyIndex = impl->device.impl->qfIndex[barrier.pairedQueue];
                 }
                 else if (barrier.opType == OwnershipTransferOpType::acquire)
                 {
-                    srcQueueFamilyIndex = impl->device.impl->qfIndices[barrier.pairedQueue];
+                    srcQueueFamilyIndex = impl->device.impl->qfIndex[barrier.pairedQueue];
                     dstQueueFamilyIndex = queueFamilyIndex();
                 }
                 else ASSERT_(barrier.opType == OwnershipTransferOpType::none);
@@ -1449,6 +1490,13 @@ CommandBuffer CommandBuffer::dispatch(uint32_t numThreadsInX, uint32_t numThread
         (numThreadsInX + groupSizeInX - 1) / groupSizeInX,
         (numThreadsInY + groupSizeInY - 1) / groupSizeInY,
         (numThreadsInZ + groupSizeInZ - 1) / groupSizeInZ);
+    return *this;
+}
+
+CommandBuffer CommandBuffer::dispatch0(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)
+{
+    ASSERT_(type() <= queue_compute);  // VUID-vkCmdDispatch-commandBuffer-cmdpool (Implicit)  
+    vkCmdDispatch(impl->vkCmdBuffer, groupCountX, groupCountY, groupCountZ);
     return *this;
 }
 

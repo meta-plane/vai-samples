@@ -9,7 +9,10 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <cstring>  // memcpy
+#include <iostream> // for debug
 
+#define PRINT_LAYER_OUTPUT
+#include "../utils/utils.h"
 
 using namespace vk;
 
@@ -18,12 +21,18 @@ class NodeSlot;
 class Edge;
 struct NodeFlow;
 
-
+// Node: Conv, ReLU, MaxPool 같은 연산 단위
+// NodeSlot: 각 노드의 포트 (input/output/internal)
+// Edge: NodeSlot 간 연결 (그래프의 간선)
+// NeuralNet: 전체 그래프를 관리하고, 실행 순서 정하고, Vulkan 커맨드 버퍼에 노드들을 실행
+// NodeFlow / GroupFlow + 연산자 오버로딩:
+//      input(0) - convX2 - flatten - fc - output(0); 같은 DSL 스타일 문법을 가능하게 하는 층
+// NodeGroup / GroupFlow: ConvBlock, ConvSequence 같은 “노드 묶음”을 하나의 노드처럼 취급
 
 class NodeSlot
 {
     friend class NeuralNet;
-    friend class Edge;
+    friend class Edge; // 멤버 변수
 
 public:
     enum Type { input, output, internal }; ;
@@ -34,7 +43,7 @@ private:
     std::list<const Edge*> edges; 
 
     Tensor value; 
-    // std::vector<uint32_t> shape;
+    // bool valueIsConstant = false;
     
 public:
     NodeSlot(Type _type, Node* parent) : _type(_type), parent(*parent) {}
@@ -124,12 +133,22 @@ public:
 class Node
 {
     friend class NeuralNet;
+    std::string name = "noname";
+    std::map<std::string, NodeSlot> slots;
 
 protected:
-    std::map<std::string, NodeSlot> slots; 
+    void addSlot(const std::string& name, NodeSlot::Type type)
+    {
+        slots.try_emplace(name, type, this);
+    }
 
 public:
-    NodeSlot& at(const std::string& name)
+    void setName(const std::string& name)
+    {
+        this->name = name;
+    }
+
+    NodeSlot& slot(const std::string& name)
     {
         return slots.at(name);
     }
@@ -158,11 +177,10 @@ class InputNode : public Node
 public:
     InputNode() 
     {
-        slots.try_emplace("in0", NodeSlot::input, this);
-        slots.try_emplace("out0", NodeSlot::output, this);
+        addSlot("in0", NodeSlot::input);
+        addSlot("out0", NodeSlot::output);
     }
 
-public:
     void prepare() override
     {
         _ASSERT((*this)["in0"].validShape());
@@ -181,11 +199,10 @@ class OutputNode : public Node
 public:
     OutputNode()
     {
-        slots.try_emplace("in0", NodeSlot::input, this);
-        slots.try_emplace("out0", NodeSlot::output, this);
+        addSlot("in0", NodeSlot::input);
+        addSlot("out0", NodeSlot::output);
     }
 
-public:
     void prepare() override
     {
         _ASSERT((*this)["in0"].validShape());
@@ -200,11 +217,9 @@ public:
 
 class NeuralNet
 {
-    Device device;
-
-    // std::set<Node*> nodes;
-    // std::unordered_set<Edge, Edge::Hash> edges2;
+    Device& device;
     
+    // std::map<std::string, Node*> nodes;
     std::vector<Node*> sortedNodes;
     std::vector<std::vector<Node*>> linearChains;
 
@@ -218,11 +233,20 @@ class NeuralNet
     std::vector<OutputNode> _outputs;
 
 public:
-    NeuralNet(Device device, uint32_t numInputs = 1, uint32_t numOutputs = 1);
+    NeuralNet(Device& device, uint32_t numInputs = 1, uint32_t numOutputs = 1);
 
     void reset()
     {
     }
+
+    // Node& addNode(const std::string& name, Node&& node)
+    // {
+    //     node.setName(name);
+    //     auto [it, inserted] = nodes.try_emplace(name, std::move(node));
+    //     if (!inserted)
+    //         throw std::runtime_error("Node with the same name already exists: " + name);
+    //     return it->second;
+    // }
 
     InputNode& input(uint32_t index=0)
     {
@@ -268,7 +292,7 @@ public:
     }
 };
 
-inline NeuralNet::NeuralNet(Device device, uint32_t numInputs, uint32_t numOutputs) 
+inline NeuralNet::NeuralNet(Device& device, uint32_t numInputs, uint32_t numOutputs) 
 : device(device)
 {
     uploadBuffer = device.createBuffer({
@@ -387,11 +411,29 @@ inline void NeuralNet::prepare()
 {
 }
 
+static void printTensorShape(const std::string& nodeTag,
+    const std::string& slotName,
+    const Tensor& t)
+{
+    printf("[%s] %s shape=[", nodeTag.c_str(), slotName.c_str());
+    const auto& s = t.shape();
+    for (size_t i = 0; i < s.size(); ++i)
+        printf("%u%s", s[i], (i + 1 < s.size()) ? "x" : "");
+    printf("] elems=%zu host=%d dev=%d\n",
+        t.numElements(),
+        t.hasHostData() ? 1 : 0,
+        t.hasDeviceData() ? 1 : 0);
+}
+
 /*
 Assume that tensors are assigned only to input slots that require explicit user input.
 */
 inline void NeuralNet::run()
 {
+    #if defined(PRINT_LAYER_OUTPUT)
+    std::vector<std::pair<std::string, Tensor>> pendingDumps;
+    #endif
+
     if (sortedNodes.empty())
         sortNodes();
 
@@ -403,6 +445,29 @@ inline void NeuralNet::run()
         // - Assign tensor for output/internal slots
         node->prepare();
 
+        #if 0
+        // Debug: print tensor shapes of convolution-like nodes
+        bool isConvLike =
+            (node->slots.count("weight") > 0) ||
+            (node->slots.count("depthwiseConv.weight") > 0) ||
+            (node->slots.count("pointwiseConv.weight") > 0);
+
+        if (isConvLike) {
+            char nodeId[64];
+            snprintf(nodeId, sizeof(nodeId), "node@%p", (void*)node);
+
+            auto itIn = node->slots.find("in0");
+            if (itIn != node->slots.end())
+                printTensorShape(nodeId, "in0", itIn->second.getValueRef());
+
+            auto itOut = node->slots.find("out0");
+            if (itOut != node->slots.end())
+                printTensorShape(nodeId, "out0", itOut->second.getValueRef());
+
+            printf("--------------------------------------------------\n");
+        }
+        #endif
+
         // - Share tensor of output slots with connected input slots
         // - Input slots are classified as two types 
         //      - Connected by some outpuslot       -> share the tensor with the output slot
@@ -413,47 +478,48 @@ inline void NeuralNet::run()
 
             if (slot.type() == NodeSlot::input)
             {
-                if (slot.edges.size() == 1)
+                if (!slot.edges.empty())
                 {
-                    // _ASSERT(!tensor.hasData());
-                    _ASSERT(tensor.isBufferBound());
-                }
-                else if (slot.edges.size() > 1)
-                {
-                    _ASSERT(false);
+                    _ASSERT(slot.edges.size() == 1);
+                    _ASSERT(!tensor.hasHostData() && tensor.hasDeviceData());
                 }
                 else
                 {
-                    _ASSERT(tensor.hasData());
-                    size_t byteSize = tensor.numElements() * sizeof(float);
-                    
-                    Buffer buffer = bufferPool.requestBuffer(
-                        device,
-                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, 
-                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                        byteSize
-                    );
-                    
-                    tensor.bindBuffer(buffer);
-                    
-                    memcpy(uploadBufferMappedAddress + uploadBufferOffset, tensor.data(), byteSize);
+                    if (tensor.hasHostData())
+                    {
+                        _ASSERT(!tensor.hasDeviceData());
 
-                    cmdBuffer
-                        .copyBuffer(buffer, uploadBuffer(uploadBufferOffset, byteSize))
-                        .barrier(
-                            (PIPELINE_STAGE::TRANSFER, ACCESS::TRANSFER_WRITE) 
-                            / buffer 
-                            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+                        size_t byteSize = tensor.numElements() * sizeof(float);
+                        
+                        Buffer buffer = bufferPool.requestBuffer(
+                            device,
+                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, 
+                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                            byteSize,
+                            // tensor.isConstant() ? byteSize * 1.5f : byteSize * 4.0f
+                            byteSize * 1.5f
                         );
-
-                    uploadBufferOffset += byteSize;
-                    // tensor.clearData(); 
+                        
+                        tensor.bindBuffer(buffer);
+                        
+                        memcpy(uploadBufferMappedAddress + uploadBufferOffset, tensor.hostData(), byteSize);
+    
+                        cmdBuffer
+                            .copyBuffer(buffer, uploadBuffer(uploadBufferOffset, byteSize))
+                            .barrier(
+                                (PIPELINE_STAGE::TRANSFER, ACCESS::TRANSFER_WRITE) 
+                                / buffer 
+                                / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+                            );
+    
+                        uploadBufferOffset += byteSize;
+                        tensor.clearHostData(); 
+                    }
                 }
             }
-            else 
+            else // if (slot.type() != NodeSlot::input)
             {
-                // _ASSERT(!tensor.isBufferBound());
-                if (!tensor.isBufferBound())
+                if (!tensor.hasDeviceData())
                 {
                     tensor.bindBuffer(bufferPool.requestBuffer(
                         device,
@@ -463,6 +529,14 @@ inline void NeuralNet::run()
                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                         tensor.numElements() * sizeof(float)
                     ));
+                }
+                else
+                {
+                    /*
+                    - InputNode - out0 slot
+                    - OutputNode - out0 slot
+                    - FlattenNode - out0 slot
+                    */
                 }
                     
                 if (slot.type() == NodeSlot::output)
@@ -476,26 +550,62 @@ inline void NeuralNet::run()
         // Record the command buffer for executing the program of the node
         node->run(cmdBuffer);        
 
+        #if defined(PRINT_LAYER_OUTPUT)
+        pendingDumps.emplace_back(node->name + ".in0", node->slot("in0").getValueRef());
+        if (node->slots.count("weight") > 0)       
+            pendingDumps.emplace_back(node->name + ".weight", node->slot("weight").getValueRef());
+        pendingDumps.emplace_back(node->name + ".out0", node->slot("out0").getValueRef());
+        #endif
+
         // invlaidate the tensor to return the bound buffer to the pool
         for (auto& [name, slot] : node->slots)
         {
             if (slot.type() == NodeSlot::output && slot.edges.size() == 0)
                 continue;
+
+            if (slot.getValueRef().isConstant())
+                continue;
+
             slot.getValueRef() = Tensor(); 
         }
     }
 
     device.queue() << cmdBuffer.end() << waiting;
+
+    #if defined(PRINT_LAYER_OUTPUT)
+    for (auto& [tag, tensor] : pendingDumps)
+    {
+        auto data = downloadTensor(tensor);
+
+        std::cout << "[DUMP] " << tag << " : \n";
+        
+        std::cout << "  Shape: ";
+        const auto& shape = tensor.shape();
+        for (size_t i = 0; i < shape.size(); ++i)
+            std::cout << shape[i] << (i + 1 < shape.size() ? " x " : "\n");
+
+        std::cout << "  Data (first 10 elements): ";
+        for (size_t i = 0; i < std::min<size_t>(10, data.size()); ++i)
+            std::cout << data[i] << " ";
+        std::cout << "\n\n";
+    }
+    #endif
+
     uploadBufferOffset = 0; 
 }
 
 
 
+
+
+
+
+
 struct NodeFlow 
 {
-    std::string inSlot;
+    std::string inSlotName;
     Node& node;
-    std::string outSlot;
+    std::string outSlotName;
 };
 
 inline Node::operator NodeFlow()
@@ -515,7 +625,7 @@ inline NodeFlow operator/(Node& node, std::string name)
 
 inline NodeFlow&& operator/(NodeFlow&& other, std::string name)
 {
-    other.outSlot = name;
+    other.outSlotName = name;
     return std::move(other);
 }
 
@@ -526,12 +636,79 @@ inline void operator-(NodeSlot& from, NodeSlot& to)
 
 inline NodeFlow&& operator-(NodeFlow&& inflow, NodeFlow&& outflow)
 {
-    inflow.node.at(inflow.outSlot) - outflow.node.at(outflow.inSlot);
+    inflow.node.slot(inflow.outSlotName) - outflow.node.slot(outflow.inSlotName);
     return std::move(outflow);
 }
 
 
 
+
+
+struct GroupFlow; // 전방 선언(forward declaration), NodeGroup 내에서 사용되므로 나중에 어디선가 선언될 거라고 미리 정보만 제공하는 것 
+class NodeGroup
+{
+    std::map<std::string, NodeSlot*> slots;
+
+protected:
+    void defineSlot(const std::string& name, NodeSlot& slot)
+    {
+        slots.try_emplace(name, &slot);
+    }
+
+public:
+    NodeSlot& slot(const std::string& name)
+    {
+        return *slots.at(name);
+    }
+
+    operator GroupFlow();
+};
+
+struct GroupFlow
+{
+    std::string inSlotName;
+    NodeGroup& group;
+    std::string outSlotName;
+};
+
+inline NodeGroup::operator GroupFlow()
+{
+    return { "in0", *this, "out0" };
+}
+
+inline GroupFlow operator/(std::string name, NodeGroup& gp)
+{
+    return { name, gp, "out0" };
+}
+
+inline GroupFlow operator/(NodeGroup& gp, std::string name)
+{
+    return { "in0", gp, name };
+}
+
+inline GroupFlow&& operator/(GroupFlow&& other, std::string name)
+{
+    other.outSlotName = name;
+    return std::move(other);
+}
+
+inline GroupFlow&& operator-(GroupFlow&& inflow, GroupFlow&& outflow)
+{
+    inflow.group.slot(inflow.outSlotName) - outflow.group.slot(outflow.inSlotName);
+    return std::move(outflow);
+}
+
+inline GroupFlow&& operator-(NodeFlow&& inflow, GroupFlow&& outflow)
+{
+    inflow.node.slot(inflow.outSlotName) - outflow.group.slot(outflow.inSlotName);
+    return std::move(outflow);
+}
+
+inline NodeFlow&& operator-(GroupFlow&& inflow, NodeFlow&& outflow)
+{
+    inflow.group.slot(inflow.outSlotName) - outflow.node.slot(outflow.inSlotName);
+    return std::move(outflow);
+}
 
 
 

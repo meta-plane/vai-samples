@@ -1,423 +1,326 @@
-#include "./core/neuralNodes.h"
-#include "./core/jsonParser.h"
-#include "./core/timeChecker.hpp"
-#include "./core/safeTensorsParser.h"
-#include "./utils/utils.h"
+#include "library/neuralNet.h"
+#include "library/neuralNodes.h"
+#include "library/safeTensorsParser.h"
+#include "library/vulkanApp.h"
+#include "library/timeChecker.hpp"
+#include "models/MobileNetV2.h"
+#include "utils/utils.h"
+#include "utils/test_layers.h"
+
+#define STB_IMAGE_IMPLEMENTATION
 #include <stb/stb_image.h>
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+
 #include <cstring>
-#include <cstdio>
-#include <fstream>
-#include <string>
-#include <random>
+#include <iostream>
+#include <filesystem>
+
+// #define DEBUG_INFO
 
 
-void loadIRBWeightsWithExpansion(
-    InvertedResidualBlock& irb,
-    SafeTensorsParser& weights,
-    int featureIdx,
-    int inC, int outC, int expandRatio)
+template<uint32_t Channels>
+auto readImage(const char* filename)
 {
-    int hiddenDim = inC * expandRatio;
-    char keyBuf[128];
+    int w, h, c0, c = Channels;
+    std::vector<uint8_t> srcImage;
 
-    // Expansion PW Conv
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.0.0.weight", featureIdx);
-    auto exp_w = weights[keyBuf].parseNDArray();
-    std::vector<float> exp_w_t(inC * hiddenDim);
-    for (int o = 0; o < hiddenDim; ++o)
-        for (int i = 0; i < inC; ++i)
-            exp_w_t[i * hiddenDim + o] = exp_w[o * inC + i];
-    Tensor t_exp_w(inC, hiddenDim); t_exp_w.set(exp_w_t);
-    irb["expand_pw_weight"] = t_exp_w;
-
-    // Expansion BN
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.0.1.weight", featureIdx);
-    auto exp_bn_g = weights[keyBuf].parseNDArray();
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.0.1.bias", featureIdx);
-    auto exp_bn_b = weights[keyBuf].parseNDArray();
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.0.1.running_mean", featureIdx);
-    auto exp_bn_m = weights[keyBuf].parseNDArray();
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.0.1.running_var", featureIdx);
-    auto exp_bn_v = weights[keyBuf].parseNDArray();
-    Tensor teg(hiddenDim); teg.set(exp_bn_g); irb["expand_bn_gamma"] = teg;
-    Tensor teb(hiddenDim); teb.set(exp_bn_b); irb["expand_bn_beta"] = teb;
-    Tensor tem(hiddenDim); tem.set(exp_bn_m); irb["expand_bn_mean"] = tem;
-    Tensor tev(hiddenDim); tev.set(exp_bn_v); irb["expand_bn_var"] = tev;
-
-    // DW Conv
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.1.0.weight", featureIdx);
-    auto dw_w = weights[keyBuf].parseNDArray();
-    // K=3, KK=9
-    std::vector<float> dw_w_t(hiddenDim * 9); // size = C * KK
-    // Rearrange to (k * C + c) order to match shader weight layout [K][K][C]
-    for (int k = 0; k < 9; ++k) {
-        for (int c = 0; c < hiddenDim; ++c) {
-            dw_w_t[k * hiddenDim + c] = dw_w[c * 9 + k];
-        }
+    if (uint8_t* input = stbi_load(filename, &w, &h, &c0, c))
+    {
+        srcImage.assign(input, input + w * h * c);
+        stbi_image_free(input);
     }
-    Tensor t_dw_w(hiddenDim * 9);
-    t_dw_w.set(dw_w_t);
-    irb["dw_weight"] = t_dw_w;
+    else
+    {
+        printf(stbi_failure_reason());
+        fflush(stdout);
+        throw;
+    }
 
-    // DW BN
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.1.1.weight", featureIdx);
-    auto dw_bn_g = weights[keyBuf].parseNDArray();
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.1.1.bias", featureIdx);
-    auto dw_bn_b = weights[keyBuf].parseNDArray();
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.1.1.running_mean", featureIdx);
-    auto dw_bn_m = weights[keyBuf].parseNDArray();
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.1.1.running_var", featureIdx);
-    auto dw_bn_v = weights[keyBuf].parseNDArray();
-    Tensor tdg(hiddenDim); tdg.set(dw_bn_g); irb["dw_bn_gamma"] = tdg;
-    Tensor tdb(hiddenDim); tdb.set(dw_bn_b); irb["dw_bn_beta"] = tdb;
-    Tensor tdm(hiddenDim); tdm.set(dw_bn_m); irb["dw_bn_mean"] = tdm;
-    Tensor tdv(hiddenDim); tdv.set(dw_bn_v); irb["dw_bn_var"] = tdv;
-
-    // Proj PW Conv
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.2.weight", featureIdx);
-    auto proj_w = weights[keyBuf].parseNDArray();
-    std::vector<float> proj_w_t(hiddenDim * outC);
-    for (int o = 0; o < outC; ++o)
-        for (int i = 0; i < hiddenDim; ++i)
-            proj_w_t[i * outC + o] = proj_w[o * hiddenDim + i];
-    Tensor t_proj_w(hiddenDim, outC); t_proj_w.set(proj_w_t);
-    irb["proj_pw_weight"] = t_proj_w;
-
-    // Proj BN
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.3.weight", featureIdx);
-    auto proj_bn_g = weights[keyBuf].parseNDArray();
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.3.bias", featureIdx);
-    auto proj_bn_b = weights[keyBuf].parseNDArray();
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.3.running_mean", featureIdx);
-    auto proj_bn_m = weights[keyBuf].parseNDArray();
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.3.running_var", featureIdx);
-    auto proj_bn_v = weights[keyBuf].parseNDArray();
-    Tensor tpg(outC); tpg.set(proj_bn_g); irb["proj_bn_gamma"] = tpg;
-    Tensor tpb(outC); tpb.set(proj_bn_b); irb["proj_bn_beta"] = tpb;
-    Tensor tpm(outC); tpm.set(proj_bn_m); irb["proj_bn_mean"] = tpm;
-    Tensor tpv(outC); tpv.set(proj_bn_v); irb["proj_bn_var"] = tpv;
+    return std::make_tuple(srcImage, (uint32_t)w, (uint32_t)h);
 }
 
+std::vector<float> preprocess(const std::vector<uint8_t>& image, int w, int h) {
+    std::vector<float> result(w * h * 3);
+    const float mean[] = { 0.485f, 0.456f, 0.406f };
+    const float std[] = { 0.229f, 0.224f, 0.225f };
 
-void loadIRBWeightsNoExpansion(
-    InvertedResidualBlock& irb,
-    SafeTensorsParser& weights,
-    int featureIdx,
-    int inC, int outC)
+    for (int i = 0; i < w * h; ++i) {
+        for (int c = 0; c < 3; ++c) {
+            float val = image[i * 3 + c] / 255.0f;
+            result[i * 3 + c] = (val - mean[c]) / std[c];
+        }
+    }
+
+    #if defined(DEBUG_INFO)
+    // Debug: print 
+    for (auto [x,y] : {std::pair{0,0}, {56,56}, {112,112}}) 
+    {
+        uint32_t idx = (y * w + x) * 3;
+        
+        printf("Debug Preprocess Check at (%u,%u):\n", x, y);
+        printf("[Before] (%u, %u, %u) // [After] (%f, %f, %f)\n",
+            image[idx],
+            image[idx+1],
+            image[idx+2],
+            result[idx],
+            result[idx+1],
+            result[idx+2]);        
+    }
+    #endif
+
+    return result;
+}
+
+void loadWeights(MobileNetV2& net, const SafeTensorsParser& weights)
 {
-    char keyBuf[128];
+    std::cout << "Loading weights into MobileNetV2..." << std::endl;
 
-    // DW Conv (index 0)
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.0.0.weight", featureIdx);
-    auto dw_w = weights[keyBuf].parseNDArray();
-    std::vector<float> dw_w_t(9 * inC);
-    for (int c = 0; c < inC; ++c)
-        for (int k = 0; k < 9; ++k)
-            dw_w_t[k * inC + c] = dw_w[c * 9 + k];
-    Tensor t_dw_w(9, inC); t_dw_w.set(dw_w_t);
-    irb["dw_weight"] = t_dw_w;
+    // Helper lambda to load tensor by name
+    auto loadTensor = [&](const std::string& cppName, const std::string& ptName)
+    {
+        try {
+            auto ref = weights[ptName];
+            Tensor tensor(ref);
+            auto shape = tensor.shape();
+            
+            // find는 문자열 내에서 특정 부분 문자열의 위치를 반환, 없으면 npos 반환
+            if (cppName.find("depthwise.weight") != std::string::npos) {
+                if (shape.size() == 4 && shape[1] == 1) {
+                    tensor.reshape(shape[0], shape[2], shape[3]); // [C_out, 1, K, K] -> [C_out, K, K]
+                    tensor.permute(1, 2, 0); // make it [K, K, C_out]
+                    tensor.reshape(shape[1] * shape[2], shape[0]); // flatten to [K*K, C_out]
+                }
+            }
+            else if (cppName.find(".weight") != std::string::npos) {
+                if (shape.size() == 4) {
+                    tensor.permute(1, 2, 3, 0); // [C_out, C_in, K, K] -> [C_in, K, K, C_out]
+                    const auto& newShape = tensor.shape();
+                    tensor.reshape(newShape[0] * newShape[1] * newShape[2], newShape[3]); // [C_in, K, K, C_out] -> [C_in * K * K, C_out]
+                }
+                else if (shape.size() == 2) {
+                    tensor.permute(1, 0); // [C_out, C_in] -> [C_in, C_out]
+                }
+            }
+            
+            net[cppName] = std::move(tensor);
+            net.setNodeNameFromParam(cppName);
+            
+            // // print loaded tensor shape and first 10 elements (weight)
+            // printf("Tensor: %s shape=[", cppName.c_str());
+            // const auto& finalShape = net[cppName].shape();
+            // for(size_t i=0; i<finalShape.size() - 1; ++i) {
+            //     printf("%d x ", finalShape[i]);
+            // }
+            // printf("%d]\n", finalShape[finalShape.size() - 1]);
+            
+            // printf(" First 10 elements: [");
+            // const auto& data = net[cppName].hostData();
+            // for (size_t i = 0; i < std::min<size_t>(10 , net[cppName].numElements()); ++i) {
+            //     printf("%f%s", data[i], i < std::min<size_t>(10, net[cppName].numElements()) - 1 ? ", " : "");
+            // }
+            // printf("]\n");
 
-    // DW BN
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.0.1.weight", featureIdx);
-    auto dw_bn_g = weights[keyBuf].parseNDArray();
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.0.1.bias", featureIdx);
-    auto dw_bn_b = weights[keyBuf].parseNDArray();
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.0.1.running_mean", featureIdx);
-    auto dw_bn_m = weights[keyBuf].parseNDArray();
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.0.1.running_var", featureIdx);
-    auto dw_bn_v = weights[keyBuf].parseNDArray();
-    Tensor tdg(inC); tdg.set(dw_bn_g); irb["dw_bn_gamma"] = tdg;
-    Tensor tdb(inC); tdb.set(dw_bn_b); irb["dw_bn_beta"] = tdb;
-    Tensor tdm(inC); tdm.set(dw_bn_m); irb["dw_bn_mean"] = tdm;
-    Tensor tdv(inC); tdv.set(dw_bn_v); irb["dw_bn_var"] = tdv;
+            #if defined(DEBUG_INFO)
 
-    // Proj PW Conv (index 1)
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.1.weight", featureIdx);
-    auto proj_w = weights[keyBuf].parseNDArray();
-    std::vector<float> proj_w_t(inC * outC);
-    for (int o = 0; o < outC; ++o)
-        for (int i = 0; i < inC; ++i)
-            proj_w_t[i * outC + o] = proj_w[o * inC + i];
-    Tensor t_proj_w(inC, outC); t_proj_w.set(proj_w_t);
-    irb["proj_pw_weight"] = t_proj_w;
+            // Debug info
+            const auto& finalShape = net[cppName].shape();
+            printf("✓ Loaded %-40s <- %-40s shape=[", cppName.c_str(), ptName.c_str());
+            for(size_t i=0; i<finalShape.size(); ++i) {
+                printf("%d%s", finalShape[i], i<finalShape.size()-1?"x":"");
+            }
+            printf("]\n");
+            #endif
 
-    // Proj BN (index 2)
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.2.weight", featureIdx);
-    auto proj_bn_g = weights[keyBuf].parseNDArray();
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.2.bias", featureIdx);
-    auto proj_bn_b = weights[keyBuf].parseNDArray();
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.2.running_mean", featureIdx);
-    auto proj_bn_m = weights[keyBuf].parseNDArray();
-    snprintf(keyBuf, sizeof(keyBuf), "features.%d.conv.2.running_var", featureIdx);
-    auto proj_bn_v = weights[keyBuf].parseNDArray();
-    Tensor tpg(outC); tpg.set(proj_bn_g); irb["proj_bn_gamma"] = tpg;
-    Tensor tpb(outC); tpb.set(proj_bn_b); irb["proj_bn_beta"] = tpb;
-    Tensor tpm(outC); tpm.set(proj_bn_m); irb["proj_bn_mean"] = tpm;
-    Tensor tpv(outC); tpv.set(proj_bn_v); irb["proj_bn_var"] = tpv;
+        } catch (const std::exception& e) {
+            std::cerr << "[Failed to load] " << cppName << " <- " << ptName << ": " << e.what() << std::endl;
+        } catch (...) {
+            std::cerr << "[Failed to load] " << cppName << " to " << ptName << " (unknown error)" << std::endl;
+        }
+    };
+     
+    auto loadBN = [&](const std::string& cppPrefix, const std::string& ptPrefix)
+    {
+        loadTensor(cppPrefix + ".mean", ptPrefix + ".running_mean");
+        loadTensor(cppPrefix + ".variance", ptPrefix + ".running_var");
+        loadTensor(cppPrefix + ".gamma", ptPrefix + ".weight");
+        loadTensor(cppPrefix + ".beta", ptPrefix + ".bias");
+    };
+
+    auto loadIRB = [&](int blockIdx)
+    {
+        const int ptFeatIdx = blockIdx + 1;  // PyTorch features 인덱스
+        const std::string cppBase = "features." + std::to_string(blockIdx);
+        const std::string ptBase  = "features." + std::to_string(ptFeatIdx) + ".conv";
+
+        // 첫 번째 IRB (features.1): expand 없음
+        if (ptFeatIdx == 1)
+        {
+            // depthwise: conv.0.(0=conv,1=bn)
+            loadTensor(cppBase + ".dwConvBNReLU6.depthwiseConv.weight", ptBase  + ".0.0.weight");
+            loadBN(cppBase + ".dwConvBNReLU6.bn", ptBase + ".0.1");
+
+            // pointwise: conv.1.(1=conv,2=bn)
+            loadTensor(cppBase + ".pwConvBN.pointwiseConv.weight", ptBase  + ".1.weight");
+            loadBN(cppBase + ".pwConvBN.bn", ptBase + ".2");
+        }
+
+        // 나머지 IRB들 (expand_ratio > 1): expand + depthwise + project
+        else
+        {             
+            // expand: conv.0.(0=conv,1=bn)
+            loadTensor(cppBase + ".pwConvBNReLU6.pointwiseConv.weight", ptBase  + ".0.0.weight");
+            loadBN(cppBase + ".pwConvBNReLU6.bn", ptBase + ".0.1");
+
+            // depthwise: conv.1.(0=conv,1=bn)
+            loadTensor(cppBase + ".dwConvBNReLU6.depthwiseConv.weight", ptBase  + ".1.0.weight");
+            loadBN(cppBase + ".dwConvBNReLU6.bn", ptBase + ".1.1");
+
+            // project(pointwise): conv.2, conv.3(BN)
+            loadTensor(cppBase + ".pwConvBN.pointwiseConv.weight", ptBase  + ".2.weight");
+            loadBN(cppBase + ".pwConvBN.bn", ptBase + ".3");
+        }
+    };
+
+    // 1) Stem
+    loadTensor("stem.conv.weight", "features.0.0.weight");
+    loadBN("stem.bn", "features.0.1");
+
+    // 2) Inverted Residual Blocks (net.invertedResidualBlocks.size() == #IRB)
+    for (size_t i = 0; i < net.blocks().size(); ++i) {
+        loadIRB(i);
+    }
+
+    // 3) Final layers
+    loadTensor("finalConv.pointwiseConv.weight", "features.18.0.weight");
+    loadBN("finalConv.bn", "features.18.1");
+
+    loadTensor("classifier.weight", "classifier.1.weight");
+    loadTensor("classifier.bias", "classifier.1.bias");
+
+    std::cout << "Weights loading completed." << std::endl;
+}
+
+Tensor eval_ImageNet(const std::vector<float>& srcImage, uint32_t W, uint32_t H, const SafeTensorsParser* weights, uint8_t iter)
+{
+    auto device = VulkanApp::get().device();
+
+    std::cout << "Creating MobileNetV2..." << std::endl;
+    MobileNetV2 mobileNetV2(device);
+    std::cout << "MobileNetV2 created." << std::endl;
+
+    if (weights)
+    {
+        loadWeights(mobileNetV2, *weights);
+    }
+    
+    Tensor inputTensor(H, W, 3); // srcImage layout: [H][W][C]
+    inputTensor.set(srcImage);   // data copy
+    printf("Input Tensor Shape: [%d, %d, %d]\n", inputTensor.shape()[0], inputTensor.shape()[1], inputTensor.shape()[2]);
+
+    Tensor result;
+    for (uint32_t i = 0; i < iter; ++i)
+    {
+        std::cout << "Running iteration " << i << "..." << std::endl;
+        result = mobileNetV2(inputTensor)[0];
+        std::cout << "Iteration " << i << " done." << std::endl;
+    }
+
+    return result;
+}
+
+// smart pointer를 사용하여 SafeTensorsParser 객체를 반환하거나, 실패 시 nullptr를 반환
+// smart pointer : 소유권 관리가 자동으로 이루어져 메모리 누수를 방지(명시적으로 메모리를 해제할 필요가 없음)
+std::unique_ptr<SafeTensorsParser> tryLoadWeights(const std::string& path)
+{
+    namespace fs = std::filesystem;
+
+    if (!fs::exists(path)) {
+        std::cerr << "[Warn] Weight file not found: " << path << "\n";
+        return nullptr;
+    }
+
+    try {
+        std::cout << "✓ SafeTensors file found: " << path << "\n";
+        return std::make_unique<SafeTensorsParser>(path.c_str());
+    }
+    catch (const std::exception& e) {
+        std::cerr << "[Warn] Failed to parse weights at " << path
+            << ": " << e.what() << "\n";
+    }
+    catch (...) {
+        std::cerr << "[Warn] Unknown error while parsing weights at "
+            << path << "\n";
+    }
+    return nullptr;
 }
 
 
 void test()
 {
-    printf("============================================================\n");
-    printf("    MobileNetV2 Full Classification (17 IRB blocks)\n");
-    printf("============================================================\n");
+    void loadShaders();
+    loadShaders();
 
-    const char* weightsPath = PROJECT_CURRENT_DIR "/weights/mobilenet_v2_imagenet1k.safetensors";
-    const char* imagePath = PROJECT_CURRENT_DIR "/images/shark.png";
+    // Load model weights
+    std::string weightsPath = std::string(PROJECT_CURRENT_DIR) + "/weights/mobilenet_v2_imagenet1k.safetensors";
 
-    printf("\n[1/4] Loading image...\n");
-    int w, h, c;
-    uint8_t* imgData = stbi_load(imagePath, &w, &h, &c, 3);
-    if (!imgData) {
-        printf("Failed to load image: %s\n", imagePath);
-        return;
+    auto weights = tryLoadWeights(weightsPath);
+    if (weights)
+        std::cout << "Loaded EfficientNet weights from " << weightsPath << std::endl;
+    else
+        std::cout << "Weights file not found at " << weightsPath << ", running with dummy parameters." << std::endl;
+
+    // Load image and normalize
+    const uint8_t channels = 3U;
+    const uint32_t resolution = 224U;
+    std::string imagePath = std::string(PROJECT_CURRENT_DIR) + "/img/shark.png";
+
+    std::cout << "Loading image from " << imagePath << "..." << std::endl;
+    auto [srcImage, width, height] = readImage<channels>(imagePath.c_str()); // (H, W, C) == (224, 224, 3)
+    std::cout << "Image Size: " << width << "x" << height << std::endl;
+    _ASSERT(width == resolution && height == resolution);
+
+    auto inputData = preprocess(srcImage, resolution, resolution);
+
+
+#if defined(DEBUG_INFO)
+    // Individual Node Tests
+    testRelu6();
+    testDepthwiseConv();
+    testPointwiseConv();
+    testInvertedResidualBlock();
+    testGlobalAvgPool();
+    testConvBnReLU6();
+#endif
+
+    // Eval MobileNetV2
+    const uint8_t iter = 1U;
+
+    std::cout << "Calling eval_ImageNet..." << std::endl;
+    Tensor output = eval_ImageNet(inputData, resolution, resolution, weights.get(), iter);
+    std::cout << "eval_efficientnet returned." << std::endl;
+    auto logits = downloadTensor(output);
+    std::cout << "downloadTensor returned." << std::endl;
+
+    if (logits.empty())
+    {
+        std::cout << "No output data returned.\n";
     }
-    printf("  Image: %s (%d x %d)\n", imagePath, w, h);
-
-    const int size = 224;
-    std::vector<float> input(size * size * 3);
-    int cropSize = std::min(w, h);
-    int offsetX = (w - cropSize) / 2;
-    int offsetY = (h - cropSize) / 2;
-    const float mean[3] = { 0.485f, 0.456f, 0.406f };
-    const float std_[3] = { 0.229f, 0.224f, 0.225f };
-
-    for (int y = 0; y < size; ++y) {
-        for (int x = 0; x < size; ++x) {
-            int srcX = offsetX + (x * cropSize) / size;
-            int srcY = offsetY + (y * cropSize) / size;
-            srcX = std::max(0, std::min(w - 1, srcX));
-            srcY = std::max(0, std::min(h - 1, srcY));
-            int srcIdx = (srcY * w + srcX) * 3;
-            int dstIdx = (y * size + x) * 3;
-            for (int ch = 0; ch < 3; ++ch) {
-                float pixel = imgData[srcIdx + ch] / 255.0f;
-                input[dstIdx + ch] = (pixel - mean[ch]) / std_[ch];
-            }
+    else
+    {
+        // show top-5 idx and logit
+        std::vector<std::pair<int, float>> idxLogits;
+        for (size_t i = 0; i < logits.size(); ++i) {
+            idxLogits.push_back({i, logits[i]});
+        }
+        std::sort(idxLogits.begin(), idxLogits.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+        
+        std::cout << "Top-5 Results:\n";
+        for (int i = 0; i < 5 && i < (int)idxLogits.size(); ++i) {
+            std::cout << "  " << i+1 << ". Class " << idxLogits[i].first 
+                  << ": " << idxLogits[i].second << "\n";
         }
     }
 
-    stbi_image_free(imgData);
-    printf("\nPreprocessed to 224x224\n");
-
-    printf("\nLoading weights...\n");
-    SafeTensorsParser weights(weightsPath);
-    printf("  Loaded %zu tensors\n", weights.getTensorNames().size());
-
-    printf("\nBuilding full MobileNetV2...\n");
-    // === features.0: First Conv ===
-    ConvBnRelu6Node conv0(3, 32, 3, 2, 1);  // 224 -> 112
-    {
-        auto w = weights["features.0.0.weight"].parseNDArray();
-
-        /* test */
-        if (w.size() >= 4) {
-            printf(">>> DEBUG: Loaded Weights (First 4): %.6f, %.6f, %.6f, %.6f\n",
-                w[0], w[1], w[2], w[3]);
-        }
-        else {
-            printf(">>> DEBUG: Weight size is too small!\n");
-        }
-        /* test */
-        Tensor tw(32 * 3 * 3 * 3); tw.set(w);
-        conv0["conv_weight"] = tw;
-        conv0["conv_bias"] = makeConstTensor(32, 0.0f);
-
-        auto g = weights["features.0.1.weight"].parseNDArray();
-        auto b = weights["features.0.1.bias"].parseNDArray();
-        auto m = weights["features.0.1.running_mean"].parseNDArray();
-        auto v = weights["features.0.1.running_var"].parseNDArray();
-        Tensor tg(32); tg.set(g); conv0["bn_gamma"] = tg;
-        Tensor tb(32); tb.set(b); conv0["bn_beta"] = tb;
-        Tensor tm(32); tm.set(m); conv0["bn_mean"] = tm;
-        Tensor tv(32); tv.set(v); conv0["bn_var"] = tv;
-    }
-    printf("  features.0: Conv(3->32, s=2) 224->112\n");
-
-
-
-    // === features.1: IRB(32->16, t=1, s=1) ===
-    InvertedResidualBlock irb1(32, 16, 1, 1);
-    loadIRBWeightsNoExpansion(irb1, weights, 1, 32, 16);
-    printf("  features.1: IRB(32->16, t=1, s=1)\n");
-
-    // === features.2: IRB(16->24, t=6, s=2) ===
-    InvertedResidualBlock irb2(16, 24, 6, 2);  // 112 -> 56
-    loadIRBWeightsWithExpansion(irb2, weights, 2, 16, 24, 6);
-    printf("  features.2: IRB(16->24, t=6, s=2) 112->56\n");
-
-    // === features.3: IRB(24->24, t=6, s=1) ===
-    InvertedResidualBlock irb3(24, 24, 6, 1);
-    loadIRBWeightsWithExpansion(irb3, weights, 3, 24, 24, 6);
-    printf("  features.3: IRB(24->24, t=6, s=1)\n");
-
-    // === features.4: IRB(24->32, t=6, s=2) ===
-    InvertedResidualBlock irb4(24, 32, 6, 2);  // 56 -> 28
-    loadIRBWeightsWithExpansion(irb4, weights, 4, 24, 32, 6);
-    printf("  features.4: IRB(24->32, t=6, s=2) 56->28\n");
-
-    // === features.5: IRB(32->32, t=6, s=1) ===
-    InvertedResidualBlock irb5(32, 32, 6, 1);
-    loadIRBWeightsWithExpansion(irb5, weights, 5, 32, 32, 6);
-    printf("  features.5: IRB(32->32, t=6, s=1)\n");
-
-    // === features.6: IRB(32->32, t=6, s=1) ===
-    InvertedResidualBlock irb6(32, 32, 6, 1);
-    loadIRBWeightsWithExpansion(irb6, weights, 6, 32, 32, 6);
-    printf("  features.6: IRB(32->32, t=6, s=1)\n");
-
-    // === features.7: IRB(32->64, t=6, s=2) ===
-    InvertedResidualBlock irb7(32, 64, 6, 2);  // 28 -> 14
-    loadIRBWeightsWithExpansion(irb7, weights, 7, 32, 64, 6);
-    printf("  features.7: IRB(32->64, t=6, s=2) 28->14\n");
-
-    // === features.8: IRB(64->64, t=6, s=1) ===
-    InvertedResidualBlock irb8(64, 64, 6, 1);
-    loadIRBWeightsWithExpansion(irb8, weights, 8, 64, 64, 6);
-    printf("  features.8: IRB(64->64, t=6, s=1)\n");
-
-    // === features.9: IRB(64->64, t=6, s=1) ===
-    InvertedResidualBlock irb9(64, 64, 6, 1);
-    loadIRBWeightsWithExpansion(irb9, weights, 9, 64, 64, 6);
-    printf("  features.9: IRB(64->64, t=6, s=1)\n");
-
-    // === features.10: IRB(64->64, t=6, s=1) ===
-    InvertedResidualBlock irb10(64, 64, 6, 1);
-    loadIRBWeightsWithExpansion(irb10, weights, 10, 64, 64, 6);
-    printf("  features.10: IRB(64->64, t=6, s=1)\n");
-
-    // === features.11: IRB(64->96, t=6, s=1) ===
-    InvertedResidualBlock irb11(64, 96, 6, 1);
-    loadIRBWeightsWithExpansion(irb11, weights, 11, 64, 96, 6);
-    printf("  features.11: IRB(64->96, t=6, s=1)\n");
-
-    // === features.12: IRB(96->96, t=6, s=1) ===
-    InvertedResidualBlock irb12(96, 96, 6, 1);
-    loadIRBWeightsWithExpansion(irb12, weights, 12, 96, 96, 6);
-    printf("  features.12: IRB(96->96, t=6, s=1)\n");
-
-    // === features.13: IRB(96->96, t=6, s=1) ===
-    InvertedResidualBlock irb13(96, 96, 6, 1);
-    loadIRBWeightsWithExpansion(irb13, weights, 13, 96, 96, 6);
-    printf("  features.13: IRB(96->96, t=6, s=1)\n");
-
-    // === features.14: IRB(96->160, t=6, s=2) ===
-    InvertedResidualBlock irb14(96, 160, 6, 2);  // 14 -> 7
-    loadIRBWeightsWithExpansion(irb14, weights, 14, 96, 160, 6);
-    printf("  features.14: IRB(96->160, t=6, s=2) 14->7\n");
-
-    // === features.15: IRB(160->160, t=6, s=1) ===
-    InvertedResidualBlock irb15(160, 160, 6, 1);
-    loadIRBWeightsWithExpansion(irb15, weights, 15, 160, 160, 6);
-    printf("  features.15: IRB(160->160, t=6, s=1)\n");
-
-    // === features.16: IRB(160->160, t=6, s=1) ===
-    InvertedResidualBlock irb16(160, 160, 6, 1);
-    loadIRBWeightsWithExpansion(irb16, weights, 16, 160, 160, 6);
-    printf("  features.16: IRB(160->160, t=6, s=1)\n");
-
-    // === features.17: IRB(160->320, t=6, s=1) ===
-    InvertedResidualBlock irb17(160, 320, 6, 1);
-    loadIRBWeightsWithExpansion(irb17, weights, 17, 160, 320, 6);
-    printf("  features.17: IRB(160->320, t=6, s=1)\n");
-
-    // === features.18: Last Conv (320->1280) ===
-    PwConvBnRelu6Node lastConv(320, 1280);
-    {
-        auto w = weights["features.18.0.weight"].parseNDArray();
-        // [1280, 320, 1, 1] -> [320, 1280]
-        std::vector<float> w_t(320 * 1280);
-        for (int o = 0; o < 1280; ++o)
-            for (int i = 0; i < 320; ++i)
-                w_t[i * 1280 + o] = w[o * 320 + i];
-        Tensor tw(320, 1280); tw.set(w_t);
-        lastConv["pw_weight"] = tw;
-
-        auto g = weights["features.18.1.weight"].parseNDArray();
-        auto b = weights["features.18.1.bias"].parseNDArray();
-        auto m = weights["features.18.1.running_mean"].parseNDArray();
-        auto v = weights["features.18.1.running_var"].parseNDArray();
-        Tensor tg(1280); tg.set(g); lastConv["bn_gamma"] = tg;
-        Tensor tb(1280); tb.set(b); lastConv["bn_beta"] = tb;
-        Tensor tm(1280); tm.set(m); lastConv["bn_mean"] = tm;
-        Tensor tv(1280); tv.set(v); lastConv["bn_var"] = tv;
-    }
-    printf("  features.18: Conv(320->1280, 1x1)\n");
-
-    // === Global Average Pooling ===
-    GlobalAvgPoolNode gap;
-    printf("  GAP: 7x7x1280 -> 1280\n");
-
-    // === Classifier ===
-    FullyConnectedNode fc(1280, 1000);
-    {
-        auto w = weights["classifier.1.weight"].parseNDArray();
-        auto b = weights["classifier.1.bias"].parseNDArray();
-        // [1000, 1280] -> [1280, 1000]
-        std::vector<float> w_t(1280 * 1000);
-        for (int o = 0; o < 1000; ++o)
-            for (int i = 0; i < 1280; ++i)
-                w_t[i * 1000 + o] = w[o * 1280 + i];
-        Tensor tw(1280, 1000); tw.set(w_t);
-        Tensor tb(1000); tb.set(b);
-        fc["weight"] = tw;
-        fc["bias"] = tb;
-    }
-    printf("  classifier: FC(1280->1000)\n");
-    printf("  Total: 1 Conv + 17 IRB + 1 Conv + GAP + FC\n");
-
-    
-    printf("\nRunning inference...\n");
-
-    Tensor inputTensor(224, 224, 3); // [H, W, C]
-    inputTensor.set(input);
-
-    NeuralNet net(gDevice, 1, 1);
-    net.input(0)
-        - conv0
-        - irb1 - irb2 - irb3 - irb4 - irb5 - irb6 - irb7
-        - irb8 - irb9 - irb10 - irb11 - irb12 - irb13
-        - irb14 - irb15 - irb16 - irb17
-        - lastConv - gap - fc
-        - net.output(0);
-
-    auto start = std::chrono::high_resolution_clock::now();
-    auto results = net(std::move(inputTensor));
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    printf("  Inference time: %lld ms\n", (long long)duration.count());
-
-    Buffer outBuffer = gDevice.createBuffer({
-        1000 * sizeof(float),
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        });
-
-    gDevice.newCommandBuffer(queue_compute)
-        .begin()
-        .copyBuffer(outBuffer, results[0].buffer())
-        .end()
-        .submit()
-        .wait();
-
-    float* logits = (float*)outBuffer.map();
-    std::vector<float> probs(logits, logits + 1000);
-    softmax(probs.data(), 1000);
-    auto top5 = getTopK(probs.data(), 1000, 5);
-
-    printf("\n");
-    printf("============================================================\n");
-    printf("                    CLASSIFICATION RESULTS\n");
-    printf("============================================================\n");
-    printf("\n  Image: %s\n\n", imagePath);
-    printf("  Top-5 Predictions:\n");
-    printf("  ----------------------------------------------------------\n");
-    for (int rank = 0; rank < 5; ++rank) {
-        int classIdx = top5[rank];
-        float confidence = probs[classIdx];
-        printf("   #%d: Class %d - Confidence: %.4f%%\n", rank + 1, classIdx, confidence * 100.0f);
-	}
-
-    printf("\n============================================================\n");
+    std::cout << "Done." << std::endl;
 }
