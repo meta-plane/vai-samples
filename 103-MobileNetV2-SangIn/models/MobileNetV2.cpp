@@ -14,7 +14,7 @@ static std::vector<IRBConfig> getIRBConfigs() // Inverted Residual Block configu
     };
 }
 
-MobileNetV2::MobileNetV2(Device& device, uint32_t numClasses)
+MobileNetV2::MobileNetV2(Device& device, uint32_t numClasses, bool enableSoftmax)
 : NeuralNet(device, 1, 1),
   stem(3, 32, 3, 2, 1), // inChannels=3, outChannels=32, kernel=3, stride=2, padding=1
   finalConv(320, 1280),
@@ -64,9 +64,13 @@ MobileNetV2::MobileNetV2(Device& device, uint32_t numClasses)
 
     *lastOutput - classifier.slot("in0");
     lastOutput = &classifier.slot("out0");
-    
-    *lastOutput - softmax.slot("in0");
-    lastOutput = &softmax.slot("out0");
+
+    // Optionally apply softmax (disabled for PyTorch equivalence in benchmarks)
+    if (enableSoftmax)
+    {
+        *lastOutput - softmax.slot("in0");
+        lastOutput = &softmax.slot("out0");
+    }
 
     // Connect output node
     *lastOutput - output(0).slot("in0");

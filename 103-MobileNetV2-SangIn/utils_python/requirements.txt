@@ -1,7 +1,0 @@
-ipykernel
-torch 
-torchvision
-torchsummary
-safetensors
-opencv-python
-netron

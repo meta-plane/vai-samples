@@ -30,7 +30,7 @@ class MobileNetV2 : public NeuralNet
     SoftmaxNode softmax;
 
 public:
-    MobileNetV2(Device& device, uint32_t numClasses = 1000);
+    MobileNetV2(Device& device, uint32_t numClasses = 1000, bool enableSoftmax = true);
 
     Tensor& operator[](const std::string& name);
     Tensor& getInputTensor() { return stem.slot("in0").getValueRef(); };

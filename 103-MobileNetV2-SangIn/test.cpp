@@ -162,8 +162,9 @@ Tensor eval_ImageNet(const std::vector<float>& srcImage, uint32_t W, uint32_t H,
     auto device = VulkanApp::get().device();
 
     std::cout << "Creating MobileNetV2..." << std::endl;
-    MobileNetV2 mobileNetV2(device);
-    std::cout << "MobileNetV2 created." << std::endl;
+    // Disable softmax for PyTorch equivalence (output raw logits)
+    MobileNetV2 mobileNetV2(device, 1000, false);
+    std::cout << "MobileNetV2 created (softmax disabled for benchmark)." << std::endl;
 
     if (weights)
     {
@@ -175,7 +176,7 @@ Tensor eval_ImageNet(const std::vector<float>& srcImage, uint32_t W, uint32_t H,
     printf("Input Tensor Shape: [%d, %d, %d]\n", inputTensor.shape()[0], inputTensor.shape()[1], inputTensor.shape()[2]);
 
     // Warmup phase
-    uint32_t warmupIter = std::min(3U, static_cast<uint32_t>(iter));
+    uint32_t warmupIter = 3U;
     std::cout << "\n=== Warmup Phase (first " << warmupIter << " iterations) ===" << std::endl;
     Tensor result;
     for (uint32_t i = 0; i < warmupIter; ++i)
@@ -186,9 +187,9 @@ Tensor eval_ImageNet(const std::vector<float>& srcImage, uint32_t W, uint32_t H,
     std::cout << "Warmup completed.\n" << std::endl;
 
     // Benchmark phase
-    if (iter > warmupIter)
+    if (iter > 0)
     {
-        const uint32_t benchmarkIter = iter - warmupIter;
+        const uint32_t benchmarkIter = iter;
         std::cout << "=== Benchmark Phase (" << benchmarkIter << " iterations) ===" << std::endl;
 
         auto startTime = std::chrono::high_resolution_clock::now();
@@ -292,7 +293,7 @@ void test()
     auto inputData = preprocess(srcImage, resolution, resolution);
 
     // Eval MobileNetV2
-    const uint8_t iter = 10U;  // Total iterations (first 3 for warmup, rest for benchmark)
+    const uint8_t iter = 10U;
     const bool enableLayerTiming = false;  // Enable layer-wise timing measurements
 
     std::cout << "Calling eval_ImageNet..." << std::endl;
