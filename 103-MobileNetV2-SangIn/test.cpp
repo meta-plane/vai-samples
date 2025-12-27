@@ -13,6 +13,7 @@
 #include <cstring>
 #include <iostream>
 #include <filesystem>
+#include <chrono>
 
 
 template<uint32_t Channels>
@@ -156,7 +157,7 @@ void loadWeights(MobileNetV2& net, const SafeTensorsParser& weights)
     std::cout << "Weights loading completed." << std::endl;
 }
 
-Tensor eval_ImageNet(const std::vector<float>& srcImage, uint32_t W, uint32_t H, const SafeTensorsParser* weights, uint8_t iter)
+Tensor eval_ImageNet(const std::vector<float>& srcImage, uint32_t W, uint32_t H, const SafeTensorsParser* weights, uint8_t iter, bool enableLayerTiming = false)
 {
     auto device = VulkanApp::get().device();
 
@@ -168,17 +169,70 @@ Tensor eval_ImageNet(const std::vector<float>& srcImage, uint32_t W, uint32_t H,
     {
         loadWeights(mobileNetV2, *weights);
     }
-    
+
     Tensor inputTensor(H, W, 3); // srcImage layout: [H][W][C]
     inputTensor.set(srcImage);   // data copy
     printf("Input Tensor Shape: [%d, %d, %d]\n", inputTensor.shape()[0], inputTensor.shape()[1], inputTensor.shape()[2]);
 
+    // Warmup phase
+    uint32_t warmupIter = std::min(3U, static_cast<uint32_t>(iter));
+    std::cout << "\n=== Warmup Phase (first " << warmupIter << " iterations) ===" << std::endl;
     Tensor result;
-    for (uint32_t i = 0; i < iter; ++i)
+    for (uint32_t i = 0; i < warmupIter; ++i)
     {
-        std::cout << "Running iteration " << i << "..." << std::endl;
+        std::cout << "Warmup iteration " << i + 1 << "/" << warmupIter << "..." << std::endl;
         result = mobileNetV2(inputTensor)[0];
-        std::cout << "Iteration " << i << " done." << std::endl;
+    }
+    std::cout << "Warmup completed.\n" << std::endl;
+
+    // Benchmark phase
+    if (iter > warmupIter)
+    {
+        const uint32_t benchmarkIter = iter - warmupIter;
+        std::cout << "=== Benchmark Phase (" << benchmarkIter << " iterations) ===" << std::endl;
+
+        auto startTime = std::chrono::high_resolution_clock::now();
+
+        for (uint32_t i = 0; i < benchmarkIter; ++i)
+        {
+            std::cout << "Benchmark iteration " << i + 1 << "/" << benchmarkIter << "..." << std::endl;
+            result = mobileNetV2(inputTensor)[0];
+        }
+
+        auto endTime = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+
+        std::cout << "\n=== Benchmark Results ===" << std::endl;
+        std::cout << "Total iterations: " << benchmarkIter << std::endl;
+        std::cout << "Total time: " << duration.count() << " ms" << std::endl;
+        std::cout << "Average time per iteration: " << (float)duration.count() / benchmarkIter << " ms" << std::endl;
+        std::cout << "=========================\n" << std::endl;
+    }
+
+    // Layer timing measurement (separate from benchmark)
+    if (enableLayerTiming)
+    {
+        std::cout << "\n=== Running Layer Timing Measurement ===" << std::endl;
+        mobileNetV2.setLayerTiming(true);
+        result = mobileNetV2(inputTensor)[0];
+        mobileNetV2.setLayerTiming(false);
+
+        const auto& timings = mobileNetV2.getLayerTimings();
+        if (!timings.empty())
+        {
+            std::cout << "\n=== Layer-wise Timing ===" << std::endl;
+            double totalLayerTime = 0.0;
+            for (const auto& [nodeName, timeMs] : timings)
+            {
+                if (!nodeName.empty() && nodeName != "noname")
+                {
+                    std::cout << "  " << nodeName << ": " << timeMs << " ms" << std::endl;
+                    totalLayerTime += timeMs;
+                }
+            }
+            std::cout << "Total layer time: " << totalLayerTime << " ms" << std::endl;
+            std::cout << "=========================\n" << std::endl;
+        }
     }
 
     return result;
@@ -238,10 +292,11 @@ void test()
     auto inputData = preprocess(srcImage, resolution, resolution);
 
     // Eval MobileNetV2
-    const uint8_t iter = 1U;
+    const uint8_t iter = 10U;  // Total iterations (first 3 for warmup, rest for benchmark)
+    const bool enableLayerTiming = false;  // Enable layer-wise timing measurements
 
     std::cout << "Calling eval_ImageNet..." << std::endl;
-    Tensor output = eval_ImageNet(inputData, resolution, resolution, weights.get(), iter);
+    Tensor output = eval_ImageNet(inputData, resolution, resolution, weights.get(), iter, enableLayerTiming);
     std::cout << "eval_efficientnet returned." << std::endl;
     auto logits = downloadTensor(output);
     std::cout << "downloadTensor returned." << std::endl;

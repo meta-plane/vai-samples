@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <cstring>  // memcpy
 #include <iostream> // for debug
+#include <chrono>   // for layer timing
 
 using namespace vk;
 
@@ -215,19 +216,23 @@ public:
 class NeuralNet
 {
     Device& device;
-    
+
     // std::map<std::string, Node*> nodes;
     std::vector<Node*> sortedNodes;
     std::vector<std::vector<Node*>> linearChains;
 
     BufferPool& bufferPool = BufferPool::get();
-    Buffer uploadBuffer; 
+    Buffer uploadBuffer;
     uint8_t* uploadBufferMappedAddress = nullptr;
-    size_t uploadBufferOffset = 0; 
+    size_t uploadBufferOffset = 0;
     const size_t uploadBufferSize = 1024 * 1024 * 64; // 64 MB
 
     std::vector<InputNode> _inputs;
     std::vector<OutputNode> _outputs;
+
+    // Layer timing
+    bool enableLayerTiming = false;
+    std::vector<std::pair<std::string, double>> layerTimings; // node name, time in ms
 
 public:
     NeuralNet(Device& device, uint32_t numInputs = 1, uint32_t numOutputs = 1);
@@ -247,6 +252,10 @@ public:
         _ASSERT(index < _outputs.size());
         return _outputs[index];
     }
+
+    void setLayerTiming(bool enable) { enableLayerTiming = enable; }
+    const std::vector<std::pair<std::string, double>>& getLayerTimings() const { return layerTimings; }
+    void clearLayerTimings() { layerTimings.clear(); }
 
     void sortNodes(bool buildChains = false);
     void prepare();
@@ -421,10 +430,15 @@ inline void NeuralNet::run()
     if (sortedNodes.empty())
         sortNodes();
 
+    if (enableLayerTiming)
+        layerTimings.clear();
+
     auto cmdBuffer = device.newCommandBuffer(queue_compute).begin();
 
     for (Node* node : sortedNodes)
     {
+        auto nodeStartTime = std::chrono::high_resolution_clock::now();
+
         // - Verify whether each input slot is assigned to a tensor and the tensor has the correct shape.
         // - Assign tensor for output/internal slots
         node->prepare();
@@ -509,7 +523,22 @@ inline void NeuralNet::run()
         }
 
         // Record the command buffer for executing the program of the node
-        node->run(cmdBuffer);        
+        node->run(cmdBuffer);
+
+        // Submit and wait for this node if layer timing is enabled
+        if (enableLayerTiming)
+        {
+            device.queue() << cmdBuffer.end() << waiting;
+
+            auto nodeEndTime = std::chrono::high_resolution_clock::now();
+            auto nodeDuration = std::chrono::duration_cast<std::chrono::microseconds>(nodeEndTime - nodeStartTime);
+            double timeMs = nodeDuration.count() / 1000.0;
+
+            layerTimings.push_back({node->name, timeMs});
+
+            // Start new command buffer for next node
+            cmdBuffer = device.newCommandBuffer(queue_compute).begin();
+        }
 
         // invlaidate the tensor to return the bound buffer to the pool
         for (auto& [name, slot] : node->slots)
@@ -520,13 +549,17 @@ inline void NeuralNet::run()
             if (slot.getValueRef().isConstant())
                 continue;
 
-            slot.getValueRef() = Tensor(); 
+            slot.getValueRef() = Tensor();
         }
     }
 
-    device.queue() << cmdBuffer.end() << waiting;
+    // If layer timing is disabled, submit all at once
+    if (!enableLayerTiming)
+    {
+        device.queue() << cmdBuffer.end() << waiting;
+    }
 
-    uploadBufferOffset = 0; 
+    uploadBufferOffset = 0;
 }
 
 
