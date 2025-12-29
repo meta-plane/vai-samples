@@ -42,7 +42,7 @@ Tensor eval_fcbn(uint32_t inDim, uint32_t outDim,
     // Create network
     FCBNTestNet net(netGlobalDevice, inDim, outDim);
     
-    // Load weights
+    // Load weights (PyTorch format: weight is [O, I])
     std::vector<float> weight_data = json["weight"].parseNDArray();
     std::vector<float> bias_data = json["bias"].parseNDArray();
     std::vector<float> bn_mean = json["mean"].parseNDArray();
@@ -50,7 +50,7 @@ Tensor eval_fcbn(uint32_t inDim, uint32_t outDim,
     std::vector<float> bn_gamma = json["gamma"].parseNDArray();
     std::vector<float> bn_beta = json["beta"].parseNDArray();
     
-    net["weight"] = Tensor(inDim, outDim).set(weight_data);
+    net["weight"] = Tensor(outDim, inDim).set(weight_data);  // [O, I] format
     net["bias"] = Tensor(outDim).set(bias_data);
     net["mean"] = Tensor(outDim).set(bn_mean);
     net["var"] = Tensor(outDim).set(bn_var);

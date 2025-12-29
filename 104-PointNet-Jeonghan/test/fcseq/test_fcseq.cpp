@@ -51,8 +51,8 @@ Tensor eval_fcseq(const std::vector<float>& inputData, const SafeTensorsParser& 
         std::vector<float> weight_data = json[weight_key].parseNDArray();
         std::vector<float> bias_data = json[bias_key].parseNDArray();
         
-        // Set parameters with explicit shapes
-        net[weight_key] = Tensor(channels[i], channels[i+1]).set(weight_data);
+        // Set parameters - PyTorch format [O, I]
+        net[weight_key] = Tensor(channels[i+1], channels[i]).set(weight_data);
         net[bias_key] = Tensor(channels[i+1]).set(bias_data);
     }
     

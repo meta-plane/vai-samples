@@ -1,200 +1,114 @@
 /**
- * PointNetSegment Test (yanx27 structure)
- * 9-dim input, 13 classes (semantic segmentation)
+ * PointNetSegment Test - PyTorch Reference Comparison
  */
 
 #include <iostream>
+#include <iomanip>
 #include <vector>
+#include <cmath>
 #include "neuralNet.h"
 #include "vulkanApp.h"
 #include "safeTensorsParser.h"
 #include "../networks/include/pointnet.hpp"
+#include "../networks/include/weightLoader.hpp"
 
 using namespace vk;
 using namespace networks;
 
-void loadSTNWeights(PointNetSegment& net, const std::string& prefix, 
-                    SafeTensorsParser& json) {
-    // STN MLP layers (conv1, conv2, conv3)
-    for (int i = 0; i < 3; ++i) {
-        std::string layer = "conv" + std::to_string(i + 1);
-        std::string weight_key = "feat." + prefix + "." + layer + ".weight";
-        std::string bias_key = "feat." + prefix + "." + layer + ".bias";
-        std::string bn_key = "feat." + prefix + ".bn" + std::to_string(i + 1);
-        
-        auto weight_data = json[weight_key].parseNDArray();
-        auto bias_data = json[bias_key].parseNDArray();
-        auto mean_data = json[bn_key + ".running_mean"].parseNDArray();
-        auto var_data = json[bn_key + ".running_var"].parseNDArray();
-        auto gamma_data = json[bn_key + ".weight"].parseNDArray();
-        auto beta_data = json[bn_key + ".bias"].parseNDArray();
-        
-        // Map to internal structure: feat.prefix.mlp.mlp<i>.*
-        std::string mlp_prefix = "feat." + prefix + ".mlp.mlp" + std::to_string(i);
-        auto weight_shape = json[weight_key].getShape();
-        uint32_t in_dim = weight_shape[0];
-        uint32_t out_dim = weight_shape[1];
-        
-        net[mlp_prefix + ".weight"] = Tensor(in_dim, out_dim).set(weight_data);
-        net[mlp_prefix + ".bias"] = Tensor(out_dim).set(bias_data);
-        net[mlp_prefix + ".bn_mean"] = Tensor(out_dim).set(mean_data);
-        net[mlp_prefix + ".bn_var"] = Tensor(out_dim).set(var_data);
-        net[mlp_prefix + ".bn_gamma"] = Tensor(out_dim).set(gamma_data);
-        net[mlp_prefix + ".bn_beta"] = Tensor(out_dim).set(beta_data);
-    }
-    
-    // STN FC layers (fc1, fc2, fc3)
-    for (int i = 0; i < 3; ++i) {
-        std::string layer = "fc" + std::to_string(i + 1);
-        std::string weight_key = "feat." + prefix + "." + layer + ".weight";
-        std::string bias_key = "feat." + prefix + "." + layer + ".bias";
-        
-        auto weight_data = json[weight_key].parseNDArray();
-        auto bias_data = json[bias_key].parseNDArray();
-        auto weight_shape = json[weight_key].getShape();
-        uint32_t in_dim = weight_shape[0];
-        uint32_t out_dim = weight_shape[1];
-        
-        // Map to internal structure: feat.prefix.fc.block<i> or fc.lastBlock
-        std::string fc_prefix = "feat." + prefix + ".fc";
-        
-        if (i < 2) {
-            // FC1, FC2: have BatchNorm
-            std::string bn_key = "feat." + prefix + ".bn" + std::to_string(i + 4);
-            auto mean_data = json[bn_key + ".running_mean"].parseNDArray();
-            auto var_data = json[bn_key + ".running_var"].parseNDArray();
-            auto gamma_data = json[bn_key + ".weight"].parseNDArray();
-            auto beta_data = json[bn_key + ".bias"].parseNDArray();
-            
-            net[fc_prefix + ".block" + std::to_string(i) + ".weight"] = Tensor(in_dim, out_dim).set(weight_data);
-            net[fc_prefix + ".block" + std::to_string(i) + ".bias"] = Tensor(out_dim).set(bias_data);
-            net[fc_prefix + ".block" + std::to_string(i) + ".mean"] = Tensor(out_dim).set(mean_data);
-            net[fc_prefix + ".block" + std::to_string(i) + ".var"] = Tensor(out_dim).set(var_data);
-            net[fc_prefix + ".block" + std::to_string(i) + ".gamma"] = Tensor(out_dim).set(gamma_data);
-            net[fc_prefix + ".block" + std::to_string(i) + ".beta"] = Tensor(out_dim).set(beta_data);
-        } else {
-            // FC3: no BatchNorm
-            net[fc_prefix + ".lastBlock.weight"] = Tensor(in_dim, out_dim).set(weight_data);
-            net[fc_prefix + ".lastBlock.bias"] = Tensor(out_dim).set(bias_data);
+void test_segment() {
+    std::cout << "\n";
+    std::cout << "╔════════════════════════════════════════════════════════╗\n";
+    std::cout << "║     PointNetSegment - PyTorch Reference Test          ║\n";
+    std::cout << "╚════════════════════════════════════════════════════════╝\n\n";
+
+    SafeTensorsParser data(PROJECT_CURRENT_DIR"/test/segment/reference.safetensors");
+
+    auto input_shape = data["input"].getShape();
+    uint32_t channel = input_shape[0];
+    uint32_t N = input_shape[1];
+    uint32_t numClasses = 13;
+
+    std::cout << "Configuration:\n";
+    std::cout << "  Input:   [" << channel << ", " << N << "] (9-dim: xyz+rgb+normalized)\n";
+    std::cout << "  Output:  [" << numClasses << ", " << N << "] (13 semantic classes)\n\n";
+
+    std::vector<float> input_data = data["input"].parseNDArray();
+    std::vector<float> expected_output = data["expected_output"].parseNDArray();
+
+    PointNetSegment net(netGlobalDevice, numClasses, channel);
+    WeightLoader loader(data, false);
+    loader.loadSegment(net);
+    net.prepare();
+
+    Tensor inputTensor = Tensor(channel, N).set(input_data);
+    auto outputs = net(inputTensor);
+
+    Buffer outBuf = netGlobalDevice.createBuffer({
+        .size = numClasses * N * sizeof(float),
+        .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .reqMemProps = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+    });
+
+    netGlobalDevice.newCommandBuffer(queue_compute)
+        .begin()
+        .copyBuffer(outBuf, outputs[0].buffer())
+        .end()
+        .submit()
+        .wait();
+
+    float* output = (float*)outBuf.map();
+
+    float max_diff = 0.0f;
+    float total_diff = 0.0f;
+    int mismatch_count = 0;
+    const float tolerance = 1e-3f;
+
+    for (uint32_t c = 0; c < numClasses; c++) {
+        for (uint32_t n = 0; n < N; n++) {
+            float vulkan_val = output[c * N + n];
+            float pytorch_val = expected_output[c * N + n];
+            float diff = std::abs(vulkan_val - pytorch_val);
+
+            max_diff = std::max(max_diff, diff);
+            total_diff += diff;
+
+            if (diff > tolerance) {
+                mismatch_count++;
+            }
         }
     }
-}
 
-void loadWeights(PointNetSegment& net, SafeTensorsParser& weights) {
-    std::cout << "Loading weights from SafeTensors...\n";
-    
-    // 1. Load STN3d weights
-    loadSTNWeights(net, "stn", weights);
-    
-    // 2. Load Conv1 weights (feat.conv1.mlp0)
-    {
-        auto weight_data = weights["feat.conv1.mlp0.weight"].parseNDArray();
-        auto bias_data = weights["feat.conv1.mlp0.bias"].parseNDArray();
-        auto mean_data = weights["feat.conv1.mlp0.bn_mean"].parseNDArray();
-        auto var_data = weights["feat.conv1.mlp0.bn_var"].parseNDArray();
-        auto gamma_data = weights["feat.conv1.mlp0.bn_weight"].parseNDArray();
-        auto beta_data = weights["feat.conv1.mlp0.bn_bias"].parseNDArray();
-        auto weight_shape = weights["feat.conv1.mlp0.weight"].getShape();
-        
-        net["feat.conv1.mlp0.weight"] = Tensor(weight_shape[0], weight_shape[1]).set(weight_data);
-        net["feat.conv1.mlp0.bias"] = Tensor(weight_shape[1]).set(bias_data);
-        net["feat.conv1.mlp0.bn_mean"] = Tensor(weight_shape[1]).set(mean_data);
-        net["feat.conv1.mlp0.bn_var"] = Tensor(weight_shape[1]).set(var_data);
-        net["feat.conv1.mlp0.bn_gamma"] = Tensor(weight_shape[1]).set(gamma_data);
-        net["feat.conv1.mlp0.bn_beta"] = Tensor(weight_shape[1]).set(beta_data);
-    }
-    
-    // 3. Load STNkd weights
-    loadSTNWeights(net, "fstn", weights);
-    
-    // 4. Load Conv2 weights (feat.conv2.mlp0)
-    {
-        auto weight_data = weights["feat.conv2.mlp0.weight"].parseNDArray();
-        auto bias_data = weights["feat.conv2.mlp0.bias"].parseNDArray();
-        auto mean_data = weights["feat.conv2.mlp0.bn_mean"].parseNDArray();
-        auto var_data = weights["feat.conv2.mlp0.bn_var"].parseNDArray();
-        auto gamma_data = weights["feat.conv2.mlp0.bn_weight"].parseNDArray();
-        auto beta_data = weights["feat.conv2.mlp0.bn_bias"].parseNDArray();
-        auto weight_shape = weights["feat.conv2.mlp0.weight"].getShape();
-        
-        net["feat.conv2.mlp0.weight"] = Tensor(weight_shape[0], weight_shape[1]).set(weight_data);
-        net["feat.conv2.mlp0.bias"] = Tensor(weight_shape[1]).set(bias_data);
-        net["feat.conv2.mlp0.bn_mean"] = Tensor(weight_shape[1]).set(mean_data);
-        net["feat.conv2.mlp0.bn_var"] = Tensor(weight_shape[1]).set(var_data);
-        net["feat.conv2.mlp0.bn_gamma"] = Tensor(weight_shape[1]).set(gamma_data);
-        net["feat.conv2.mlp0.bn_beta"] = Tensor(weight_shape[1]).set(beta_data);
-    }
-    
-    // 5. Load Conv3 weights (feat.conv3)
-    {
-        auto weight_data = weights["feat.conv3.weight"].parseNDArray();
-        auto bias_data = weights["feat.conv3.bias"].parseNDArray();
-        auto mean_data = weights["feat.conv3.bn_mean"].parseNDArray();
-        auto var_data = weights["feat.conv3.bn_var"].parseNDArray();
-        auto gamma_data = weights["feat.conv3.bn_weight"].parseNDArray();
-        auto beta_data = weights["feat.conv3.bn_bias"].parseNDArray();
-        auto weight_shape = weights["feat.conv3.weight"].getShape();
-        
-        net["feat.conv3.weight"] = Tensor(weight_shape[0], weight_shape[1]).set(weight_data);
-        net["feat.conv3.bias"] = Tensor(weight_shape[1]).set(bias_data);
-        net["feat.conv3.bn_mean"] = Tensor(weight_shape[1]).set(mean_data);
-        net["feat.conv3.bn_var"] = Tensor(weight_shape[1]).set(var_data);
-        net["feat.conv3.bn_gamma"] = Tensor(weight_shape[1]).set(gamma_data);
-        net["feat.conv3.bn_beta"] = Tensor(weight_shape[1]).set(beta_data);
-    }
-    
-    // 6. Load segmentation head weights (conv1-4)
-    for (int i = 0; i < 4; ++i) {
-        std::string layer = "conv" + std::to_string(i + 1);
-        auto weight_data = weights[layer + ".weight"].parseNDArray();
-        auto bias_data = weights[layer + ".bias"].parseNDArray();
-        auto mean_data = weights[layer + ".bn_mean"].parseNDArray();
-        auto var_data = weights[layer + ".bn_var"].parseNDArray();
-        auto gamma_data = weights[layer + ".bn_weight"].parseNDArray();
-        auto beta_data = weights[layer + ".bn_bias"].parseNDArray();
-        auto weight_shape = weights[layer + ".weight"].getShape();
-        
-        net[layer + ".weight"] = Tensor(weight_shape[0], weight_shape[1]).set(weight_data);
-        net[layer + ".bias"] = Tensor(weight_shape[1]).set(bias_data);
-        net[layer + ".bn_mean"] = Tensor(weight_shape[1]).set(mean_data);
-        net[layer + ".bn_var"] = Tensor(weight_shape[1]).set(var_data);
-        net[layer + ".bn_gamma"] = Tensor(weight_shape[1]).set(gamma_data);
-        net[layer + ".bn_beta"] = Tensor(weight_shape[1]).set(beta_data);
-    }
-    
-    std::cout << "  ✓ All weights loaded successfully\n\n";
-}
+    float avg_diff = total_diff / (numClasses * N);
 
-void test_segment() {
-    std::cout << "=== PointNetSegment Test (yanx27: 9-dim, 13 classes) ===\n\n";
-    
-    SafeTensorsParser data(PROJECT_CURRENT_DIR"/test/segment/reference.safetensors");
-    std::vector<float> shape_data = data["input_shape"].parseNDArray();
-    uint32_t N = static_cast<uint32_t>(shape_data[0]);
-    uint32_t numClasses = 13;
-    
-    std::cout << "N=" << N << ", Classes=" << numClasses << "\n";
-    std::cout << "Input: [N,9], Output: [N," << numClasses << "]\n\n";
-    
-    std::vector<float> input_data = data["input"].parseNDArray();
-    
-    std::cout << "Creating PointNetSegment...\n";
-    PointNetSegment net(netGlobalDevice, numClasses, 9);  // 9-dim input (x,y,z + RGB + normalized coords)
-    
-    loadWeights(net, data);
-    
-    std::cout << "Preparing network...\n";
-    net.prepare();
-    
-    // Create input tensor [N, 9]
-    Tensor inputTensor = Tensor(N, 9).set(input_data);
-    
-    std::cout << "Running inference...\n";
-    auto outputs = net(inputTensor);
-    
-    std::cout << "\n✅ TEST PASSED\n";
-    std::cout << "  Network executed successfully\n";
-    std::cout << "  Output shape: [" << N << ", " << numClasses << "]\n";
+    std::cout << "Comparison (first 5 classes, point 0):\n";
+    std::cout << "  ┌─────────┬──────────────┬──────────────┬──────────────┐\n";
+    std::cout << "  │ Class   │ Vulkan       │ PyTorch      │ Diff         │\n";
+    std::cout << "  ├─────────┼──────────────┼──────────────┼──────────────┤\n";
+
+    for (uint32_t c = 0; c < 5; c++) {
+        float vulkan_val = output[c * N + 0];
+        float pytorch_val = expected_output[c * N + 0];
+        float diff = std::abs(vulkan_val - pytorch_val);
+        std::cout << "  │ " << std::setw(7) << c << " │ "
+                  << std::setw(12) << std::fixed << std::setprecision(6) << vulkan_val << " │ "
+                  << std::setw(12) << pytorch_val << " │ "
+                  << std::setw(12) << std::scientific << std::setprecision(2) << diff << " │\n";
+    }
+    std::cout << "  └─────────┴──────────────┴──────────────┴──────────────┘\n\n";
+
+    outBuf.unmap();
+
+    std::cout << "Results:\n";
+    std::cout << "  Max difference: " << std::scientific << std::setprecision(2) << max_diff << "\n";
+    std::cout << "  Avg difference: " << avg_diff << "\n";
+    std::cout << "  Mismatches:     " << mismatch_count << "/" << (numClasses * N) << "\n\n";
+
+    if (mismatch_count == 0) {
+        std::cout << "Status: PASSED (all outputs within tolerance " << std::fixed << tolerance << ")\n";
+    } else {
+        std::cout << "Status: FAILED (" << mismatch_count << " values exceed tolerance)\n";
+    }
+    std::cout << "\n";
 }
 
 int main() {

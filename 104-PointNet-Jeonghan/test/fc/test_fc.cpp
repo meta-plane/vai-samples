@@ -45,8 +45,8 @@ Tensor eval_fc(const std::vector<float>& inputData, const SafeTensorsParser& jso
     std::vector<float> weight_data = json["weight"].parseNDArray();
     std::vector<float> bias_data = json["bias"].parseNDArray();
     
-    // Set parameters with explicit shapes
-    net["weight"] = Tensor(I, O).set(weight_data);  // [I, O]
+    // Set parameters with PyTorch format [O, I]
+    net["weight"] = Tensor(O, I).set(weight_data);  // [O, I] - PyTorch convention
     net["bias"] = Tensor(O).set(bias_data);         // [O]
     
     // Prepare network
@@ -80,7 +80,7 @@ void test() {
     std::cout << "Test configuration:\n";
     std::cout << "  Input dim:  " << I << "\n";
     std::cout << "  Output dim: " << O << "\n";
-    std::cout << "  Weight:     [" << I << ", " << O << "]\n\n";
+    std::cout << "  Weight:     [" << O << ", " << I << "] (PyTorch format)\n\n";
     
     // Get input data
     std::vector<float> inputData = json["input"].parseNDArray();

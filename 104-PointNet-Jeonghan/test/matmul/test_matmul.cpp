@@ -25,10 +25,11 @@ public:
     , matmul()
     {
         // Connect inputs to matmul
-        // input(0) provides matrix A -> matmul's in0
-        // input(1) provides matrix B -> matmul's in1
-        input(0) - "in0" / matmul;
-        input(1) - "in1" / matmul;
+        // PyTorch reference: C = B @ A where B=[M,K], A=[K,N]
+        // MatMul now computes in0 @ in1
+        // So: B -> in0, A -> in1 to get B @ A
+        input(1) - "in0" / matmul;  // B -> matmul.in0
+        input(0) - "in1" / matmul;  // A -> matmul.in1
 
         // Connect matmul output to network output
         matmul - output(0);

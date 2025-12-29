@@ -9,6 +9,7 @@ import torch.nn as nn
 import numpy as np
 import json
 from pathlib import Path
+from safetensors.torch import save_file
 
 # Fixed seed
 torch.manual_seed(42)
@@ -50,14 +51,14 @@ output_np = output_data.numpy()    # [64]
 weights = []
 biases = []
 for i, layer in enumerate(fc_seq.layers):
-    # Linear weight: [O, I] -> transpose to [I, O] for GEMM
-    weight = layer.weight.detach().transpose(0, 1).numpy()
+    # Linear weight: Keep PyTorch format [O, I] (no transpose!)
+    weight = layer.weight.detach().numpy()
     bias = layer.bias.detach().numpy()
     
     weights.append(weight.flatten().tolist())
     biases.append(bias.tolist())
     
-    print(f"FC{i}: [{channels[i]}, {channels[i+1]}] weight shape: {weight.shape}")
+    print(f"FC{i}: [{channels[i]}, {channels[i+1]}] weight shape: {weight.shape} (PyTorch: [O, I])")
 
 # Create JSON structure
 data = {
@@ -74,18 +75,35 @@ data = {
     "fc2.bias": biases[2],     # [64]
 }
 
-# Save JSON
+# Prepare output directory
 output_dir = Path("test/fcseq")
 output_dir.mkdir(parents=True, exist_ok=True)
 
+# Save JSON (backward compatibility)
 json_path = output_dir / "reference.json"
 with open(json_path, 'w') as f:
     json.dump(data, f)
 
-print("\nFCSequence Reference Generated (JSON)")
+# Save SafeTensors (preferred format)
+tensors = {
+    "input": torch.from_numpy(input_np).contiguous(),
+    "expected": torch.from_numpy(output_np).contiguous(),
+    "channels": torch.tensor(channels, dtype=torch.float32),
+}
+
+# Add FC weights (PyTorch format [O, I])
+for i, layer in enumerate(fc_seq.layers):
+    tensors[f"fc{i}.weight"] = layer.weight.detach().contiguous()
+    tensors[f"fc{i}.bias"] = layer.bias.detach().contiguous()
+
+safetensors_path = output_dir / "reference.safetensors"
+save_file(tensors, str(safetensors_path))
+
+print("\nFCSequence Reference Generated (PyTorch Convention)")
 print(f"  Architecture: {' -> '.join(map(str, channels))}")
 print(f"  Input shape:  ({channels[0]},) -> {channels[0]} values")
 print(f"  Output shape: ({channels[-1]},) -> {channels[-1]} values")
 print(f"  Layers: {len(channels)-1}")
-print()
-print(f"✓ Saved to {json_path}")
+print(f"\n✅ Saved to:")
+print(f"  - {json_path} (legacy)")
+print(f"  - {safetensors_path} (preferred)")

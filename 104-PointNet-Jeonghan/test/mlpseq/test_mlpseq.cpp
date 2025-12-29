@@ -38,11 +38,11 @@ Tensor eval_mlpseq(uint32_t N, const std::vector<float>& inputData,
     for (int i = 0; i < 3; ++i) {
         std::string prefix = "mlp" + std::to_string(i);
         
-        // Load Conv weights - map to PointWiseMLPNode slots (weight, bias, not conv.weight)
+        // Load Conv weights - PyTorch format [C_out, C_in]
         std::vector<float> conv_weight = json[prefix + ".conv.weight"].parseNDArray();
         std::vector<float> conv_bias = json[prefix + ".conv.bias"].parseNDArray();
         
-        net[prefix + ".weight"] = Tensor(channels[i], channels[i+1]).set(conv_weight);
+        net[prefix + ".weight"] = Tensor(channels[i+1], channels[i]).set(conv_weight);  // [C_out, C_in]
         net[prefix + ".bias"] = Tensor(channels[i+1]).set(conv_bias);
         
         // Load BatchNorm parameters
@@ -58,7 +58,7 @@ Tensor eval_mlpseq(uint32_t N, const std::vector<float>& inputData,
     }
     
     net.prepare();
-    Tensor inputTensor = Tensor(N, channels[0]).set(inputData);
+    Tensor inputTensor = Tensor(channels[0], N).set(inputData);  // [C_in, N] format
     auto result = net(inputTensor);
     return result[0];
 }
@@ -70,7 +70,8 @@ void test() {
     SafeTensorsParser json = SafeTensorsParser(PROJECT_CURRENT_DIR"/test/mlpseq/reference.safetensors");
     
     std::vector<float> shape = json["shape"].parseNDArray();
-    uint32_t N = static_cast<uint32_t>(shape[0]);
+    uint32_t C_in = static_cast<uint32_t>(shape[0]);  // C_in
+    uint32_t N = static_cast<uint32_t>(shape[1]);      // N
     
     uint32_t channels[4] = {3, 64, 128, 256};
     

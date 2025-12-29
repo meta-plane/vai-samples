@@ -50,12 +50,29 @@ class PointWiseConvNode : public Node
 
     ComputePipeline gemm;
     DescriptorSet gemmDesc;
-    
+
     ComputePipeline batchnorm;
     DescriptorSet batchnormDesc;
 
 public:
     PointWiseConvNode(uint32_t inDim, uint32_t outDim);
+
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+
+// PointWiseLinearNode: Conv1x1 only (no BatchNorm, no ReLU)
+// Used for final output layers where no normalization is needed
+class PointWiseLinearNode : public Node
+{
+    uint32_t Cin, Cout;
+
+    ComputePipeline gemm;
+    DescriptorSet gemmDesc;
+
+public:
+    PointWiseLinearNode(uint32_t inDim, uint32_t outDim);
 
     void prepare() override;
     void run(CommandBuffer cmdBuff) override;

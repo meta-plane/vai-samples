@@ -69,46 +69,40 @@ SegmentationResult segment(
         result.num_points = num_points;
         result.num_classes = config.num_classes;
         
-        // Expand 3-channel data to 9-channel if model expects 9
-        std::vector<float> model_input;
+        // Build input in PyTorch [C, N] format (channel-first)
+        // Input data comes as [N, C] (row-major per point), transpose to [C, N]
+        std::vector<float> model_input(config.channel * num_points);
+
         if (data_channels == 3 && config.channel == 9) {
-            // Expand xyz to [xyz, rgb=1.0, normalized_xyz]
-            model_input.reserve(num_points * 9);
+            // Expand xyz to [xyz, rgb=1.0, normalized_xyz] in [C, N] format
             for (uint32_t i = 0; i < num_points; ++i) {
                 float x = point_cloud[i * 3 + 0];
                 float y = point_cloud[i * 3 + 1];
                 float z = point_cloud[i * 3 + 2];
-                
-                // xyz
-                model_input.push_back(x);
-                model_input.push_back(y);
-                model_input.push_back(z);
-                
-                // rgb (default to white for geometric-only data)
-                model_input.push_back(1.0f);
-                model_input.push_back(1.0f);
-                model_input.push_back(1.0f);
-                
-                // normalized xyz (same as xyz since already normalized)
-                model_input.push_back(x);
-                model_input.push_back(y);
-                model_input.push_back(z);
+
+                // [C, N] format: model_input[c * num_points + i]
+                model_input[0 * num_points + i] = x;  // x
+                model_input[1 * num_points + i] = y;  // y
+                model_input[2 * num_points + i] = z;  // z
+                model_input[3 * num_points + i] = 1.0f;  // r
+                model_input[4 * num_points + i] = 1.0f;  // g
+                model_input[5 * num_points + i] = 1.0f;  // b
+                model_input[6 * num_points + i] = x;  // normalized x
+                model_input[7 * num_points + i] = y;  // normalized y
+                model_input[8 * num_points + i] = z;  // normalized z
             }
-            
-            if (config.verbose) {
-                std::cout << "Input: [" << num_points << ", 3] expanded to [" 
-                          << num_points << ", 9] (xyz+rgb+normalized)" << std::endl;
-            }
+
         } else {
-            model_input = point_cloud;
-            if (config.verbose) {
-                std::cout << "Input: [" << num_points << ", " << data_channels << "] "
-                          << (data_channels == 9 ? "(xyz+rgb+normalized)" : "(xyz only)") << std::endl;
+            // Transpose from [N, C] to [C, N]
+            for (uint32_t i = 0; i < num_points; ++i) {
+                for (uint32_t c = 0; c < data_channels; ++c) {
+                    model_input[c * num_points + i] = point_cloud[i * data_channels + c];
+                }
             }
         }
-        
-        // Create input tensor
-        Tensor input_tensor = Tensor(num_points, config.channel).set(model_input);
+
+        // Create input tensor in PyTorch [C, N] format
+        Tensor input_tensor = Tensor(config.channel, num_points).set(model_input);
         
         // Run inference with timing
         auto start = std::chrono::high_resolution_clock::now();
@@ -126,42 +120,43 @@ SegmentationResult segment(
         result.points_per_sec = num_points / result.inference_time_sec;
         
         // Copy results back to CPU
+        // Output is in PyTorch [C, N] format = [num_classes, num_points]
         vk::Buffer cpu_buffer = netGlobalDevice.createBuffer({
-            num_points * config.num_classes * sizeof(float),
+            config.num_classes * num_points * sizeof(float),
             VK_BUFFER_USAGE_TRANSFER_DST_BIT,
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
         });
-        
+
         netGlobalDevice.newCommandBuffer(queue_compute)
             .begin()
             .copyBuffer(cpu_buffer, output.buffer())
             .end()
             .submit()
             .wait();
-        
+
         float* data = (float*)cpu_buffer.map();
-        
-        // Parse predictions
+
+        // Parse predictions from [C, N] format
         result.predictions.resize(num_points);
         result.predicted_labels.resize(num_points);
-        
+
         for (uint32_t i = 0; i < num_points; ++i) {
             result.predictions[i].resize(config.num_classes);
-            
-            // Copy scores
+
+            // Copy scores from [C, N] format: data[c * num_points + i]
             float max_score = -std::numeric_limits<float>::infinity();
             uint32_t max_idx = 0;
-            
+
             for (uint32_t c = 0; c < config.num_classes; ++c) {
-                float score = data[i * config.num_classes + c];
+                float score = data[c * num_points + i];
                 result.predictions[i][c] = score;
-                
+
                 if (score > max_score) {
                     max_score = score;
                     max_idx = c;
                 }
             }
-            
+
             result.predicted_labels[i] = max_idx;
         }
         

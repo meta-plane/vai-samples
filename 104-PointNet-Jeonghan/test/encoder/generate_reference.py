@@ -1,103 +1,235 @@
 #!/usr/bin/env python3
 """
-Generate reference data for PointNetEncoder test with actual inference
-yanx27 structure: channel-dimensional input (3 or 6)
-"""
+Generate reference data for PointNetEncoder test.
+Uses exact yanx27 structure with PyTorch state_dict keys preserved.
 
-import sys
-import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../temp_pytorch_pointnet/models'))
+Output: reference.safetensors containing:
+  - input: [C, N] tensor
+  - expected_output: [1088, N] tensor
+  - All model weights with PyTorch keys (stn.*, fstn.*, conv*, bn*)
+"""
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
+from torch.autograd import Variable
 from safetensors.torch import save_file
-from pointnet_utils import PointNetEncoder
 
 torch.manual_seed(42)
 np.random.seed(42)
 
+
+class STN3d(nn.Module):
+    """Spatial Transformer Network for 3D points - outputs 3x3 matrix"""
+    def __init__(self, channel):
+        super(STN3d, self).__init__()
+        self.conv1 = nn.Conv1d(channel, 64, 1)
+        self.conv2 = nn.Conv1d(64, 128, 1)
+        self.conv3 = nn.Conv1d(128, 1024, 1)
+        self.fc1 = nn.Linear(1024, 512)
+        self.fc2 = nn.Linear(512, 256)
+        self.fc3 = nn.Linear(256, 9)  # Always 9 = 3x3
+
+        self.bn1 = nn.BatchNorm1d(64)
+        self.bn2 = nn.BatchNorm1d(128)
+        self.bn3 = nn.BatchNorm1d(1024)
+        self.bn4 = nn.BatchNorm1d(512)
+        self.bn5 = nn.BatchNorm1d(256)
+
+    def forward(self, x):
+        batchsize = x.size()[0]
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = F.relu(self.bn3(self.conv3(x)))
+        x = torch.max(x, 2, keepdim=True)[0]
+        x = x.view(-1, 1024)
+
+        x = F.relu(self.bn4(self.fc1(x)))
+        x = F.relu(self.bn5(self.fc2(x)))
+        x = self.fc3(x)
+
+        # Add identity matrix
+        iden = Variable(torch.from_numpy(
+            np.array([1, 0, 0, 0, 1, 0, 0, 0, 1]).astype(np.float32)
+        )).view(1, 9).repeat(batchsize, 1)
+        if x.is_cuda:
+            iden = iden.cuda()
+        x = x + iden
+        x = x.view(-1, 3, 3)  # Always 3x3
+        return x
+
+
+class STNkd(nn.Module):
+    """Spatial Transformer Network for k-dim features - outputs k x k matrix"""
+    def __init__(self, k=64):
+        super(STNkd, self).__init__()
+        self.conv1 = nn.Conv1d(k, 64, 1)
+        self.conv2 = nn.Conv1d(64, 128, 1)
+        self.conv3 = nn.Conv1d(128, 1024, 1)
+        self.fc1 = nn.Linear(1024, 512)
+        self.fc2 = nn.Linear(512, 256)
+        self.fc3 = nn.Linear(256, k * k)
+
+        self.bn1 = nn.BatchNorm1d(64)
+        self.bn2 = nn.BatchNorm1d(128)
+        self.bn3 = nn.BatchNorm1d(1024)
+        self.bn4 = nn.BatchNorm1d(512)
+        self.bn5 = nn.BatchNorm1d(256)
+
+        self.k = k
+
+    def forward(self, x):
+        batchsize = x.size()[0]
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = F.relu(self.bn3(self.conv3(x)))
+        x = torch.max(x, 2, keepdim=True)[0]
+        x = x.view(-1, 1024)
+
+        x = F.relu(self.bn4(self.fc1(x)))
+        x = F.relu(self.bn5(self.fc2(x)))
+        x = self.fc3(x)
+
+        # Add identity matrix
+        iden = Variable(torch.from_numpy(
+            np.eye(self.k).flatten().astype(np.float32)
+        )).view(1, self.k * self.k).repeat(batchsize, 1)
+        if x.is_cuda:
+            iden = iden.cuda()
+        x = x + iden
+        x = x.view(-1, self.k, self.k)
+        return x
+
+
+class PointNetEncoder(nn.Module):
+    """
+    PointNet Encoder - exact yanx27 structure
+
+    When global_feat=False (segmentation mode):
+      Output: [global(1024) + pointfeat(64)] = [1088, N]
+    """
+    def __init__(self, global_feat=False, feature_transform=True, channel=3):
+        super(PointNetEncoder, self).__init__()
+        self.stn = STN3d(channel)
+        self.conv1 = nn.Conv1d(channel, 64, 1)
+        self.conv2 = nn.Conv1d(64, 128, 1)
+        self.conv3 = nn.Conv1d(128, 1024, 1)
+        self.bn1 = nn.BatchNorm1d(64)
+        self.bn2 = nn.BatchNorm1d(128)
+        self.bn3 = nn.BatchNorm1d(1024)
+        self.global_feat = global_feat
+        self.feature_transform = feature_transform
+        if self.feature_transform:
+            self.fstn = STNkd(k=64)
+
+    def forward(self, x):
+        B, D, N = x.size()
+
+        # STN: get 3x3 transform matrix
+        trans = self.stn(x)
+
+        # Apply transform to xyz only (first 3 dims)
+        x = x.transpose(2, 1)  # [B, N, D]
+        if D > 3:
+            feature = x[:, :, 3:]
+            x = x[:, :, :3]
+        x = torch.bmm(x, trans)  # [B, N, 3] @ [B, 3, 3] = [B, N, 3]
+        if D > 3:
+            x = torch.cat([x, feature], dim=2)
+        x = x.transpose(2, 1)  # [B, D, N]
+
+        # conv1: channel → 64
+        x = F.relu(self.bn1(self.conv1(x)))
+
+        # FSTN: 64 → 64 transform
+        if self.feature_transform:
+            trans_feat = self.fstn(x)
+            x = x.transpose(2, 1)  # [B, N, 64]
+            x = torch.bmm(x, trans_feat)  # [B, N, 64] @ [B, 64, 64]
+            x = x.transpose(2, 1)  # [B, 64, N]
+        else:
+            trans_feat = None
+
+        # pointfeat is AFTER fstn transform!
+        pointfeat = x  # [B, 64, N]
+
+        # conv2: 64 → 128
+        x = F.relu(self.bn2(self.conv2(x)))
+
+        # conv3: 128 → 1024 (NO ReLU!)
+        x = self.bn3(self.conv3(x))
+
+        # Global max pooling
+        x = torch.max(x, 2, keepdim=True)[0]  # [B, 1024, 1]
+        x = x.view(-1, 1024)  # [B, 1024]
+
+        if self.global_feat:
+            return x, trans, trans_feat
+        else:
+            # Segmentation mode: broadcast and concat
+            x = x.view(-1, 1024, 1).repeat(1, 1, N)  # [B, 1024, N]
+            return torch.cat([x, pointfeat], 1), trans, trans_feat  # [B, 1088, N]
+
+
 # Test configuration
 N = 16  # num_points
-channel = 3  # 3 for xyz, 6 for xyz+normals
+channel = 3
 batch_size = 1
 
-# Generate input: [B, D, N] format (PyTorch uses [batch, channel, points])
+# Generate input: [B, C, N] format
 input_data = torch.randn(batch_size, channel, N, dtype=torch.float32)
 
-# Create model and run inference
-model = PointNetEncoder(global_feat=True, feature_transform=True, channel=channel)
+# Create model (segmentation mode with feature transform)
+model = PointNetEncoder(global_feat=False, feature_transform=True, channel=channel)
 model.eval()
 
-print("Generating reference for PointNetEncoder...")
-print(f"  Input shape (PyTorch): [B={batch_size}, D={channel}, N={N}]")
+print("Generating reference for PointNetEncoder (PyTorch keys preserved)...")
+print(f"  Input shape (PyTorch): [B={batch_size}, C={channel}, N={N}]")
 
-# Run inference to get actual output
+# Run inference
 with torch.no_grad():
     output, trans, trans_feat = model(input_data)
-    print(f"  Output shape (PyTorch): {output.shape}")  # [B, 1024]
+    print(f"  Output shape (PyTorch): {output.shape}")  # [1, 1088, 16]
 
-# For Vulkan, we need to manually compute point-wise features
-# Let's trace through the encoder step by step
-with torch.no_grad():
-    x = input_data
-    B, D, N_points = x.size()
-    
-    # STN3d
-    trans_input = model.stn(x)  # [B, 3, 3] or [B, 6, 6]
-    x = x.transpose(2, 1)  # [B, N, D]
-    x = torch.bmm(x, trans_input)  # Apply transformation
-    x = x.transpose(2, 1)  # [B, D, N]
-    
-    # Conv1
-    x = torch.relu(model.bn1(model.conv1(x)))  # [B, 64, N]
-    
-    # STNkd (feature transform)
-    trans_feat_custom = model.fstn(x)  # [B, 64, 64]
-    x = x.transpose(2, 1)  # [B, N, 64]
-    x = torch.bmm(x, trans_feat_custom)  # Apply transformation
-    x = x.transpose(2, 1)  # [B, 64, N]
-    
-    # Conv2, Conv3
-    x = torch.relu(model.bn2(model.conv2(x)))  # [B, 128, N]
-    x = model.bn3(model.conv3(x))  # [B, 1024, N]
-    
-    # For Vulkan test: point-wise features [B, 1024, N] -> [1024, N] (keep PyTorch format)
-    pointwise_features = x[0].contiguous()  # [1024, N] - no transpose!
-    print(f"  Point-wise features shape: {pointwise_features.shape}")
+# Extract data for Vulkan (remove batch dimension)
+input_vulkan = input_data[0].contiguous()   # [C, N]
+output_vulkan = output[0].contiguous()       # [1088, N]
 
-# Keep input in PyTorch format [channel, N] for Vulkan
-input_vulkan = input_data[0].contiguous()  # [channel, N] - no transpose!
+print(f"  Input (Vulkan): {input_vulkan.shape} - [C, N] layout")
+print(f"  Output (Vulkan): {output_vulkan.shape} - [1088, N] layout")
 
-# Save input, expected output, and all model weights
+# Save tensors with PyTorch keys
 tensors = {
     'input': input_vulkan,
-    'expected_output': pointwise_features,  # [N, 1024]
+    'expected_output': output_vulkan,
 }
 
-# Save all model weights in PyTorch native format (no transpose!)
-# Conv1d weights: [out, in, 1] -> squeeze to [out, in]
-# Linear weights: [out, in] - keep as is
+# Save all model weights with PyTorch state_dict keys
+print("\nExtracting weights (PyTorch keys)...")
 for name, param in model.state_dict().items():
-    if 'conv' in name and '.weight' in name and not 'bn' in name:
-        # Conv1d: [C_out, C_in, 1] -> [C_out, C_in] - just squeeze
+    if param.dim() == 3 and param.size(2) == 1:
+        # Conv1d: [C_out, C_in, 1] -> [C_out, C_in]
         tensors[name] = param.squeeze(-1).contiguous()
-    elif 'fc' in name and '.weight' in name:
-        # Linear: [out, in] - keep as is
-        tensors[name] = param.contiguous()
+        print(f"  {name}: {param.shape} -> {tensors[name].shape}")
     else:
-        # BatchNorm, bias, running_mean, running_var - no change
-        tensors[name] = param
+        tensors[name] = param.contiguous()
+        if 'weight' in name or 'bias' in name:
+            print(f"  {name}: {param.shape}")
 
 from pathlib import Path
 output_dir = Path(__file__).parent
 output_file = output_dir / 'reference.safetensors'
 save_file(tensors, str(output_file))
 
-print(f"✓ Reference data saved")
-print(f"  Weights: {len(model.state_dict())} tensors")
-print(f"  Input: [channel={channel}, N={N}] - [C, N] layout")
-print(f"  Expected output: [1024, N={N}] - [C, N] layout")
-print(f"\nFirst 5 values of expected output (first point):")
+print(f"\n✓ Reference saved to {output_file}")
+print(f"  Total tensors: {len(tensors)}")
+
+# Print first few values for verification
+print(f"\nFirst 5 values of global feature [0:5, 0]:")
 for i in range(5):
-    print(f"  [{i}] = {pointwise_features[0, i].item():.6f}")
+    print(f"  output[{i}, 0] = {output_vulkan[i, 0].item():.6f}")
+
+print(f"\nFirst 5 values of pointfeat [1024:1029, 0]:")
+for i in range(1024, 1029):
+    print(f"  output[{i}, 0] = {output_vulkan[i, 0].item():.6f}")

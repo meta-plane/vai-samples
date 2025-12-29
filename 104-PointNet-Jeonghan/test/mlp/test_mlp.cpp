@@ -55,7 +55,7 @@ Tensor eval_mlp(const std::vector<float>& inputData, const SafeTensorsParser& we
     // Prepare network
     net.prepare();
     
-    // Create input tensor [C_in, N]
+    // Create input tensor [C_in, N] (PyTorch convention)
     Tensor inputTensor = Tensor(C_in, N).set(inputData);
     
     // Run inference
@@ -71,7 +71,7 @@ void test() {
     // Load reference data (SafeTensors format - preferred)
     SafeTensorsParser data(PROJECT_CURRENT_DIR"/test/mlp/reference.safetensors");
     
-    // Extract shape from tensor - direct access [C_in, N, C_out]
+    // Extract shape from tensor - [C_in, N, C_out] order (PyTorch convention)
     std::vector<float> shape_data = data["shape"].parseNDArray();
     uint32_t C_in = static_cast<uint32_t>(shape_data[0]);
     uint32_t N = static_cast<uint32_t>(shape_data[1]);
@@ -84,8 +84,8 @@ void test() {
     
     std::cout << "Test configuration:\n";
     std::cout << "  Shape: [C_in=" << C_in << ", N=" << N << ", C_out=" << C_out << "]\n";
-    std::cout << "  Input size:  " << (N * C_in) << " values\n";
-    std::cout << "  Output size: " << (N * C_out) << " values\n\n";
+    std::cout << "  Input size:  " << (C_in * N) << " values\n";
+    std::cout << "  Output size: " << (C_out * N) << " values\n\n";
     
     // Get input data
     std::vector<float> inputData = data["input"].parseNDArray();
@@ -96,7 +96,7 @@ void test() {
     
     // Download result from GPU to CPU
     Buffer outBuffer = netGlobalDevice.createBuffer({
-        .size = N * C_out * sizeof(float),
+        .size = C_out * N * sizeof(float),  // [C_out, N] layout
         .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         .reqMemProps = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
     });
@@ -127,7 +127,7 @@ void test() {
     std::cout << "Index | Expected    | Got         | Diff        | Status\n";
     std::cout << std::string(60, '-') << "\n";
     
-    for (size_t i = 0; i < N * C_out; i++) {
+    for (size_t i = 0; i < C_out * N; i++) {
         float diff = std::abs(output[i] - expected[i]);
         maxDiff = std::max(maxDiff, diff);
         avgDiff += diff;
@@ -136,23 +136,23 @@ void test() {
         if (!match) mismatches++;
         
         // Show first 5, last 5, and all mismatches
-        if (!match || i < 5 || i >= N * C_out - 5) {
+        if (!match || i < 5 || i >= C_out * N - 5) {
             std::cout << std::setw(5) << i << " | "
                       << std::setw(11) << expected[i] << " | "
                       << std::setw(11) << output[i] << " | "
                       << std::setw(11) << diff << " | "
                       << (match ? "✓" : "✗") << "\n";
         } else if (i == 5) {
-            std::cout << "  ... (" << (N * C_out - 10) << " more) ...\n";
+            std::cout << "  ... (" << (C_out * N - 10) << " more) ...\n";
         }
     }
     
-    avgDiff /= (N * C_out);
+    avgDiff /= (C_out * N);
     
     std::cout << "\n" << std::string(60, '=') << "\n";
     std::cout << "Results Summary:\n";
     std::cout << std::string(60, '=') << "\n";
-    std::cout << "Total values:   " << (N * C_out) << "\n";
+    std::cout << "Total values:   " << (C_out * N) << "\n";
     std::cout << "Mismatches:     " << mismatches << "\n";
     std::cout << "Max difference: " << maxDiff << "\n";
     std::cout << "Avg difference: " << avgDiff << "\n";

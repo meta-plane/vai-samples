@@ -11,6 +11,7 @@ import torch.nn.functional as F
 import numpy as np
 import json
 from pathlib import Path
+from safetensors.torch import save_file
 
 # Fixed seed
 torch.manual_seed(42)
@@ -71,32 +72,32 @@ input_np = input_data.numpy()      # [512]
 output_np = output_data.numpy()    # [9]
 
 # Extract weights and biases
-# Block 0
-fc1_weight = fc1.weight.detach().transpose(0, 1).numpy()  # [512, 256]
-fc1_bias = fc1.bias.detach().numpy()                       # [256]
-bn1_mean = bn1.running_mean.numpy()                        # [256]
-bn1_var = bn1.running_var.numpy()                          # [256]
-bn1_gamma = bn1.weight.detach().numpy()                    # [256]
-bn1_beta = bn1.bias.detach().numpy()                       # [256]
+# Block 0 - Keep PyTorch format [O, I]
+fc1_weight = fc1.weight.detach().numpy()  # [256, 512]
+fc1_bias = fc1.bias.detach().numpy()       # [256]
+bn1_mean = bn1.running_mean.numpy()        # [256]
+bn1_var = bn1.running_var.numpy()          # [256]
+bn1_gamma = bn1.weight.detach().numpy()    # [256]
+bn1_beta = bn1.bias.detach().numpy()       # [256]
 
-# Block 1
-fc2_weight = fc2.weight.detach().transpose(0, 1).numpy()  # [256, 128]
-fc2_bias = fc2.bias.detach().numpy()                       # [128]
-bn2_mean = bn2.running_mean.numpy()                        # [128]
-bn2_var = bn2.running_var.numpy()                          # [128]
-bn2_gamma = bn2.weight.detach().numpy()                    # [128]
-bn2_beta = bn2.bias.detach().numpy()                       # [128]
+# Block 1 - Keep PyTorch format [O, I]
+fc2_weight = fc2.weight.detach().numpy()  # [128, 256]
+fc2_bias = fc2.bias.detach().numpy()       # [128]
+bn2_mean = bn2.running_mean.numpy()        # [128]
+bn2_var = bn2.running_var.numpy()          # [128]
+bn2_gamma = bn2.weight.detach().numpy()    # [128]
+bn2_beta = bn2.bias.detach().numpy()       # [128]
 
-# Block 2 (last block: FC only)
-fc3_weight = fc3.weight.detach().transpose(0, 1).numpy()  # [128, 9]
-fc3_bias = fc3.bias.detach().numpy()                       # [9]
+# Block 2 (last block: FC only) - Keep PyTorch format [O, I]
+fc3_weight = fc3.weight.detach().numpy()  # [9, 128]
+fc3_bias = fc3.bias.detach().numpy()       # [9]
 
-print(f"\nWeights:")
-print(f"  Block 0 FC:  [{dims[0]}, {dims[1]}]")
+print(f"\nWeights (PyTorch format [O, I]):")
+print(f"  Block 0 FC:  [{dims[1]}, {dims[0]}]")
 print(f"  Block 0 BN:  [{dims[1]}] x 4")
-print(f"  Block 1 FC:  [{dims[1]}, {dims[2]}]")
+print(f"  Block 1 FC:  [{dims[2]}, {dims[1]}]")
 print(f"  Block 1 BN:  [{dims[2]}] x 4")
-print(f"  Block 2 FC:  [{dims[2]}, {dims[3]}]")
+print(f"  Block 2 FC:  [{dims[3]}, {dims[2]}]")
 
 # Create JSON structure
 data = {
@@ -126,13 +127,46 @@ data = {
     "shape": [float(d) for d in dims]                  # [512, 256, 128, 9]
 }
 
-# Save JSON
+# Prepare output directory
 output_dir = Path("test/fcbn_seq")
 output_dir.mkdir(parents=True, exist_ok=True)
 
+# Save JSON (backward compatibility)
 json_path = output_dir / "reference.json"
 with open(json_path, 'w') as f:
     json.dump(data, f)
 
-print(f"\n✓ Saved to {json_path}")
+# Save SafeTensors (preferred format)
+tensors = {
+    "input": torch.from_numpy(input_np).contiguous(),
+    "expected": torch.from_numpy(output_np).contiguous(),
+    "shape": torch.tensor(dims, dtype=torch.float32),
+    
+    # Block 0
+    "block0.weight": torch.from_numpy(fc1_weight).contiguous(),
+    "block0.bias": torch.from_numpy(fc1_bias).contiguous(),
+    "block0.mean": torch.from_numpy(bn1_mean).contiguous(),
+    "block0.var": torch.from_numpy(bn1_var).contiguous(),
+    "block0.gamma": torch.from_numpy(bn1_gamma).contiguous(),
+    "block0.beta": torch.from_numpy(bn1_beta).contiguous(),
+    
+    # Block 1
+    "block1.weight": torch.from_numpy(fc2_weight).contiguous(),
+    "block1.bias": torch.from_numpy(fc2_bias).contiguous(),
+    "block1.mean": torch.from_numpy(bn2_mean).contiguous(),
+    "block1.var": torch.from_numpy(bn2_var).contiguous(),
+    "block1.gamma": torch.from_numpy(bn2_gamma).contiguous(),
+    "block1.beta": torch.from_numpy(bn2_beta).contiguous(),
+    
+    # Block 2
+    "lastBlock.weight": torch.from_numpy(fc3_weight).contiguous(),
+    "lastBlock.bias": torch.from_numpy(fc3_bias).contiguous(),
+}
+
+safetensors_path = output_dir / "reference.safetensors"
+save_file(tensors, str(safetensors_path))
+
+print(f"\n✅ Saved to:")
+print(f"  - {json_path} (legacy)")
+print(f"  - {safetensors_path} (preferred)")
 print("="*60)

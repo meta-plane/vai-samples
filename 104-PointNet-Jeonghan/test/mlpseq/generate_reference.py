@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import json
 import numpy as np
+from pathlib import Path
+from safetensors.torch import save_file
 
 torch.manual_seed(42)
 
@@ -40,12 +42,12 @@ mlp0.eval()
 mlp1.eval()
 mlp2.eval()
 
-# Generate random input: [N, C_in] in Vulkan format
-# PyTorch needs [1, C_in, N] for Conv1d
-input_data = torch.randn(N, channels[0])
-input_torch = input_data.unsqueeze(0).transpose(1, 2)  # [1, C_in, N]
+# Generate random input: [C_in, N] format (PyTorch convention)
+# PyTorch Conv1d needs [1, C_in, N]
+input_data = torch.randn(channels[0], N)
+input_torch = input_data.unsqueeze(0)  # [1, C_in, N]
 
-print(f"Input shape: {input_data.shape} -> PyTorch: {input_torch.shape}")
+print(f"Input shape: [C_in={channels[0]}, N={N}] -> PyTorch: {input_torch.shape}")
 
 # Forward pass through 3 MLP blocks
 with torch.no_grad():
@@ -53,15 +55,15 @@ with torch.no_grad():
     out1 = mlp1(out0)
     output = mlp2(out1)
 
-print(f"Output shape: PyTorch {output.shape} -> Vulkan [{N}, {channels[-1]}]")
+print(f"Output shape: PyTorch {output.shape} -> Vulkan [C_out={channels[-1]}, N={N}]")
 print()
 
-# Convert output: [1, C_out, N] -> [N, C_out]
-output_data = output.squeeze(0).transpose(0, 1)
+# Keep [C_out, N] layout (no transpose!)
+output_data = output.squeeze(0)
 
 # Prepare JSON data
 json_data = {
-    "shape": [float(N), float(channels[0])],
+    "shape": [float(channels[0]), float(N)],  # [C_in, N] order
     "input": input_data.flatten().tolist(),
     "expected": output_data.flatten().tolist(),
 }
@@ -70,8 +72,8 @@ json_data = {
 for i, mlp in enumerate([mlp0, mlp1, mlp2]):
     prefix = f"mlp{i}"
     
-    # Conv weight: [C_out, C_in, 1] -> transpose to [C_in, C_out] for GEMM
-    conv_weight = mlp.conv.weight.squeeze(-1).transpose(0, 1)
+    # Conv weight: Keep PyTorch format [C_out, C_in] (no transpose!)
+    conv_weight = mlp.conv.weight.squeeze(-1)
     conv_bias = mlp.conv.bias
     
     # BatchNorm parameters
@@ -81,7 +83,7 @@ for i, mlp in enumerate([mlp0, mlp1, mlp2]):
     bn_beta = mlp.bn.bias
     
     print(f"{prefix.upper()}: [{channels[i]}, {channels[i+1]}]")
-    print(f"  conv.weight shape: {conv_weight.shape}")
+    print(f"  conv.weight shape: {conv_weight.shape} (PyTorch: [C_out, C_in])")
     print(f"  conv.bias shape: {conv_bias.shape}")
     print(f"  bn parameters shape: {bn_mean.shape}")
     
@@ -92,16 +94,49 @@ for i, mlp in enumerate([mlp0, mlp1, mlp2]):
     json_data[f"{prefix}.bn.gamma"] = bn_gamma.tolist()
     json_data[f"{prefix}.bn.beta"] = bn_beta.tolist()
 
-# Save to JSON
-output_file = "test/mlpseq/reference.json"
-with open(output_file, 'w') as f:
+# Prepare output directory
+output_dir = Path("test/mlpseq")
+output_dir.mkdir(parents=True, exist_ok=True)
+
+# Save to JSON (backward compatibility)
+json_path = output_dir / "reference.json"
+with open(json_path, 'w') as f:
     json.dump(json_data, f, indent=2)
 
+# Save SafeTensors (preferred format)
+tensors = {
+    "input": input_data.contiguous(),
+    "expected": output_data.contiguous(),
+    "shape": torch.tensor([channels[0], N], dtype=torch.float32),
+}
+
+# Add MLP weights
+for i, mlp in enumerate([mlp0, mlp1, mlp2]):
+    prefix = f"mlp{i}"
+    conv_weight = mlp.conv.weight.squeeze(-1).contiguous()
+    conv_bias = mlp.conv.bias.contiguous()
+    bn_mean = mlp.bn.running_mean.contiguous()
+    bn_var = mlp.bn.running_var.contiguous()
+    bn_gamma = mlp.bn.weight.contiguous()
+    bn_beta = mlp.bn.bias.contiguous()
+    
+    tensors[f"{prefix}.conv.weight"] = conv_weight
+    tensors[f"{prefix}.conv.bias"] = conv_bias
+    tensors[f"{prefix}.bn.mean"] = bn_mean
+    tensors[f"{prefix}.bn.var"] = bn_var
+    tensors[f"{prefix}.bn.gamma"] = bn_gamma
+    tensors[f"{prefix}.bn.beta"] = bn_beta
+
+safetensors_path = output_dir / "reference.safetensors"
+save_file(tensors, str(safetensors_path))
+
 print()
-print(f"MLPSequence Reference Generated (JSON)")
+print(f"MLPSequence Reference Generated (PyTorch Convention)")
 print(f"  Architecture: {' -> '.join(map(str, channels))}")
-print(f"  Input shape:  ({N}, {channels[0]}) -> {N * channels[0]} values")
-print(f"  Output shape: ({N}, {channels[-1]}) -> {N * channels[-1]} values")
+print(f"  Input shape:  [C_in={channels[0]}, N={N}] -> {channels[0] * N} values")
+print(f"  Output shape: [C_out={channels[-1]}, N={N}] -> {channels[-1] * N} values")
 print(f"  Layers: {len(channels) - 1}")
+print(f"\n✅ Saved to:")
+print(f"  - {json_path} (legacy)")
+print(f"  - {safetensors_path} (preferred)")
 print()
-print(f"✓ Saved to {output_file}")

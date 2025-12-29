@@ -43,7 +43,7 @@ Tensor eval_fcbn_seq(const uint32_t (&dims)[4],
     // Create network
     FCBNSeqTestNet net(netGlobalDevice, dims);
     
-    // Load weights for each block
+    // Load weights for each block - PyTorch format [O, I]
     // Block 0 (FC+BN+ReLU)
     std::vector<float> block0_weight = json["block0.weight"].parseNDArray();
     std::vector<float> block0_bias = json["block0.bias"].parseNDArray();
@@ -52,7 +52,7 @@ Tensor eval_fcbn_seq(const uint32_t (&dims)[4],
     std::vector<float> block0_gamma = json["block0.gamma"].parseNDArray();
     std::vector<float> block0_beta = json["block0.beta"].parseNDArray();
     
-    net["block0.weight"] = Tensor(dims[0], dims[1]).set(block0_weight);
+    net["block0.weight"] = Tensor(dims[1], dims[0]).set(block0_weight);  // [O, I] = [256, 512]
     net["block0.bias"] = Tensor(dims[1]).set(block0_bias);
     net["block0.mean"] = Tensor(dims[1]).set(block0_mean);
     net["block0.var"] = Tensor(dims[1]).set(block0_var);
@@ -67,7 +67,7 @@ Tensor eval_fcbn_seq(const uint32_t (&dims)[4],
     std::vector<float> block1_gamma = json["block1.gamma"].parseNDArray();
     std::vector<float> block1_beta = json["block1.beta"].parseNDArray();
     
-    net["block1.weight"] = Tensor(dims[1], dims[2]).set(block1_weight);
+    net["block1.weight"] = Tensor(dims[2], dims[1]).set(block1_weight);  // [O, I] = [128, 256]
     net["block1.bias"] = Tensor(dims[2]).set(block1_bias);
     net["block1.mean"] = Tensor(dims[2]).set(block1_mean);
     net["block1.var"] = Tensor(dims[2]).set(block1_var);
@@ -78,7 +78,7 @@ Tensor eval_fcbn_seq(const uint32_t (&dims)[4],
     std::vector<float> lastBlock_weight = json["lastBlock.weight"].parseNDArray();
     std::vector<float> lastBlock_bias = json["lastBlock.bias"].parseNDArray();
     
-    net["lastBlock.weight"] = Tensor(dims[2], dims[3]).set(lastBlock_weight);
+    net["lastBlock.weight"] = Tensor(dims[3], dims[2]).set(lastBlock_weight);  // [O, I] = [9, 128]
     net["lastBlock.bias"] = Tensor(dims[3]).set(lastBlock_bias);
     
     // Create input tensor [dims[0]] - FCBNNode expects 1D input

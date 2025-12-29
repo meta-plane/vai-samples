@@ -52,13 +52,13 @@ input_data = torch.randn(1, C_in, N)
 with torch.no_grad():
     output_data = mlp(input_data)
 
-# Keep PyTorch format [C, N] - no transpose!
-input_cn = input_data.squeeze(0).numpy()   # [3, 8] - PyTorch native
-output_cn = output_data.squeeze(0).numpy()  # [64, 8] - PyTorch native
+# Keep [C, N] layout (no transpose needed - PyTorch convention)
+input_cn = input_data.squeeze(0).numpy()   # [3, 8]
+output_cn = output_data.squeeze(0).numpy()  # [64, 8]
 
 # Extract weights and biases
-# Conv1d weight: [C_out, C_in, 1] - keep PyTorch format
-conv_weight = mlp.conv.weight.detach().squeeze(-1).numpy()  # [64, 3] - no transpose!
+# Conv1d weight: [C_out, C_in, 1] -> keep PyTorch format [C_out, C_in]
+conv_weight = mlp.conv.weight.detach().squeeze(-1).numpy()  # [64, 3]
 conv_bias = mlp.conv.bias.detach().numpy()                   # [64]
 
 # BatchNorm parameters
@@ -69,16 +69,16 @@ bn_beta = mlp.bn.bias.detach().numpy()        # [64]
 
 # Create JSON structure (all floats for parseNDArray compatibility)
 data = {
-    "input": input_cn.flatten().tolist(),           # [24 values] (3*8) - [C, N]
-    "expected": output_cn.flatten().tolist(),       # [512 values] (64*8) - [C, N]
-    "conv_weight": conv_weight.flatten().tolist(),  # [192 values] (64*3) - [Out, In]
+    "input": input_cn.flatten().tolist(),           # [24 values] (3*8)
+    "expected": output_cn.flatten().tolist(),       # [512 values] (64*8)
+    "conv_weight": conv_weight.flatten().tolist(),  # [192 values] (64*3)
     "conv_bias": conv_bias.tolist(),                # [64 values]
     "bn_mean": bn_mean.tolist(),                    # [64 values]
     "bn_var": bn_var.tolist(),                      # [64 values]
     "bn_gamma": bn_gamma.tolist(),                  # [64 values]
     "bn_beta": bn_beta.tolist(),                    # [64 values]
     "bn_eps": float(mlp.bn.eps),
-    "shape": [float(C_in), float(N), float(C_out)]  # [3, 8, 64] - [C_in, N, C_out]
+    "shape": [float(C_in), float(N), float(C_out)]  # [3, 8, 64] - C_in, N, C_out order
 }
 
 # Prepare output directory
@@ -92,25 +92,25 @@ with open(json_path, 'w') as f:
 
 # Save SafeTensors (preferred format) - ensure all tensors are contiguous
 tensors = {
-    "input": torch.from_numpy(input_cn).contiguous(),            # [3, 8] - [C, N]
-    "expected": torch.from_numpy(output_cn).contiguous(),        # [64, 8] - [C, N]
-    "conv_weight": torch.from_numpy(conv_weight).contiguous(),   # [64, 3] - [Out, In]
+    "input": torch.from_numpy(input_cn).contiguous(),            # [3, 8]
+    "expected": torch.from_numpy(output_cn).contiguous(),        # [64, 8]
+    "conv_weight": torch.from_numpy(conv_weight).contiguous(),   # [64, 3]
     "conv_bias": torch.from_numpy(conv_bias).contiguous(),       # [64]
     "bn_mean": torch.from_numpy(bn_mean).contiguous(),           # [64]
     "bn_var": torch.from_numpy(bn_var).contiguous(),             # [64]
     "bn_gamma": torch.from_numpy(bn_gamma).contiguous(),         # [64]
     "bn_beta": torch.from_numpy(bn_beta).contiguous(),           # [64]
     "bn_eps": torch.tensor([mlp.bn.eps], dtype=torch.float32),   # [1]
-    "shape": torch.tensor([C_in, N, C_out], dtype=torch.float32)  # [3] - [C_in, N, C_out]
+    "shape": torch.tensor([C_in, N, C_out], dtype=torch.float32)  # [3] - C_in, N, C_out
 }
 
 safetensors_path = output_dir / "reference.safetensors"
 save_file(tensors, str(safetensors_path))
 
-print("PointWiseMLP Reference Generated")
-print(f"  Input shape:  {input_cn.shape} -> {input_cn.size} values [C, N]")
-print(f"  Output shape: {output_cn.shape} -> {output_cn.size} values [C, N]")
-print(f"  Conv weight:  {conv_weight.shape} [Out, In]")
+print("PointWiseMLP Reference Generated (PyTorch Convention: [C, N])")
+print(f"  Input shape:  {input_cn.shape} -> {input_cn.size} values")
+print(f"  Output shape: {output_cn.shape} -> {output_cn.size} values")
+print(f"  Conv weight:  {conv_weight.shape} (PyTorch: [C_out, C_in])")
 print(f"  Conv bias:    {conv_bias.shape}")
 print(f"  BN mean:      {bn_mean.shape}")
 print(f"  BN var:       {bn_var.shape}")

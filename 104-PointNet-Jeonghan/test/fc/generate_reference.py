@@ -9,6 +9,7 @@ import torch.nn as nn
 import numpy as np
 import json
 from pathlib import Path
+from safetensors.torch import save_file
 
 # Fixed seed
 torch.manual_seed(42)
@@ -46,18 +47,32 @@ data = {
     "shape": [float(I), float(O)]         # [128, 256]
 }
 
-# Save JSON
+# Prepare output directory
 output_dir = Path("test/fc")
 output_dir.mkdir(parents=True, exist_ok=True)
 
+# Save JSON (backward compatibility)
 json_path = output_dir / "reference.json"
 with open(json_path, 'w') as f:
-    json.dump(data, f)
+    json.dump(data, f, indent=2)
 
-print("FullyConnected Reference Generated (JSON)")
+# Save SafeTensors (preferred format)
+tensors = {
+    "input": torch.from_numpy(input_np).contiguous(),      # [128]
+    "expected": torch.from_numpy(output_np).contiguous(),  # [256]
+    "weight": torch.from_numpy(weight).contiguous(),       # [256, 128]
+    "bias": torch.from_numpy(bias).contiguous(),           # [256]
+    "shape": torch.tensor([I, O], dtype=torch.float32)     # [2]
+}
+
+safetensors_path = output_dir / "reference.safetensors"
+save_file(tensors, str(safetensors_path))
+
+print("FullyConnected Reference Generated (PyTorch Convention: [O, I])")
 print(f"  Input shape:  ({I},) -> {I} values")
 print(f"  Output shape: ({O},) -> {O} values")
-print(f"  Weight:       ({I}, {O})")
+print(f"  Weight:       ({O}, {I}) - PyTorch format")
 print(f"  Bias:         ({O},)")
-print()
-print(f"✓ Saved to {json_path}")
+print(f"\n✅ Saved to:")
+print(f"  - {json_path} (legacy)")
+print(f"  - {safetensors_path} (preferred)")

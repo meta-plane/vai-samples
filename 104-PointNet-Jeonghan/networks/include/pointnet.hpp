@@ -66,8 +66,8 @@ public:
     FCBNNode(uint32_t inDim, uint32_t outDim)
     : NodeGroup()
     , fc(inDim, outDim)
-    , reshape_in({1, outDim})   // Reshape FC output to [1, outDim]
-    , bn(outDim)                // BatchNorm needs [N, C] format
+    , reshape_in({outDim, 1})   // Reshape FC output to [C, 1] (PyTorch convention)
+    , bn(outDim)                // BatchNorm needs [C, N] format
     , reshape_out({outDim})     // Reshape back to [outDim]
     , relu()
     {
@@ -272,10 +272,10 @@ public:
     , split2()
     , stn(channel, 3)                      // STN3d: full channel input → 3x3 matrix
     , matmul1()
-    , conv1({channel, 64})                 // First conv layer with ReLU
+    , conv1({channel, 64})             // First conv sequence: channel→64→64
     , fstn(64, 64)                         // STNkd: 64-dim input → 64x64 matrix
     , matmul2()
-    , conv2({64, 128})                     // Second conv layer with ReLU
+    , conv2({64, 128})                 // Second conv sequence: 64→64→128
     , conv3(128, 1024)                     // Third conv layer (Conv+BN, NO ReLU)
     {
         // yanx27 PointNet Encoder Architecture (exact implementation):
@@ -301,34 +301,34 @@ public:
         
         if (channel > 3) {
             // For channel > 3: STN uses full channel, but transform only xyz
-            split_for_stn / "out0" - stn - "in1" / matmul1;  // Full channel → STN → [3,3]
+            split_for_stn / "out0" - stn - "in0" / matmul1;  // Full channel → STN → [3,3] → MatMul.in0
             split_for_stn / "out1" - split_for_slice;        // Full channel → split
             
-            split_for_slice / "out0" - slice_xyz - "in0" / matmul1;  // xyz → MatMul
+            split_for_slice / "out0" - slice_xyz - "in1" / matmul1;  // xyz → MatMul.in1 [N,3]
             split_for_slice / "out1" - slice_rest - "in1" / concat_after_transform;  // rest → Concat
             
             matmul1 - "in0" / concat_after_transform;  // transformed xyz → Concat
             concat_after_transform - conv1;            // [N, channel] → Conv1
         } else {
             // For channel = 3: direct transformation
-            split_for_stn / "out0" - "in0" / matmul1;        // Input → MatMul.in0
-            split_for_stn / "out1" - stn - "in1" / matmul1;  // Input → STN → MatMul.in1
+            split_for_stn / "out0" - "in1" / matmul1;        // Input → MatMul.in1 [N,3]
+            split_for_stn / "out1" - stn - "in0" / matmul1;  // Input → STN → MatMul.in0 [3,3]
             matmul1 - conv1;
         }
         
         // Path 2: FSTN (64x64 transformation) on conv1 output
         conv1 - split2;
-        split2 / "out0" - "in0" / matmul2;         // Conv1 output → MatMul2.in0 [N,64]
-        split2 / "out1" - fstn - "in1" / matmul2;  // Conv1 output → FSTN → MatMul2.in1 [64,64]
+        split2 / "out0" - "in1" / matmul2;         // Conv1 output → MatMul2.in1 [N,64]
+        split2 / "out1" - fstn - "in0" / matmul2;  // Conv1 output → FSTN → MatMul2.in0 [64,64]
         
         // Apply remaining convolutions
         matmul2 - conv2 - conv3;  // [N,64] → [N,128] → [N,1024]
-        
-        // Dual outputs:
-        // out0: pointfeat [N, 64] from conv1 (for segmentation)
+
+        // Dual outputs (yanx27 structure):
+        // out0: pointfeat [N, 64] from matmul2 (AFTER FSTN transform!)
         // out1: full features [N, 1024] from conv3
-        defineSlot("out0", conv1.slot("out0"));   // pointfeat [N,64]
-        defineSlot("out1", conv3.slot("out0"));   // full features [N,1024]
+        defineSlot("out0", matmul2.slot("out0"));  // pointfeat [N,64] - AFTER FSTN!
+        defineSlot("out1", conv3.slot("out0"));    // full features [N,1024]
     }
 
     Tensor& operator[](const std::string& name)
@@ -379,11 +379,12 @@ public:
 class PointNetSegment : public NeuralNet
 {
     PointNetEncoder encoder;    // PointNet encoder: [N, 9] → [N, 1024]
-    MaxPooling1DNode maxpool;   // Global max pooling: [N, 1024] → [1024]
-    ReShapeNode reshape_global; // Reshape: [1024] → [1, 1024]
-    BroadcastNode broadcast;    // Broadcast global feature: [1, 1024] → [N, 1024]
+    MaxPooling1DNode maxpool;   // Global max pooling: [1024, N] → [1024]
+    ReShapeNode reshape_global; // Reshape: [1024] → [1024, 1]
+    BroadcastNode broadcast;    // Broadcast global feature: [1024, 1] → [1024, N]
     ConcatNode concat;          // Concatenate: [N, 64] + [N, 1024] → [N, 1088]
-    MLPSequence<4> segHead;     // Segmentation head: [N, 1088] → [N, 512] → [N, 256] → [N, 128] → [N, numClasses]
+    MLPSequence<3> segHead;     // Segmentation head: conv1-3 with BN+ReLU
+    PointWiseLinearNode conv4;  // Final layer: conv4 (NO BN, NO ReLU) - matches PyTorch
 
     uint32_t numClasses;
 
@@ -395,10 +396,11 @@ public:
     , numClasses(numClasses)
     , encoder(channel)
     , maxpool()
-    , reshape_global({1, 1024})  // Reshape [1024] → [1, 1024]
+    , reshape_global({1024, 1})  // Reshape [1024] → [1024, 1]
     , broadcast()
     , concat()
-    , segHead({1088, 512, 256, 128, numClasses})  // 64 (local feat) + 1024 (global) = 1088
+    , segHead({1088, 512, 256, 128})  // 64 (local feat) + 1024 (global) = 1088 → 128
+    , conv4(128, numClasses)          // Final layer: 128 → numClasses (NO BN, NO ReLU)
     {
         // yanx27 Semantic Segmentation Architecture:
         //
@@ -407,7 +409,7 @@ public:
         // encoder → [N, 1024] features
         //   ├───→ maxpool → [1024] (global feature)
         //   │         ↓
-        //   │    reshape → [1, 1024]
+        //   │    reshape → [1024, 1]
         //   │         ↓
         //   │    broadcast → [N, 1024] (replicated global)
         //   │
@@ -431,42 +433,51 @@ public:
         //    Path A: encoder.out0 (pointfeat [N,64]) → concat.in0
         //    Path B: encoder.out1 (full [N,1024]) → maxpool → reshape → broadcast → concat.in1
         
-        // Path A: Local features [N, 64] directly to concat
-        encoder / "out0" - "in0" / concat;                 // pointfeat [N,64] to concat.in0
-        
-        // Path B: Global features [N, 1024] → pooled and broadcasted
-        encoder / "out1" - maxpool;                        // [N,1024] → [1024]
-        maxpool - reshape_global;                          // [1024] → [1,1024]
-        reshape_global - broadcast;                        // [1,1024] to broadcast.in0
-        encoder / "out1" - "in1" / broadcast;              // [N,1024] shape reference for broadcast
-        broadcast - "in1" / concat;                        // Broadcasted [N,1024] to concat.in1
+        // Path A: Global features [1024, N] → pooled and broadcasted → concat.in0
+        // (PyTorch order: [global, pointfeat] = [1024, 64])
+        encoder / "out1" - maxpool;                        // [1024,N] → [1024]
+        maxpool - reshape_global;                          // [1024] → [1024,1]
+        reshape_global - broadcast;                        // [1024,1] to broadcast.in0
+        encoder / "out1" - "in1" / broadcast;              // [1024,N] shape reference for broadcast
+        broadcast - "in0" / concat;                        // Broadcasted [1024,N] to concat.in0
+
+        // Path B: Local features [64, N] directly to concat.in1
+        encoder / "out0" - "in1" / concat;                 // pointfeat [64,N] to concat.in1
         
         // 3. Segmentation head: [N,1088] → [N,512] → [N,256] → [N,128] → [N,numClasses]
-        concat - segHead - output(0);
+        // segHead: conv1-3 with BN+ReLU
+        // conv4: final layer without BN/ReLU (matches PyTorch)
+        concat - segHead - conv4 - output(0);
     }
 
     Tensor& operator[](const std::string& name)
     {
         // yanx27 key mapping:
         // feat.* → encoder.*
-        // conv1-4.* → segHead.mlp0-3.*
+        // conv1-3.* → segHead.mlp0-2.*
+        // conv4.* → conv4.*
         if (name.compare(0, 5, "feat.") == 0)
             return encoder[name.substr(5)];  // feat.stn.* → encoder.stn.*
-        
-        // Segmentation head: conv1-4.* → segHead.mlp0-3.*
-        // Note: conv1.weight, conv1.bn_bias, etc. all map to mlp0.*
-        if (name.size() >= 6 && name.compare(0, 4, "conv") == 0 && 
-            name[4] >= '1' && name[4] <= '4' && name[5] == '.') {
-            int idx = name[4] - '1';  // conv1 → 0, conv2 → 1, etc.
+
+        // Segmentation head: conv1-3.* → segHead.mlp0-2.* (with BN+ReLU)
+        if (name.size() >= 6 && name.compare(0, 4, "conv") == 0 &&
+            name[4] >= '1' && name[4] <= '3' && name[5] == '.') {
+            int idx = name[4] - '1';  // conv1 → 0, conv2 → 1, conv3 → 2
             return segHead["mlp" + std::to_string(idx) + name.substr(5)];
         }
-        
+
+        // conv4.* → conv4 node directly (no BN)
+        if (name.compare(0, 6, "conv4.") == 0) {
+            return conv4[name.substr(6)];  // conv4.weight → conv4["weight"]
+        }
+
         throw std::runtime_error("Unknown parameter: " + name);
     }
-    
+
     // Public accessors for testing
     PointNetEncoder& getEncoder() { return encoder; }
-    MLPSequence<4>& getSegHead() { return segHead; }
+    MLPSequence<3>& getSegHead() { return segHead; }
+    PointWiseLinearNode& getConv4() { return conv4; }
 };
 
 

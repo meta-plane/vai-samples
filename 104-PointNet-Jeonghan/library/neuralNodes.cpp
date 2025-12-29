@@ -688,32 +688,34 @@ void main() {
 static const char* src_matmul = R"(
 #version 450
 layout(local_size_x = 16, local_size_y = 16) in;
-layout(set = 0, binding = 0) buffer OutBuffer { float C[]; };  // [M, N]
-layout(set = 0, binding = 1) buffer InBuffer  { float A[]; };  // [K, N]
-layout(set = 0, binding = 2) buffer Weight    { float B[]; };  // [M, K]
+layout(set = 0, binding = 0) buffer OutBuffer { float C[]; };  // [M, N] output
+layout(set = 0, binding = 1) buffer InBuffer  { float A[]; };  // [K, K] - Transform matrix (PyTorch format)
+layout(set = 0, binding = 2) buffer Weight    { float B[]; };  // [M, N] - Points in [C, N] layout
 
 layout(push_constant) uniform PushConstants {
-    int M;  // # of output dim (rows in output)
-    int K;  // # of intermediate dim
-    int N;  // # of points (cols in output)
+    int M;  // # of channels (rows in points)
+    int K;  // # of transform dim (K x K matrix)
+    int N;  // # of points (cols in points)
 };
 
 void main() 
 {
-    int n = int(gl_GlobalInvocationID.x);  // point index (inner, col)
-    int m = int(gl_GlobalInvocationID.y);  // output dim (outer, row)
+    int n = int(gl_GlobalInvocationID.x);  // point index (col)
+    int m = int(gl_GlobalInvocationID.y);  // channel index (row)
 
     if (m >= M || n >= N) 
         return;
 
+    // Compute C = A.T @ B where A=[K,K] (PyTorch transform), B=[M,N] (points [C,N])
+    // This implements: output = (points.T @ transform).T = transform.T @ points
+    // PyTorch: [N,K] @ [K,K] = [N,K] → Vulkan: [K,K].T @ [K,N] = [K,N]
     float sum = 0.0;
     for (int k = 0; k < K; ++k)
-        sum += B[m * K + k] * A[k * N + n];
+        sum += A[k * K + m] * B[k * N + n];  // A.T[m,k] * B[k,n]
 
     C[m * N + n] = sum;
 }
 )";
-
 
 Device netGlobalDevice = VulkanApp::get().device();
 
@@ -887,6 +889,14 @@ void PointWiseMLPNode::prepare()
     _ASSERT(inShape.size() == 2);
     _ASSERT(inShape[0] == Cin);  // [Cin, N] layout - channels is outer dimension
     _ASSERT((*this)["weight"].validShape());
+    
+    // Debug: print shapes if assertion would fail
+    auto& weight = (*this)["weight"];
+    if (!weight.isShapeOf(Cout, Cin)) {
+        std::cerr << "[PointWiseMLPNode Weight Shape Mismatch]\n";
+        std::cerr << "  Expected: [" << Cout << ", " << Cin << "]\n";
+        std::cerr << "  Actual:   [" << weight.shape()[0] << ", " << weight.shape()[1] << "]\n";
+    }
     _ASSERT((*this)["weight"].isShapeOf(Cout, Cin));  // PyTorch format: [Cout, Cin]
     _ASSERT((*this)["bias"].validShape());
     _ASSERT((*this)["bias"].isShapeOf(Cout));
@@ -1111,7 +1121,76 @@ void PointWiseConvNode::run(CommandBuffer cmdBuff)
         );
     
     // No ReLU stage - output is directly from BatchNorm
-}  
+}
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// PointWiseLinearNode (Conv1x1 only, NO BatchNorm, NO ReLU)
+// Used for final output layers (e.g., segmentation head conv4)
+/////////////////////////////////////////////////////////////////////////////////////////
+PointWiseLinearNode::PointWiseLinearNode(uint32_t inDim, uint32_t outDim)
+: Cin(inDim)
+, Cout(outDim)
+{
+    setName("PointWiseLinearNode");
+    // Slots for Conv only (no BN, no ReLU)
+    addSlot("in0", NodeSlot::input);      // [Cin, N]
+    addSlot("out0", NodeSlot::output);    // [Cout, N]
+
+    // Conv weights only
+    addSlot("weight", NodeSlot::input);   // [Cout, Cin] (PyTorch format)
+    addSlot("bias", NodeSlot::input);     // [Cout]
+
+    // Create pipeline for Conv only
+    gemm = requestPipeline(src_gemm_naive);
+    gemmDesc = gemm.descSetLayout(0).newDescSet(gDestSetPool);
+}
+
+void PointWiseLinearNode::prepare()
+{
+    const auto& inShape = (*this)["in0"].shape();
+    _ASSERT(inShape.size() == 2);
+    _ASSERT(inShape[0] == Cin);  // [Cin, N] layout
+    _ASSERT((*this)["weight"].validShape());
+    _ASSERT((*this)["weight"].isShapeOf(Cout, Cin));  // PyTorch format: [Cout, Cin]
+    _ASSERT((*this)["bias"].validShape());
+    _ASSERT((*this)["bias"].isShapeOf(Cout));
+
+    (*this)["out0"] = Tensor(Cout, inShape[1]);  // [Cout, N]
+}
+
+void PointWiseLinearNode::run(CommandBuffer cmdBuff)
+{
+    const auto& inShape = (*this)["in0"].shape();
+    uint32_t Cin_actual = inShape[0];  // input channels
+    uint32_t M = inShape[1];           // points
+
+    // Conv1x1 (GEMM): C(NxM) = B(NxK)*A(KxM) + b
+    gemmDesc.write({
+        (*this)["out0"].buffer(),
+        (*this)["in0"].buffer(),
+        (*this)["weight"].buffer(),
+        (*this)["bias"].buffer(),
+    });
+
+    uint32_t pc_gemm[] = {
+        Cout,         // N (output channels)
+        Cin_actual,   // K (input channels)
+        M             // M (points)
+    };
+    cmdBuff
+        .bindPipeline(gemm)
+        .bindDescSets({gemmDesc})
+        .setPushConstants(0, sizeof(pc_gemm), pc_gemm)
+        .dispatch0(CEIL_DIV(M, 16), CEIL_DIV(Cout, 16))
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["out0"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+
+    // No BatchNorm, no ReLU - direct output
+}
 
 
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -1664,17 +1743,26 @@ MatMulNode::MatMulNode()
 
 void MatMulNode::prepare()
 {
-    Tensor& in0 = (*this)["in0"];  // [K, N] - point features
-    Tensor& in1 = (*this)["in1"];  // [M, K] - transformation matrix
+    // PyTorch convention: C = A @ B where A=[M,K] transform, B=[K,N] points
+    Tensor& in0 = (*this)["in0"];  // [M, K] - transformation matrix (A in shader)
+    Tensor& in1 = (*this)["in1"];  // [K, N] - point features (B in shader)
     
     _ASSERT(in0.validShape() && in1.validShape());
     _ASSERT(in0.shape().size() == 2);
     _ASSERT(in1.shape().size() == 2);
-    _ASSERT(in0.shape()[0] == in1.shape()[1]); // K must match
     
-    uint32_t K = in0.shape()[0];   // intermediate dimension
-    uint32_t N = in0.shape()[1];   // points (inner)
-    uint32_t M = in1.shape()[0];   // output dimension (outer)
+    // Debug: print shapes if assertion would fail
+    if (in0.shape()[1] != in1.shape()[0]) {
+        std::cerr << "[MatMul Shape Mismatch]\n";
+        std::cerr << "  in0 (transform): [" << in0.shape()[0] << ", " << in0.shape()[1] << "]\n";
+        std::cerr << "  in1 (points):    [" << in1.shape()[0] << ", " << in1.shape()[1] << "]\n";
+        std::cerr << "  Expected: in0[1] == in1[0] (K must match)\n";
+    }
+    _ASSERT(in0.shape()[1] == in1.shape()[0]); // K must match: A[M,K] @ B[K,N]
+    
+    uint32_t M = in0.shape()[0];   // output dimension (rows)
+    uint32_t K = in0.shape()[1];   // intermediate dimension
+    uint32_t N = in1.shape()[1];   // points (columns)
     
     // Output shape: [M, N]
     (*this)["out0"] = Tensor(M, N);
@@ -1682,18 +1770,19 @@ void MatMulNode::prepare()
 
 void MatMulNode::run(CommandBuffer cmdBuff)
 {
-    Tensor& in0 = (*this)["in0"];   // [K, N]
-    Tensor& in1 = (*this)["in1"];   // [M, K]
+    // PyTorch convention: C = A @ B
+    Tensor& in0 = (*this)["in0"];   // [M, K] - transform (A in shader)
+    Tensor& in1 = (*this)["in1"];   // [K, N] - points (B in shader)
     Tensor& out0 = (*this)["out0"]; // [M, N]
     
-    uint32_t K = in0.shape()[0];  // intermediate dimension
-    uint32_t N = in0.shape()[1];  // points (inner)
-    uint32_t M = in1.shape()[0];  // output dimension (outer)
+    uint32_t M = in0.shape()[0];  // output dimension (rows)
+    uint32_t K = in0.shape()[1];  // intermediate dimension
+    uint32_t N = in1.shape()[1];  // points (columns)
     
     matmulDescSet.write({
         out0.buffer(),
-        in0.buffer(),
-        in1.buffer()
+        in0.buffer(),  // binding 1: A = transform [M, K]
+        in1.buffer()   // binding 2: B = points [K, N]
     });
     
     uint32_t pc[] = {M, K, N};

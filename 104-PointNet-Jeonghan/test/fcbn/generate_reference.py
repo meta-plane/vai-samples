@@ -10,6 +10,7 @@ import torch.nn.functional as F
 import numpy as np
 import json
 from pathlib import Path
+from safetensors.torch import save_file
 
 # Fixed seed
 torch.manual_seed(42)
@@ -48,9 +49,9 @@ input_np = input_data.numpy()      # [1, 128]
 output_np = output_data.numpy()    # [1, 256]
 
 # Extract weights and biases
-# FC: Linear weight [O, I] -> transpose to [I, O]
-fc_weight = fc.weight.detach().transpose(0, 1).numpy()  # [128, 256]
-fc_bias = fc.bias.detach().numpy()                       # [256]
+# FC: Keep PyTorch format [O, I] (no transpose!)
+fc_weight = fc.weight.detach().numpy()  # [256, 128]
+fc_bias = fc.bias.detach().numpy()       # [256]
 
 # BN: BatchNorm parameters
 bn_mean = bn.running_mean.numpy()     # [256]
@@ -59,7 +60,7 @@ bn_gamma = bn.weight.detach().numpy() # [256]
 bn_beta = bn.bias.detach().numpy()    # [256]
 
 print(f"\nWeights:")
-print(f"  FC weight: [{I}, {O}]")
+print(f"  FC weight: [{O}, {I}] (PyTorch format)")
 print(f"  FC bias:   [{O}]")
 print(f"  BN mean:   [{O}]")
 print(f"  BN var:    [{O}]")
@@ -79,7 +80,7 @@ data = {
     "shape": [float(I), float(O)]                  # [128, 256]
 }
 
-# Save JSON
+# Save JSON (backward compatibility)
 output_dir = Path("test/fcbn")
 output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -87,5 +88,23 @@ json_path = output_dir / "reference.json"
 with open(json_path, 'w') as f:
     json.dump(data, f)
 
-print(f"\n✓ Saved to {json_path}")
+# Save SafeTensors (preferred format)
+tensors = {
+    "input": torch.from_numpy(input_np).contiguous(),
+    "expected": torch.from_numpy(output_np).contiguous(),
+    "weight": torch.from_numpy(fc_weight).contiguous(),
+    "bias": torch.from_numpy(fc_bias).contiguous(),
+    "mean": torch.from_numpy(bn_mean).contiguous(),
+    "var": torch.from_numpy(bn_var).contiguous(),
+    "gamma": torch.from_numpy(bn_gamma).contiguous(),
+    "beta": torch.from_numpy(bn_beta).contiguous(),
+    "shape": torch.tensor([I, O], dtype=torch.float32)
+}
+
+safetensors_path = output_dir / "reference.safetensors"
+save_file(tensors, str(safetensors_path))
+
+print(f"\n✅ Saved to:")
+print(f"  - {json_path} (legacy)")
+print(f"  - {safetensors_path} (preferred)")
 print("="*60)
