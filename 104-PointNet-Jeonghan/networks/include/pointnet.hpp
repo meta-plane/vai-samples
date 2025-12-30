@@ -13,6 +13,38 @@
 namespace networks
 {
 
+// Performance optimization flags
+// Set to true to use fused/optimized kernels
+#ifndef USE_FUSED_KERNELS
+#define USE_FUSED_KERNELS 1  // Default: enabled
+#endif
+
+#ifndef USE_TREE_MAXPOOL
+#define USE_TREE_MAXPOOL 1   // Default: enabled
+#endif
+
+#ifndef USE_TILED_GEMM
+#define USE_TILED_GEMM 1     // Default: enabled (32x32 shared memory tiling)
+#endif
+
+// Conditional type aliases for optimized nodes
+#if USE_FUSED_KERNELS && USE_TILED_GEMM
+    using OptimizedMLPNode = TiledFusedPointWiseMLPNode;  // Best performance: Fused + Tiled
+    using OptimizedConvNode = FusedPointWiseConvNode;
+#elif USE_FUSED_KERNELS
+    using OptimizedMLPNode = FusedPointWiseMLPNode;
+    using OptimizedConvNode = FusedPointWiseConvNode;
+#else
+    using OptimizedMLPNode = PointWiseMLPNode;
+    using OptimizedConvNode = PointWiseConvNode;
+#endif
+
+#if USE_TREE_MAXPOOL
+    using OptimizedMaxPool1DNode = TreeMaxPooling1DNode;
+#else
+    using OptimizedMaxPool1DNode = MaxPooling1DNode;
+#endif
+
 // FCSequence template class
 template<uint32_t nBlocks>
 class FCSequence : public NodeGroup
@@ -149,12 +181,12 @@ template<std::size_t N>
 FCBNSequence(const uint32_t (&)[N]) -> FCBNSequence<N - 1>;
 
 
-// MLPSequence template class
+// MLPSequence template class (uses optimized fused kernels when enabled)
 template<uint32_t nBlocks>
 class MLPSequence : public NodeGroup
 {
     uint32_t dims[nBlocks + 1];
-    std::unique_ptr<PointWiseMLPNode> blocks[nBlocks];
+    std::unique_ptr<OptimizedMLPNode> blocks[nBlocks];  // Uses FusedPointWiseMLPNode when USE_FUSED_KERNELS=1
 
 public:
     MLPSequence(const uint32_t(&channels)[nBlocks + 1])
@@ -164,7 +196,7 @@ public:
             dims[i] = channels[i];
 
         for (uint32_t i = 0; i < nBlocks; ++i)
-            blocks[i] = std::make_unique<PointWiseMLPNode>(dims[i], dims[i + 1]);
+            blocks[i] = std::make_unique<OptimizedMLPNode>(dims[i], dims[i + 1]);
 
         for (uint32_t i = 0; i < nBlocks - 1; ++i)
             *blocks[i] - *blocks[i + 1];
@@ -188,19 +220,19 @@ template<std::size_t N>
 MLPSequence(const uint32_t (&)[N]) -> MLPSequence<N - 1>;
 
 
-// TNetBlock class - Transformation Matrix Generator
+// TNetBlock class - Transformation Matrix Generator (uses optimized nodes)
 // Input: [N, inputDim] point cloud
 // Output: [outDim, outDim] transformation matrix
 class TNetBlock : public NodeGroup
 {
     uint32_t outDim;
-    
+
     // Transformation matrix generation pipeline
-    MLPSequence<3> mlp;              // [N, inputDim] → [N, 64] → [N, 128] → [N, 1024]
-    MaxPooling1DNode maxpool;        // [N, 1024] → [1024]
-    FCBNSequence<3> fc;              // [1024] → [512] → [256] → [outDim²]
-    ReShapeNode reshape_matrix;      // [outDim²] → [outDim, outDim]
-    AddIdentityNode add_identity;    // [outDim, outDim] + I → [outDim, outDim]
+    MLPSequence<3> mlp;                  // [N, inputDim] → [N, 64] → [N, 128] → [N, 1024]
+    OptimizedMaxPool1DNode maxpool;      // [N, 1024] → [1024] (Tree reduction when enabled)
+    FCBNSequence<3> fc;                  // [1024] → [512] → [256] → [outDim²]
+    ReShapeNode reshape_matrix;          // [outDim²] → [outDim, outDim]
+    AddIdentityNode add_identity;        // [outDim, outDim] + I → [outDim, outDim]
 
 public:
     // inputDim: input feature channels
@@ -237,20 +269,20 @@ public:
 };
 
 
-// PointNetEncoder class (yanx27 structure)
+// PointNetEncoder class (yanx27 structure) - uses optimized nodes
 // Input: [N, channel] point cloud (channel = 3 or 6 for normal_channel)
 // Output: [N, 1024] point-wise features
 class PointNetEncoder : public NodeGroup
 {
     uint32_t channel;          // Input channel dimension (3, 6, or 9)
-    
+
     IdentityNode split_for_stn;    // Split input: one for STN, one for transform
     IdentityNode split_for_slice;  // Split input: one for xyz, one for rest
     SliceNode slice_xyz;           // Extract xyz [0:3]
     SliceNode slice_rest;          // Extract rest [3:channel] if channel > 3
     ConcatNode concat_after_transform; // Concat transformed xyz + rest
     IdentityNode split2;           // Split conv1 output for FSTN dual-path
-    
+
 public:  // Make public for direct access
     TNetBlock stn;             // input transform: channel → 3x3 matrix (STN3d)
     MatMulNode matmul1;        // apply transform: [N, 3] @ [3, 3] → [N, 3]
@@ -258,7 +290,7 @@ public:  // Make public for direct access
     TNetBlock fstn;            // feature transform: generates 64x64 matrix (STNkd)
     MatMulNode matmul2;        // apply transform: [N,64] @ [64,64] → [N,64]
     MLPSequence<1> conv2;      // (64 → 128) - second convolution with ReLU
-    PointWiseConvNode conv3;   // (128 → 1024) - third convolution (Conv+BN, NO ReLU!)
+    OptimizedConvNode conv3;   // (128 → 1024) - third convolution (Conv+BN, NO ReLU!) - Fused when enabled
 
 public:
     PointNetEncoder(uint32_t channel = 3)
@@ -375,16 +407,16 @@ public:
     }
 };
 
-// PointNetSegment class - yanx27 semantic segmentation structure
+// PointNetSegment class - yanx27 semantic segmentation structure (uses optimized nodes)
 class PointNetSegment : public NeuralNet
 {
-    PointNetEncoder encoder;    // PointNet encoder: [N, 9] → [N, 1024]
-    MaxPooling1DNode maxpool;   // Global max pooling: [1024, N] → [1024]
-    ReShapeNode reshape_global; // Reshape: [1024] → [1024, 1]
-    BroadcastNode broadcast;    // Broadcast global feature: [1024, 1] → [1024, N]
-    ConcatNode concat;          // Concatenate: [N, 64] + [N, 1024] → [N, 1088]
-    MLPSequence<3> segHead;     // Segmentation head: conv1-3 with BN+ReLU
-    PointWiseLinearNode conv4;  // Final layer: conv4 (NO BN, NO ReLU) - matches PyTorch
+    PointNetEncoder encoder;         // PointNet encoder: [N, 9] → [N, 1024]
+    OptimizedMaxPool1DNode maxpool;  // Global max pooling: [1024, N] → [1024] (Tree reduction when enabled)
+    ReShapeNode reshape_global;      // Reshape: [1024] → [1024, 1]
+    BroadcastNode broadcast;         // Broadcast global feature: [1024, 1] → [1024, N]
+    ConcatNode concat;               // Concatenate: [N, 64] + [N, 1024] → [N, 1088]
+    MLPSequence<3> segHead;          // Segmentation head: conv1-3 with BN+ReLU (Fused when enabled)
+    PointWiseLinearNode conv4;       // Final layer: conv4 (NO BN, NO ReLU) - matches PyTorch
 
     uint32_t numClasses;
 

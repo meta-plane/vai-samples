@@ -128,7 +128,9 @@ inline std::vector<float> loadFromPly(const std::string& filename) {
  *   num_vertices num_faces num_edges
  *   x y z (for each vertex)
  *   ... (face data, which we ignore)
- * 
+ *
+ * Also handles combined format: OFF9293 10182 0 (header on same line as counts)
+ *
  * @param filename Path to the .off file
  * @return Vector of points [N, 3] flattened
  */
@@ -137,49 +139,59 @@ inline std::vector<float> loadFromOff(const std::string& filename) {
     if (!file.is_open()) {
         throw std::runtime_error("Failed to open file: " + filename);
     }
-    
+
     std::vector<float> points;
     std::string line;
-    
-    // Read first line (should be "OFF")
+
+    // Read first line (should be "OFF" or "OFFnnn nnn nnn")
     std::getline(file, line);
     if (line.find("OFF") == std::string::npos) {
         throw std::runtime_error("Invalid OFF file (missing header): " + filename);
     }
-    
+
     // Read counts: num_vertices num_faces num_edges
     int num_vertices = 0, num_faces = 0, num_edges = 0;
-    if (!std::getline(file, line)) {
-        throw std::runtime_error("Invalid OFF file (no counts): " + filename);
+
+    // Check if counts are on the same line as OFF (e.g., "OFF9293 10182 0")
+    if (line.length() > 3 && line.substr(0, 3) == "OFF") {
+        std::string counts_part = line.substr(3);  // Remove "OFF" prefix
+        std::istringstream count_iss(counts_part);
+        count_iss >> num_vertices >> num_faces >> num_edges;
     }
-    
-    std::istringstream count_iss(line);
-    count_iss >> num_vertices >> num_faces >> num_edges;
-    
+
+    // If counts not found on first line, read next line
+    if (num_vertices == 0) {
+        if (!std::getline(file, line)) {
+            throw std::runtime_error("Invalid OFF file (no counts): " + filename);
+        }
+        std::istringstream count_iss(line);
+        count_iss >> num_vertices >> num_faces >> num_edges;
+    }
+
     if (num_vertices <= 0) {
         throw std::runtime_error("Invalid OFF file (zero vertices): " + filename);
     }
-    
+
     // Read vertex data
     points.reserve(num_vertices * 3);
-    
+
     for (int i = 0; i < num_vertices && std::getline(file, line); ++i) {
         std::istringstream iss(line);
         float x, y, z;
-        
+
         if (iss >> x >> y >> z) {
             points.push_back(x);
             points.push_back(y);
             points.push_back(z);
         }
     }
-    
+
     file.close();
-    
+
     if (points.empty()) {
         throw std::runtime_error("No valid points found in OFF file: " + filename);
     }
-    
+
     return points;
 }
 
@@ -302,29 +314,31 @@ inline void printStats(const std::vector<float>& points) {
 
 /**
  * Resample point cloud to fixed number of points
- * Uses uniform sampling without replacement
- * 
+ * Uses uniform sampling - supports both downsampling and upsampling (with replacement)
+ *
  * @param points Input point cloud (xyz...)
  * @param num_samples Target number of points
  * @return Resampled point cloud
  */
 inline std::vector<float> resample(const std::vector<float>& points, size_t num_samples) {
     size_t num_points = points.size() / 3;
-    
+
     if (num_points == 0) return {};
-    if (num_points <= num_samples) return points;  // Already small enough
-    
+    if (num_points == num_samples) return points;  // Already correct size
+
     std::vector<float> result;
     result.reserve(num_samples * 3);
-    
-    // Uniform sampling
+
+    // Uniform sampling (works for both up and down sampling)
     for (size_t i = 0; i < num_samples; ++i) {
         size_t idx = (i * num_points) / num_samples;
+        // Clamp index to valid range (safety for edge cases)
+        if (idx >= num_points) idx = num_points - 1;
         result.push_back(points[idx * 3 + 0]);
         result.push_back(points[idx * 3 + 1]);
         result.push_back(points[idx * 3 + 2]);
     }
-    
+
     return result;
 }
 

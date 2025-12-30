@@ -29,15 +29,49 @@ class PointWiseMLPNode : public Node
 
     ComputePipeline gemm;
     DescriptorSet gemmDesc;
-    
+
     ComputePipeline batchnorm;
     DescriptorSet batchnormDesc;
-    
+
     ComputePipeline relu;
     DescriptorSet reluDesc;
 
 public:
     PointWiseMLPNode(uint32_t inDim, uint32_t outDim);
+
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+
+// FusedPointWiseMLPNode: Conv1x1 + BatchNorm1D + ReLU in single kernel
+// Performance optimization: eliminates 2 barriers and 2 intermediate buffers
+class FusedPointWiseMLPNode : public Node
+{
+    uint32_t Cin, Cout;
+
+    ComputePipeline fusedPipeline;
+    DescriptorSet fusedDesc;
+
+public:
+    FusedPointWiseMLPNode(uint32_t inDim, uint32_t outDim);
+
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+
+// TiledFusedPointWiseMLPNode: Tiled version with shared memory
+// Best performance for larger matrices (Cin >= 64, Cout >= 64)
+class TiledFusedPointWiseMLPNode : public Node
+{
+    uint32_t Cin, Cout;
+
+    ComputePipeline fusedPipeline;
+    DescriptorSet fusedDesc;
+
+public:
+    TiledFusedPointWiseMLPNode(uint32_t inDim, uint32_t outDim);
 
     void prepare() override;
     void run(CommandBuffer cmdBuff) override;
@@ -56,6 +90,23 @@ class PointWiseConvNode : public Node
 
 public:
     PointWiseConvNode(uint32_t inDim, uint32_t outDim);
+
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+
+// FusedPointWiseConvNode: Conv1x1 + BatchNorm1D in single kernel (no ReLU)
+// Performance optimization: eliminates 1 barrier and 1 intermediate buffer
+class FusedPointWiseConvNode : public Node
+{
+    uint32_t Cin, Cout;
+
+    ComputePipeline fusedPipeline;
+    DescriptorSet fusedDesc;
+
+public:
+    FusedPointWiseConvNode(uint32_t inDim, uint32_t outDim);
 
     void prepare() override;
     void run(CommandBuffer cmdBuff) override;
@@ -115,6 +166,22 @@ class MaxPooling1DNode : public Node
 
 public:
     MaxPooling1DNode();
+    void prepare() override;
+    void run(CommandBuffer cmdBuff) override;
+};
+
+
+// TreeMaxPooling1DNode: Tree reduction-based max pooling
+// Performance optimization: O(N) -> O(log N) parallel reduction
+class TreeMaxPooling1DNode : public Node
+{
+    uint32_t C;
+
+    ComputePipeline maxpool;
+    DescriptorSet desc;
+
+public:
+    TreeMaxPooling1DNode();
     void prepare() override;
     void run(CommandBuffer cmdBuff) override;
 };

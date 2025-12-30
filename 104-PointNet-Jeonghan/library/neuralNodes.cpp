@@ -155,6 +155,53 @@ void main() {
     out0[c] = m;
 })";
 
+// Tree Reduction MaxPool1D shader: O(N) -> O(log N) parallel reduction
+// Significantly faster for large N (e.g., 1024+ points)
+static const char* src_maxpool1d_tree = R"(
+#version 450
+#define BLOCK_SIZE 256
+#define FLT_MIN -3.402823466e+38
+
+layout(local_size_x = BLOCK_SIZE) in;
+
+layout(set = 0, binding = 0) buffer OutBuffer { float out0[]; };
+layout(set = 0, binding = 1) buffer InBuffer { float in0[]; };
+
+layout(push_constant) uniform PushConstants {
+    int C;  // number of channels (outer dimension)
+    int N;  // number of points (inner dimension)
+};
+
+shared float sdata[BLOCK_SIZE];
+
+void main() {
+    uint c = gl_WorkGroupID.x;       // channel index
+    uint tid = gl_LocalInvocationID.x;  // thread in workgroup
+
+    if (c >= C) return;
+
+    // Phase 1: Each thread finds max across strided elements
+    float myMax = FLT_MIN;
+    for (uint n = tid; n < N; n += BLOCK_SIZE) {
+        myMax = max(myMax, in0[c * N + n]);
+    }
+    sdata[tid] = myMax;
+    barrier();
+
+    // Phase 2: Tree reduction in shared memory
+    for (uint s = BLOCK_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] = max(sdata[tid], sdata[tid + s]);
+        }
+        barrier();
+    }
+
+    // Phase 3: Thread 0 writes final result
+    if (tid == 0) {
+        out0[c] = sdata[0];
+    }
+})";
+
 static const char* src_im2col = R"(
 #version 450
 layout(local_size_x = 64, local_size_y = 16) in;
@@ -682,6 +729,163 @@ void main() {
 }
 )";
 
+// Fused Conv+BN+ReLU shader: Single kernel for PointWiseMLPNode
+// Eliminates 2 barriers and 2 intermediate buffers
+static const char* src_gemm_bn_relu_fused = R"(
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) buffer OutBuffer { float C[]; };
+layout(set = 0, binding = 1) buffer InBuffer { float A[]; };
+layout(set = 0, binding = 2) buffer Weight { float B[]; };
+layout(set = 0, binding = 3) buffer Bias { float b[]; };
+layout(set = 0, binding = 4) buffer BnMean { float bn_mean[]; };
+layout(set = 0, binding = 5) buffer BnVar { float bn_var[]; };
+layout(set = 0, binding = 6) buffer BnGamma { float bn_gamma[]; };
+layout(set = 0, binding = 7) buffer BnBeta { float bn_beta[]; };
+
+// C(NxM) = B(NxK)*A(KxM) + b, then BatchNorm, then ReLU
+layout(push_constant) uniform PushConstants {
+    int N;      // output channels (outer dimension)
+    int K;      // input channels
+    int M;      // points (inner dimension)
+    float eps;  // BatchNorm epsilon (1e-5)
+};
+
+void main()
+{
+    int m = int(gl_GlobalInvocationID.x);  // point index (inner)
+    int n = int(gl_GlobalInvocationID.y);  // output channel (outer)
+
+    if (n >= N || m >= M)
+        return;
+
+    // Stage 1: GEMM - C[n,m] = sum(B[n,k] * A[k,m]) + bias[n]
+    float sum = b[n];
+    for (int k = 0; k < K; ++k)
+        sum += B[n * K + k] * A[k * M + m];
+
+    // Stage 2: BatchNorm - normalized = gamma * (x - mean) / sqrt(var + eps) + beta
+    float normalized = (sum - bn_mean[n]) / sqrt(bn_var[n] + eps);
+    float bn_out = bn_gamma[n] * normalized + bn_beta[n];
+
+    // Stage 3: ReLU
+    C[n * M + m] = max(bn_out, 0.0f);
+}
+)";
+
+// Tiled Fused Conv+BN+ReLU shader: Single kernel with shared memory tiling
+// Higher performance for larger matrices (Cin >= 64, Cout >= 64)
+static const char* src_gemm_bn_relu_fused_tiled = R"(
+#version 450
+#define TILE_SIZE 32
+
+layout(local_size_x = TILE_SIZE, local_size_y = TILE_SIZE) in;
+
+layout(set = 0, binding = 0) buffer OutBuffer { float C[]; };
+layout(set = 0, binding = 1) buffer InBuffer { float A[]; };
+layout(set = 0, binding = 2) buffer Weight { float B[]; };
+layout(set = 0, binding = 3) buffer Bias { float b[]; };
+layout(set = 0, binding = 4) buffer BnMean { float bn_mean[]; };
+layout(set = 0, binding = 5) buffer BnVar { float bn_var[]; };
+layout(set = 0, binding = 6) buffer BnGamma { float bn_gamma[]; };
+layout(set = 0, binding = 7) buffer BnBeta { float bn_beta[]; };
+
+// C(NxM) = B(NxK)*A(KxM) + b, then BatchNorm, then ReLU
+layout(push_constant) uniform PushConstants {
+    int N;      // output channels (outer dimension)
+    int K;      // input channels
+    int M;      // points (inner dimension)
+    float eps;  // BatchNorm epsilon (1e-5)
+};
+
+shared float As[TILE_SIZE * TILE_SIZE];
+shared float Bs[TILE_SIZE * TILE_SIZE];
+
+void main()
+{
+    int m = int(gl_GlobalInvocationID.x);  // point index (inner)
+    int n = int(gl_GlobalInvocationID.y);  // output channel (outer)
+    int _m = int(gl_LocalInvocationID.x);
+    int _n = int(gl_LocalInvocationID.y);
+    bool validThread = (n < N && m < M);
+
+    float acc = 0.0;
+
+    // Tiled GEMM
+    for (int k0 = 0; k0 < K; k0 += TILE_SIZE)
+    {
+        // Load A tile: As[k, _m] = A[k0+_n, m]
+        int k_idx = k0 + _n;
+        As[_n * TILE_SIZE + _m] = (k_idx < K && m < M) ? A[k_idx * M + m] : 0.0;
+
+        // Load B tile: Bs[_n, k] = B[n, k0+_m]
+        int k_idx_b = k0 + _m;
+        Bs[_n * TILE_SIZE + _m] = (n < N && k_idx_b < K) ? B[n * K + k_idx_b] : 0.0;
+        barrier();
+
+        // Compute: accumulate dot product
+        for (int k = 0; k < TILE_SIZE; ++k)
+            acc += Bs[_n * TILE_SIZE + k] * As[k * TILE_SIZE + _m];
+        barrier();
+    }
+
+    if (!validThread)
+        return;
+
+    // Add bias
+    float sum = acc + b[n];
+
+    // BatchNorm
+    float normalized = (sum - bn_mean[n]) / sqrt(bn_var[n] + eps);
+    float bn_out = bn_gamma[n] * normalized + bn_beta[n];
+
+    // ReLU
+    C[n * M + m] = max(bn_out, 0.0f);
+}
+)";
+
+// Fused Conv+BN shader (no ReLU): For PointWiseConvNode
+static const char* src_gemm_bn_fused = R"(
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) buffer OutBuffer { float C[]; };
+layout(set = 0, binding = 1) buffer InBuffer { float A[]; };
+layout(set = 0, binding = 2) buffer Weight { float B[]; };
+layout(set = 0, binding = 3) buffer Bias { float b[]; };
+layout(set = 0, binding = 4) buffer BnMean { float bn_mean[]; };
+layout(set = 0, binding = 5) buffer BnVar { float bn_var[]; };
+layout(set = 0, binding = 6) buffer BnGamma { float bn_gamma[]; };
+layout(set = 0, binding = 7) buffer BnBeta { float bn_beta[]; };
+
+// C(NxM) = B(NxK)*A(KxM) + b, then BatchNorm (no ReLU)
+layout(push_constant) uniform PushConstants {
+    int N;      // output channels (outer dimension)
+    int K;      // input channels
+    int M;      // points (inner dimension)
+    float eps;  // BatchNorm epsilon (1e-5)
+};
+
+void main()
+{
+    int m = int(gl_GlobalInvocationID.x);  // point index (inner)
+    int n = int(gl_GlobalInvocationID.y);  // output channel (outer)
+
+    if (n >= N || m >= M)
+        return;
+
+    // Stage 1: GEMM
+    float sum = b[n];
+    for (int k = 0; k < K; ++k)
+        sum += B[n * K + k] * A[k * M + m];
+
+    // Stage 2: BatchNorm (no ReLU)
+    float normalized = (sum - bn_mean[n]) / sqrt(bn_var[n] + eps);
+    C[n * M + m] = bn_gamma[n] * normalized + bn_beta[n];
+}
+)";
+
 // Matrix multiplication shader: C[M, N] = B[M, K] @ A[K, N]
 // No bias addition (pure matrix multiplication)
 // For TNet: transformation matrix [3,3] or [64,64]
@@ -1125,6 +1329,300 @@ void PointWiseConvNode::run(CommandBuffer cmdBuff)
 
 
 /////////////////////////////////////////////////////////////////////////////////////////
+// FusedPointWiseMLPNode (Conv1x1 + BatchNorm1D + ReLU in single kernel)
+// Performance optimization: eliminates 2 barriers and 2 intermediate buffers
+/////////////////////////////////////////////////////////////////////////////////////////
+FusedPointWiseMLPNode::FusedPointWiseMLPNode(uint32_t inDim, uint32_t outDim)
+: Cin(inDim)
+, Cout(outDim)
+{
+    setName("FusedPointWiseMLPNode");
+    // Slots for full MLP chain (same as PointWiseMLPNode)
+    addSlot("in0", NodeSlot::input);      // [Cin, N]
+    addSlot("out0", NodeSlot::output);    // [Cout, N]
+
+    // Conv weights
+    addSlot("weight", NodeSlot::input);   // [Cout, Cin]
+    addSlot("bias", NodeSlot::input);     // [Cout]
+
+    // BatchNorm parameters
+    addSlot("bn_mean", NodeSlot::input);  // [Cout]
+    addSlot("bn_var", NodeSlot::input);   // [Cout]
+    addSlot("bn_gamma", NodeSlot::input); // [Cout]
+    addSlot("bn_beta", NodeSlot::input);  // [Cout]
+
+    // Create single fused pipeline
+    fusedPipeline = requestPipeline(src_gemm_bn_relu_fused);
+    fusedDesc = fusedPipeline.descSetLayout(0).newDescSet(gDestSetPool);
+}
+
+void FusedPointWiseMLPNode::prepare()
+{
+    const auto& inShape = (*this)["in0"].shape();
+    _ASSERT(inShape.size() == 2);
+    _ASSERT(inShape[0] == Cin);  // [Cin, N] layout
+    _ASSERT((*this)["weight"].validShape());
+    _ASSERT((*this)["weight"].isShapeOf(Cout, Cin));  // PyTorch format: [Cout, Cin]
+    _ASSERT((*this)["bias"].validShape());
+    _ASSERT((*this)["bias"].isShapeOf(Cout));
+
+    (*this)["out0"] = Tensor(Cout, inShape[1]);  // [Cout, N]
+
+    // Set default BatchNorm parameters if not provided
+    if (!(*this)["bn_mean"].validShape()) {
+        std::vector<float> zeros(Cout, 0.0f);
+        (*this)["bn_mean"] = Tensor(Cout).set(zeros);
+    }
+    if (!(*this)["bn_var"].validShape()) {
+        std::vector<float> ones(Cout, 1.0f);
+        (*this)["bn_var"] = Tensor(Cout).set(ones);
+    }
+    if (!(*this)["bn_gamma"].validShape()) {
+        std::vector<float> ones(Cout, 1.0f);
+        (*this)["bn_gamma"] = Tensor(Cout).set(ones);
+    }
+    if (!(*this)["bn_beta"].validShape()) {
+        std::vector<float> zeros(Cout, 0.0f);
+        (*this)["bn_beta"] = Tensor(Cout).set(zeros);
+    }
+}
+
+void FusedPointWiseMLPNode::run(CommandBuffer cmdBuff)
+{
+    const auto& inShape = (*this)["in0"].shape();
+    uint32_t Cin_actual = inShape[0];  // input channels (outer)
+    uint32_t M = inShape[1];           // points (inner)
+
+    // Single dispatch: Conv + BN + ReLU fused
+    fusedDesc.write({
+        (*this)["out0"].buffer(),
+        (*this)["in0"].buffer(),
+        (*this)["weight"].buffer(),
+        (*this)["bias"].buffer(),
+        (*this)["bn_mean"].buffer(),
+        (*this)["bn_var"].buffer(),
+        (*this)["bn_gamma"].buffer(),
+        (*this)["bn_beta"].buffer(),
+    });
+
+    // Push constants: N (Cout), K (Cin), M (points), eps (16x16 workgroup)
+    struct { int N, K, M; float eps; } pc = {
+        static_cast<int>(Cout),
+        static_cast<int>(Cin_actual),
+        static_cast<int>(M),
+        1e-5f
+    };
+
+    cmdBuff
+        .bindPipeline(fusedPipeline)
+        .bindDescSets({fusedDesc})
+        .setPushConstants(0, sizeof(pc), &pc)
+        .dispatch0(CEIL_DIV(M, 16), CEIL_DIV(Cout, 16))  // x=M, y=N (16x16)
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["out0"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// TiledFusedPointWiseMLPNode (Conv1x1 + BatchNorm1D + ReLU with 32x32 tiling)
+// Best performance for larger matrices using shared memory
+/////////////////////////////////////////////////////////////////////////////////////////
+TiledFusedPointWiseMLPNode::TiledFusedPointWiseMLPNode(uint32_t inDim, uint32_t outDim)
+: Cin(inDim)
+, Cout(outDim)
+{
+    setName("TiledFusedPointWiseMLPNode");
+    // Slots for full MLP chain (same as FusedPointWiseMLPNode)
+    addSlot("in0", NodeSlot::input);      // [Cin, N]
+    addSlot("out0", NodeSlot::output);    // [Cout, N]
+
+    // Conv weights
+    addSlot("weight", NodeSlot::input);   // [Cout, Cin]
+    addSlot("bias", NodeSlot::input);     // [Cout]
+
+    // BatchNorm parameters
+    addSlot("bn_mean", NodeSlot::input);  // [Cout]
+    addSlot("bn_var", NodeSlot::input);   // [Cout]
+    addSlot("bn_gamma", NodeSlot::input); // [Cout]
+    addSlot("bn_beta", NodeSlot::input);  // [Cout]
+
+    // Create tiled fused pipeline (32x32 workgroup with shared memory)
+    fusedPipeline = requestPipeline(src_gemm_bn_relu_fused_tiled);
+    fusedDesc = fusedPipeline.descSetLayout(0).newDescSet(gDestSetPool);
+}
+
+void TiledFusedPointWiseMLPNode::prepare()
+{
+    const auto& inShape = (*this)["in0"].shape();
+    _ASSERT(inShape.size() == 2);
+    _ASSERT(inShape[0] == Cin);  // [Cin, N] layout
+    _ASSERT((*this)["weight"].validShape());
+    _ASSERT((*this)["weight"].isShapeOf(Cout, Cin));  // PyTorch format: [Cout, Cin]
+    _ASSERT((*this)["bias"].validShape());
+    _ASSERT((*this)["bias"].isShapeOf(Cout));
+
+    (*this)["out0"] = Tensor(Cout, inShape[1]);  // [Cout, N]
+
+    // Set default BatchNorm parameters if not provided
+    if (!(*this)["bn_mean"].validShape()) {
+        std::vector<float> zeros(Cout, 0.0f);
+        (*this)["bn_mean"] = Tensor(Cout).set(zeros);
+    }
+    if (!(*this)["bn_var"].validShape()) {
+        std::vector<float> ones(Cout, 1.0f);
+        (*this)["bn_var"] = Tensor(Cout).set(ones);
+    }
+    if (!(*this)["bn_gamma"].validShape()) {
+        std::vector<float> ones(Cout, 1.0f);
+        (*this)["bn_gamma"] = Tensor(Cout).set(ones);
+    }
+    if (!(*this)["bn_beta"].validShape()) {
+        std::vector<float> zeros(Cout, 0.0f);
+        (*this)["bn_beta"] = Tensor(Cout).set(zeros);
+    }
+}
+
+void TiledFusedPointWiseMLPNode::run(CommandBuffer cmdBuff)
+{
+    const auto& inShape = (*this)["in0"].shape();
+    uint32_t Cin_actual = inShape[0];  // input channels (outer)
+    uint32_t M = inShape[1];           // points (inner)
+
+    // Single dispatch: Conv + BN + ReLU fused with tiling
+    fusedDesc.write({
+        (*this)["out0"].buffer(),
+        (*this)["in0"].buffer(),
+        (*this)["weight"].buffer(),
+        (*this)["bias"].buffer(),
+        (*this)["bn_mean"].buffer(),
+        (*this)["bn_var"].buffer(),
+        (*this)["bn_gamma"].buffer(),
+        (*this)["bn_beta"].buffer(),
+    });
+
+    // Push constants: N (Cout), K (Cin), M (points), eps (32x32 workgroup)
+    struct { int N, K, M; float eps; } pc = {
+        static_cast<int>(Cout),
+        static_cast<int>(Cin_actual),
+        static_cast<int>(M),
+        1e-5f
+    };
+
+    cmdBuff
+        .bindPipeline(fusedPipeline)
+        .bindDescSets({fusedDesc})
+        .setPushConstants(0, sizeof(pc), &pc)
+        .dispatch0(CEIL_DIV(M, 32), CEIL_DIV(Cout, 32))  // x=M, y=N (32x32 tiling)
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["out0"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// FusedPointWiseConvNode (Conv1x1 + BatchNorm1D in single kernel, no ReLU)
+// Performance optimization: eliminates 1 barrier and 1 intermediate buffer
+/////////////////////////////////////////////////////////////////////////////////////////
+FusedPointWiseConvNode::FusedPointWiseConvNode(uint32_t inDim, uint32_t outDim)
+: Cin(inDim)
+, Cout(outDim)
+{
+    setName("FusedPointWiseConvNode");
+    // Slots for Conv + BN (same as PointWiseConvNode)
+    addSlot("in0", NodeSlot::input);      // [Cin, N]
+    addSlot("out0", NodeSlot::output);    // [Cout, N]
+
+    // Conv weights
+    addSlot("weight", NodeSlot::input);   // [Cout, Cin]
+    addSlot("bias", NodeSlot::input);     // [Cout]
+
+    // BatchNorm parameters
+    addSlot("bn_mean", NodeSlot::input);  // [Cout]
+    addSlot("bn_var", NodeSlot::input);   // [Cout]
+    addSlot("bn_gamma", NodeSlot::input); // [Cout]
+    addSlot("bn_beta", NodeSlot::input);  // [Cout]
+
+    // Create single fused pipeline (no ReLU)
+    fusedPipeline = requestPipeline(src_gemm_bn_fused);
+    fusedDesc = fusedPipeline.descSetLayout(0).newDescSet(gDestSetPool);
+}
+
+void FusedPointWiseConvNode::prepare()
+{
+    const auto& inShape = (*this)["in0"].shape();
+    _ASSERT(inShape.size() == 2);
+    _ASSERT(inShape[0] == Cin);  // [Cin, N] layout
+    _ASSERT((*this)["weight"].validShape());
+    _ASSERT((*this)["weight"].isShapeOf(Cout, Cin));  // PyTorch format: [Cout, Cin]
+    _ASSERT((*this)["bias"].validShape());
+    _ASSERT((*this)["bias"].isShapeOf(Cout));
+
+    (*this)["out0"] = Tensor(Cout, inShape[1]);  // [Cout, N]
+
+    // Set default BatchNorm parameters if not provided
+    if (!(*this)["bn_mean"].validShape()) {
+        std::vector<float> zeros(Cout, 0.0f);
+        (*this)["bn_mean"] = Tensor(Cout).set(zeros);
+    }
+    if (!(*this)["bn_var"].validShape()) {
+        std::vector<float> ones(Cout, 1.0f);
+        (*this)["bn_var"] = Tensor(Cout).set(ones);
+    }
+    if (!(*this)["bn_gamma"].validShape()) {
+        std::vector<float> ones(Cout, 1.0f);
+        (*this)["bn_gamma"] = Tensor(Cout).set(ones);
+    }
+    if (!(*this)["bn_beta"].validShape()) {
+        std::vector<float> zeros(Cout, 0.0f);
+        (*this)["bn_beta"] = Tensor(Cout).set(zeros);
+    }
+}
+
+void FusedPointWiseConvNode::run(CommandBuffer cmdBuff)
+{
+    const auto& inShape = (*this)["in0"].shape();
+    uint32_t Cin_actual = inShape[0];  // input channels (outer)
+    uint32_t M = inShape[1];           // points (inner)
+
+    // Single dispatch: Conv + BN fused (no ReLU)
+    fusedDesc.write({
+        (*this)["out0"].buffer(),
+        (*this)["in0"].buffer(),
+        (*this)["weight"].buffer(),
+        (*this)["bias"].buffer(),
+        (*this)["bn_mean"].buffer(),
+        (*this)["bn_var"].buffer(),
+        (*this)["bn_gamma"].buffer(),
+        (*this)["bn_beta"].buffer(),
+    });
+
+    // Push constants: N (Cout), K (Cin), M (points), eps
+    struct { int N, K, M; float eps; } pc = {
+        static_cast<int>(Cout),
+        static_cast<int>(Cin_actual),
+        static_cast<int>(M),
+        1e-5f
+    };
+
+    cmdBuff
+        .bindPipeline(fusedPipeline)
+        .bindDescSets({fusedDesc})
+        .setPushConstants(0, sizeof(pc), &pc)
+        .dispatch0(CEIL_DIV(M, 16), CEIL_DIV(Cout, 16))  // x=M, y=N (16x16)
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["out0"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
 // PointWiseLinearNode (Conv1x1 only, NO BatchNorm, NO ReLU)
 // Used for final output layers (e.g., segmentation head conv4)
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -1348,6 +1846,56 @@ void MaxPooling1DNode::run(CommandBuffer cmdBuff)
             / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
         );
 }
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// TreeMaxPooling1DNode (Tree reduction-based max pooling)
+// Performance optimization: O(N) -> O(log N) parallel reduction
+/////////////////////////////////////////////////////////////////////////////////////////
+TreeMaxPooling1DNode::TreeMaxPooling1DNode()
+{
+    setName("TreeMaxPooling1DNode");
+    addSlot("in0", NodeSlot::input);   // [C, N]
+    addSlot("out0", NodeSlot::output); // [C]
+
+    maxpool = requestPipeline(src_maxpool1d_tree);
+    desc = maxpool.descSetLayout(0).newDescSet(gDestSetPool);
+}
+
+void TreeMaxPooling1DNode::prepare()
+{
+    const auto& inShape = (*this)["in0"].shape();
+    _ASSERT(inShape.size() == 2);
+    uint32_t C = inShape[0];  // [C, N] layout - channels is outer dimension
+    (*this)["out0"] = Tensor(C);
+}
+
+void TreeMaxPooling1DNode::run(CommandBuffer cmdBuff)
+{
+    const auto& inShape = (*this)["in0"].shape();
+    uint32_t C = inShape[0];  // channels (outer)
+    uint32_t N = inShape[1];  // points (inner)
+
+    desc.write({
+        (*this)["out0"].buffer(),
+        (*this)["in0"].buffer(),
+    });
+
+    uint32_t pc[] = {static_cast<int>(C), static_cast<int>(N)};
+
+    // Each workgroup handles one channel with BLOCK_SIZE=256 threads
+    cmdBuff
+        .bindPipeline(maxpool)
+        .bindDescSets({desc})
+        .setPushConstants(0, sizeof(pc), pc)
+        .dispatch0(C)  // One workgroup per channel
+        .barrier(
+            (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_WRITE)
+            / (*this)["out0"].buffer()
+            / (PIPELINE_STAGE::COMPUTE_SHADER, ACCESS::SHADER_READ)
+        );
+}
+
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // MaxPoolingNode

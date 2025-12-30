@@ -5,3 +5,4 @@ assets/
 temp*
 .github/
 .vscode/
+.cache/

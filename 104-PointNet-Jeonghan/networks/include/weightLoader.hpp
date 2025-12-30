@@ -174,8 +174,10 @@ private:
 
     /**
      * PointWiseConvNode 로딩 (Conv + BN, no ReLU)
+     * Template version to support both PointWiseConvNode and FusedPointWiseConvNode
      */
-    void loadPointWiseConv(PointWiseConvNode& node, const std::string& conv, const std::string& bn) {
+    template<typename ConvNodeType>
+    void loadPointWiseConv(ConvNodeType& node, const std::string& conv, const std::string& bn) {
         node["weight"] = Tensor(weights[conv + ".weight"]);
         node["bias"] = Tensor(weights[conv + ".bias"]);
         node["bn_mean"] = Tensor(weights[bn + ".running_mean"]);
